@@ -56,6 +56,7 @@ local atmosphere = require("fcs.atmosphere")
 local flight = require("fcs.flight")
 local actuators = require("fcs.actuators")
 local vectoring = require("fcs.vectoring")
+local lateralhold = require("fcs.lateralhold")
 
 local plan = {
     -- Enough for isActive without approaching lift. 16 RPM measures 13.0% of
@@ -87,8 +88,6 @@ local plan = {
     climbGain = 20,          -- run 19 held +20.0 cleanly; the ceiling is ~+23
     climbTimeoutSeconds = 90,
     propRpm = 64,            -- 52.1% of weight, the standard flight setting
-    holdSeconds = 6,
-    settleTimeoutSeconds = 90.0,
 
     -- B1: common-mode tilt, all four corners, symmetric so it makes force
     -- rather than torque.
@@ -97,28 +96,31 @@ local plan = {
     -- 0.52 * sin(3) * 11 = 0.30 blocks/s^2. Over a 2 s pulse that is
     -- 0.6 blocks/s and ~0.6 blocks travelled, and arresting it sweeps about as
     -- far again -- call it 2.4 blocks. The abort sits at 25.
-    lateralTilt = 3.0,
-    lateralSeconds = 2.0,
+    arrestSeconds = 20.0,
+    restThreshold = 0.25,
+    stepTilt = 8.0,
+    stepSeconds = 2.0,
+    holdStationSeconds = 30.0,
 
-    -- B2: differential tilt staircase -> roll torque. THE DAMPER'S GAIN.
+    -- B2 USED TO BE a differential-tilt staircase measuring roll torque, and it
+    -- is gone because it measured the wrong thing. Port and starboard corners
+    -- were commanded at OPPOSITE azimuths, which makes port push starboard and
+    -- starboard push port -- a YAW couple. Differential azimuth cannot produce
+    -- roll at all: vertical thrust goes as cos(tilt), which is identical for
+    -- +tilt and -tilt. It duly measured alpha = -0.055 deg/s^2, correctly, of
+    -- an axis it was not driving.
     --
-    -- A staircase rather than one pulse, through the origin, because that is
-    -- what phase A of axisresponse.lua does and it is the part of that tool
-    -- that never gave trouble.
-    --
-    -- Continuous actuation is the point here. The ion pulse could not go below
-    -- 7.42 deg/s^2, which crossed the 6 degree cap in under a second and left
-    -- roll with 6 samples -- the direct cause of runs 18 and 19. A small tilt
-    -- can be chosen to keep alpha near 2 deg/s^2, so the 6 degree budget lasts
-    -- ~2.5 s and yields ~14 samples on the SAME axis that kept failing.
-    torqueTilts = { 2, 4, 8 },
-    torqueSeconds = 2.5,
-    torqueMaxAngle = 6.0,
-    torqueSampleSeconds = 0.12,
-    torqueMinSamples = 5,
-    cancelTimeoutSeconds = 6.0,
+    -- Roll from the bearings needs differential tilt MAGNITUDE, and that is
+    -- marginal anyway: 0.084 deg/s^2 at 8 degrees, 0.295 at the 15 degree
+    -- clamp, against the 0.268 critical damping wants. The lateral force is the
+    -- strong axis of this actuator, so the tool now measures and uses that.
 
-    maxHorizontalDrift = 25,
+    -- Raised from 25. The craft ARRIVES at hover already drifting ~1.7
+    -- blocks/s, so a 25 block budget was consumed during the settle itself and
+    -- fired before any measurement began. This is a runaway guard, not a
+    -- station-keeping tolerance -- B3 reports the actual drift.
+    maxHorizontalDrift = 60,
+    abortArrestSeconds = 15.0,
 }
 
 local args = { ... }
@@ -394,230 +396,247 @@ end
 -- less than removing the force that is carrying the craft away.
 local function driftAbort(state)
     local drift = horizontalDrift(state)
-    if drift and drift > plan.maxHorizontalDrift then
-        for _, corner in ipairs(flight.CORNERS) do
-            pcall(actuators.setTilt, corner, 0, 0)
-        end
-        session.aborted = string.format("horizontal drift %.1f blocks", drift)
-        note(string.format("  *** ABORT: drifted %.1f blocks (limit %d) ***",
-            drift, plan.maxHorizontalDrift))
-        return "drift abort"
+    if not drift or drift <= plan.maxHorizontalDrift then return nil end
+
+    -- CLEARING THE TILTS IS NOT AN ABORT. The last run proved it: the limit
+    -- tripped at 25.3 blocks and the craft carried on to 65.1, because nothing
+    -- was left opposing a velocity it already had. Drag alone takes ~11 s to
+    -- bleed 1.7 blocks/s.
+    --
+    -- So the abort now uses the actuator this whole tool exists to
+    -- characterise: full opposing tilt, held until the craft is slow, and only
+    -- then neutral. It is the same law the hold loop runs, saturated.
+    session.aborted = string.format("horizontal drift %.1f blocks", drift)
+    note(string.format("  *** ABORT: drifted %.1f blocks (limit %d) -- arresting ***",
+        drift, plan.maxHorizontalDrift))
+
+    local deadline = os.epoch("utc") + plan.abortArrestSeconds * 1000
+    while os.epoch("utc") < deadline do
+        local now = session:readCheap()
+        local speed = horizontalSpeed(now)
+        if not speed or speed < plan.restThreshold then break end
+        local command = lateralhold.command(now, config.axes,
+            { gainDegreesPerSpeed = 99 })   -- saturate: this is not the moment to be gentle
+        commandAllTilts(command.tilt, command.azimuth)
+        session:trim(plan.climbGain, flight.MAX_CLIMB_RATE, 0, now)
+        session:send()
     end
-    return nil
+    clearAllTilts()
+    note(string.format("  abort arrest finished at %.3f blocks/s",
+        horizontalSpeed(session:readCheap()) or -1))
+    return "drift abort"
+end
+
+-- FIRE AND FORGET. actuators.setTilt blocks up to 1000 ms waiting for a reply,
+-- and the first hover run showed exactly what that costs inside a control
+-- loop: "no reply from the FR pod within 1000 ms" four times, each one a
+-- second in which no command of any kind went out.
+--
+-- set_tilt has no arm gate and no watchdog pod-side -- it is set-and-hold, by
+-- design -- so a dropped tilt is re-sent on the next iteration a fifth of a
+-- second later, which is a far better failure mode than stalling the loop.
+-- Confirmation still comes from telemetry (prop.tiltAngle), never the ack.
+local function sendTilt(corner, angle, azimuth)
+    return banks.send(corner, "set_tilt", {
+        angle = angle, azimuth = azimuth, bearing = nil, mirror = true,
+    })
+end
+
+local function commandAllTilts(angle, azimuth)
+    for _, corner in ipairs(flight.CORNERS) do
+        sendTilt(corner, angle, azimuth)
+    end
 end
 
 local function clearAllTilts()
     for _, corner in ipairs(flight.CORNERS) do
-        pcall(actuators.setTilt, corner, 0, 0)
+        sendTilt(corner, 0, 0)
     end
 end
 
--- B1: common-mode tilt on all four corners -> lateral force, minimal torque.
-local function runLateral()
+-- Drive the lateral-hold loop for a while, reporting what it achieved.
+--
+-- Returns the peak and final speed so a caller can gate on it. This is both the
+-- SETTLE step and the DELIVERABLE: arresting the drift and holding station are
+-- the same loop run for different reasons.
+local function holdLateral(seconds, label)
     note("")
-    note("== PHASE B1: common-mode tilt -> lateral force ==")
+    note("  " .. label)
 
-    local before = session:read()
-    local startSpeed = horizontalSpeed(before) or 0
-
-    for _, corner in ipairs(flight.CORNERS) do
-        local ok, err = pcall(actuators.setTilt, corner, plan.lateralTilt,
-            plan.groundAzimuth)
-        if not ok then note("  " .. corner .. " tilt failed: " .. tostring(err)) end
-    end
-
-    local samples = {}
+    local peakSpeed, finalSpeed, peakTilt = 0, nil, 0
+    local samples, saturatedSamples = 0, 0
     local startAt = os.epoch("utc")
-    session:hold(plan.lateralSeconds, function(state, now)
+    local lastAzimuth, lastTilt = nil, nil
+
+    session:hold(seconds, function(state, now)
         session:trim(plan.climbGain, flight.MAX_CLIMB_RATE, 0, state)
         local stop = driftAbort(state)
         if stop then return stop end
-        local speed = horizontalSpeed(state)
-        if speed then
-            samples[#samples + 1] = { t = (now - startAt) / 1000, speed = speed }
+
+        local command = lateralhold.command(state, config.axes)
+        if command.speed then
+            samples = samples + 1
+            finalSpeed = command.speed
+            if command.speed > peakSpeed then peakSpeed = command.speed end
+            if command.saturated then saturatedSamples = saturatedSamples + 1 end
+            if command.tilt > peakTilt then peakTilt = command.tilt end
+        end
+
+        -- Re-send only when the command has actually moved. The pods hold a
+        -- tilt indefinitely, so re-issuing an identical one every iteration is
+        -- pure rednet traffic competing with the ion commands the watchdog is
+        -- counting.
+        local changed = not lastTilt
+            or math.abs(command.tilt - lastTilt) > 0.25
+            or (lastAzimuth and math.abs((command.azimuth - lastAzimuth + 540) % 360 - 180) > 5)
+        if changed then
+            commandAllTilts(command.tilt, command.azimuth)
+            lastTilt, lastAzimuth = command.tilt, command.azimuth
         end
         return nil
     end)
 
+    local elapsed = (os.epoch("utc") - startAt) / 1000
+    note(string.format("    %.1f s, %d samples, peak %.3f -> final %.3f blocks/s",
+        elapsed, samples, peakSpeed, finalSpeed or -1))
+    note(string.format("    peak tilt %.1f deg, saturated on %d of %d samples",
+        peakTilt, saturatedSamples, samples))
+    return finalSpeed, peakSpeed
+end
+
+-- B1: can the loop bring a drifting craft to rest?
+--
+-- The craft arrives at hover already strafing -- the last run reached the hold
+-- at 1.758 blocks/s -- so this runs FIRST, and everything after it depends on
+-- it succeeding. The previous version measured acceleration by differencing
+-- speed against a 1.758 blocks/s background and got a meaningless number.
+local function runArrest()
+    note("")
+    note("== PHASE B1: arrest the drift ==")
+    local before = session:read()
+    local startSpeed = horizontalSpeed(before) or 0
+    note(string.format("  arriving at %.3f blocks/s", startSpeed))
+    note(string.format("  the 12 deg clamp holds against %.2f blocks/s",
+        (lateralhold.terminalSpeed(lateralhold.DEFAULTS.maxTiltDegrees))))
+
+    local finalSpeed = holdLateral(plan.arrestSeconds, "closing the loop")
+    clearAllTilts()
+
+    results.hover.arriveSpeed = startSpeed
+    results.hover.arrestedSpeed = finalSpeed
+    if finalSpeed and startSpeed > 0.2 then
+        note(string.format("  arrested %.0f%% of the arrival drift",
+            (1 - finalSpeed / startSpeed) * 100))
+    end
+    return finalSpeed
+end
+
+-- B2: from REST, an open-loop step -- the in-flight check on the ground number.
+--
+-- Phase A measured lateral force geometrically (2*T*sin(tilt), linear to
+-- 0.06%). This is the only step that confirms the craft actually accelerates
+-- the way that force says it should, and it is worth having because every
+-- geometric measurement in this project has needed exactly one flight to catch
+-- what the geometry did not know about.
+local function runStep(restSpeed)
+    note("")
+    note("== PHASE B2: open-loop step from rest ==")
+    if not restSpeed or restSpeed > plan.restThreshold then
+        note(string.format("  SKIPPED: still moving at %.3f (need < %.2f).",
+            restSpeed or -1, plan.restThreshold))
+        note("  An acceleration differenced against a moving start is the")
+        note("  contaminated number the previous run reported. Not repeating it.")
+        return
+    end
+
+    local predicted = select(2, lateralhold.terminalSpeed(plan.stepTilt))
+    note(string.format("  %.0f deg for %.1f s; phase A predicts %.4f blocks/s^2",
+        plan.stepTilt, plan.stepSeconds, predicted))
+
+    local before = session:read()
+    local startSpeed = horizontalSpeed(before) or 0
+    commandAllTilts(plan.stepTilt, plan.groundAzimuth)
+
+    local samples = 0
+    local startAt = os.epoch("utc")
+    session:hold(plan.stepSeconds, function(state, now)
+        session:trim(plan.climbGain, flight.MAX_CLIMB_RATE, 0, state)
+        local stop = driftAbort(state)
+        if stop then return stop end
+        samples = samples + 1
+        return nil
+    end)
+    local elapsed = (os.epoch("utc") - startAt) / 1000
     clearAllTilts()
 
     local after = session:read()
     local endSpeed = horizontalSpeed(after) or 0
-    local elapsed = #samples > 0 and samples[#samples].t or plan.lateralSeconds
-
     if elapsed > 0.2 then
-        local accel = (endSpeed - startSpeed) / elapsed
-        note(string.format("  speed %.3f -> %.3f blocks/s over %.2f s (%d samples)",
-            startSpeed, endSpeed, elapsed, #samples))
-        note(string.format("  lateral acceleration = %.4f blocks/s^2", accel))
-        note(string.format("  per degree of tilt   = %.4f blocks/s^2",
-            accel / plan.lateralTilt))
-        results.hover.lateralPerDegree = accel / plan.lateralTilt
-
-        -- Terminal speed follows from universalDrag = 0.09: a tilt does not
-        -- integrate away, it cruises. This is the number position hold needs.
-        note(string.format("  implied terminal speed at %.0f deg = %.2f blocks/s",
-            plan.lateralTilt, accel / 0.09))
-    else
-        note("  pulse too short to fit an acceleration")
+        local measured = (endSpeed - startSpeed) / elapsed
+        note(string.format("  speed %.3f -> %.3f over %.2f s (%d samples)",
+            startSpeed, endSpeed, elapsed, samples))
+        note(string.format("  measured %.4f blocks/s^2 vs %.4f predicted = %.0f%%",
+            measured, predicted, predicted > 0 and (measured / predicted * 100) or 0))
+        results.hover.stepMeasured = measured
+        results.hover.stepPredicted = predicted
     end
 
-    -- Arrest before doing anything else. A residual lateral rate here becomes
-    -- displacement during B2, and B2 is the longer phase.
-    note("  arresting lateral motion")
-    for _, corner in ipairs(flight.CORNERS) do
-        pcall(actuators.setTilt, corner, plan.lateralTilt,
-            (plan.groundAzimuth + 180) % 360)
-    end
-    session:hold(plan.cancelTimeoutSeconds, function(state, now)
-        session:trim(plan.climbGain, flight.MAX_CLIMB_RATE, 0, state)
-        local stop = driftAbort(state)
-        if stop then return stop end
-        local speed = horizontalSpeed(state)
-        if speed and speed <= startSpeed + 0.05 then return "arrested" end
-        return nil
-    end)
+    -- Always hand back a stationary craft, whatever the step did.
+    holdLateral(plan.arrestSeconds, "re-arresting after the step")
     clearAllTilts()
-
-    local settled = session:read()
-    note(string.format("  residual horizontal speed: %.3f blocks/s",
-        horizontalSpeed(settled) or -1))
-    return true
 end
 
--- B2: differential tilt staircase -> roll torque. The damper's gain.
-local function runTorqueStep(angle)
-    local other = "pitch"
-
-    -- Port pair one way, starboard the other: a roll couple.
-    for _, corner in ipairs(flight.CORNERS) do
-        local sign = profile.corners[corner].roll >= 0 and 1 or -1
-        local ok, err = pcall(actuators.setTilt, corner, sign * angle,
-            plan.groundAzimuth)
-        if not ok then note("  " .. corner .. " tilt failed: " .. tostring(err)) end
-    end
-
-    local samples = {}
-    local startState = session:readCheap()
-    local startAngle = startState and startState.roll or 0
-    local startAt = os.epoch("utc")
-    local restore = session.sampleSeconds
-    session.sampleSeconds = plan.torqueSampleSeconds
-
-    session:hold(plan.torqueSeconds, function(state, now)
-        session:trim(plan.climbGain, flight.MAX_CLIMB_RATE, 0, state)
-        local stop = driftAbort(state)
-        if stop then return stop end
-        if state and state.roll then
-            samples[#samples + 1] = {
-                t = (now - startAt) / 1000,
-                angle = state.roll - startAngle,
-            }
-            local swept = math.abs(state.roll - startAngle)
-            if swept >= plan.torqueMaxAngle and #samples >= plan.torqueMinSamples then
-                return "angle reached"
-            end
-        end
-        return nil
-    end)
-    session.sampleSeconds = restore
-
-    -- Cancel with the reversed couple, ending when the rate is arrested rather
-    -- than after a fixed time. Equal-and-opposite for equal time only nulls the
-    -- rate if the torque actually applied for that time -- the assumption that
-    -- took two axisresponse runs past 40 degrees of roll.
-    for _, corner in ipairs(flight.CORNERS) do
-        local sign = profile.corners[corner].roll >= 0 and 1 or -1
-        pcall(actuators.setTilt, corner, -sign * angle, plan.groundAzimuth)
-    end
-    local lastAngle, lastAt = nil, nil
-    session:hold(plan.cancelTimeoutSeconds, function(state, now)
-        session:trim(plan.climbGain, flight.MAX_CLIMB_RATE, 0, state)
-        local stop = driftAbort(state)
-        if stop then return stop end
-        if state and state.roll then
-            if lastAngle and now > lastAt then
-                local rate = (state.roll - lastAngle) / ((now - lastAt) / 1000)
-                -- Differenced from the angle, not from Session:rates: the Sable
-                -- angular channel reads exactly 0.0000 in about a third of
-                -- samples at this loop period, and a cancel must never be
-                -- steered by a channel that reports "stopped" when it is not.
-                if rate * (samples[#samples] and samples[#samples].angle or 1) <= 0 then
-                    return "rate arrested"
-                end
-            end
-            lastAngle, lastAt = state.roll, now
-        end
-        return nil
-    end)
-    clearAllTilts()
-
-    if #samples < 3 then return nil, #samples end
-
-    -- alpha from a quadratic through the origin: angle = 0.5*alpha*t^2 + w0*t.
-    -- Two unknowns, so at least three points, and more is better -- this is the
-    -- exact fit that ion quantisation starved down to six.
-    local s11, s12, s22, y1, y2 = 0, 0, 0, 0, 0
-    for _, sample in ipairs(samples) do
-        local a, b = 0.5 * sample.t ^ 2, sample.t
-        s11 = s11 + a * a
-        s12 = s12 + a * b
-        s22 = s22 + b * b
-        y1 = y1 + a * sample.angle
-        y2 = y2 + b * sample.angle
-    end
-    local determinant = s11 * s22 - s12 * s12
-    if math.abs(determinant) < 1e-12 then return nil, #samples end
-    local alpha = (y1 * s22 - y2 * s12) / determinant
-    return alpha, #samples
-end
-
-local function runTorque()
+-- B3: THE DELIVERABLE. Hold station and report the drift that accumulates.
+local function runHold()
     note("")
-    note("== PHASE B2: differential tilt -> roll torque (the damper's gain) ==")
-    note(string.format("  %8s %10s %14s", "tilt", "samples", "alpha deg/s^2"))
-
-    local points = {}
-    for _, angle in ipairs(plan.torqueTilts) do
-        local alpha, sampleCount = runTorqueStep(angle)
-        if alpha then
-            note(string.format("  %8.1f %10d %14.4f", angle, sampleCount, alpha))
-            points[#points + 1] = { x = angle, y = alpha }
-        else
-            note(string.format("  %8.1f %10s   no fit", angle,
-                tostring(sampleCount)))
-        end
-        -- Let the hull settle between steps; the self-levelling spring has a
-        -- 42 s period, so a step started mid-swing measures the swing.
-        session:hold(plan.holdSeconds, function(state)
-            session:trim(plan.climbGain, flight.MAX_CLIMB_RATE, 0, state)
-            return nil
-        end)
+    note("== PHASE B3: station keeping ==")
+    local anchor = session:read()
+    local origin = anchor and anchor.position
+    if not origin then
+        note("  no position fix; cannot measure station keeping")
+        return
     end
 
-    local slope, worst = vectoring.fitThroughOrigin(points)
-    if slope then
-        note("")
-        note(string.format("  ROLL TORQUE = %.4f deg/s^2 per degree of differential tilt",
-            slope))
-        note(string.format("  worst residual = %.1f%%", worst * 100))
-        results.hover.rollPerDegree = slope
-        results.hover.rollResidual = worst
+    local maxDrift = 0
+    local startAt = os.epoch("utc")
+    session:hold(plan.holdStationSeconds, function(state, now)
+        session:trim(plan.climbGain, flight.MAX_CLIMB_RATE, 0, state)
+        local stop = driftAbort(state)
+        if stop then return stop end
 
-        -- What the damper needs, stated in the units the damper is written in.
-        -- Critical damping for the measured spring (k = 0.0223 deg/s^2 per deg,
-        -- period 42.1 s against a measured ~42 s) is 2*sqrt(k) = 0.2987
-        -- deg/s^2 per deg/s.
-        local criticalDamping = 2 * math.sqrt(0.0223)
-        note("")
-        note(string.format("  critical damping needs %.4f deg/s^2 per deg/s,", criticalDamping))
-        note(string.format("  so the damper wants %.3f DEGREES OF TILT per deg/s of roll rate.",
-            criticalDamping / slope))
-        note(string.format("  At the strafe's 0.90 deg/s peak that is %.2f degrees of tilt --",
-            0.90 * criticalDamping / slope))
-        note("  compare props.lua's 15 degree clamp for the headroom.")
-    else
-        note("  NOT ENOUGH STEPS FIT. Do not quote a gain from this run.")
+        local command = lateralhold.command(state, config.axes)
+        commandAllTilts(command.tilt, command.azimuth)
+
+        local position = state and state.position
+        if position then
+            local drift = math.sqrt((position.x - origin.x) ^ 2
+                + (position.z - origin.z) ^ 2)
+            if drift > maxDrift then maxDrift = drift end
+        end
+        return nil
+    end)
+    local elapsed = (os.epoch("utc") - startAt) / 1000
+    clearAllTilts()
+
+    local final = session:read()
+    local finalDrift = 0
+    if final and final.position then
+        finalDrift = math.sqrt((final.position.x - origin.x) ^ 2
+            + (final.position.z - origin.z) ^ 2)
+    end
+    results.hover.holdSeconds = elapsed
+    results.hover.holdMaxDrift = maxDrift
+    results.hover.holdFinalDrift = finalDrift
+
+    note(string.format("  held %.1f s: max drift %.1f blocks, final %.1f blocks",
+        elapsed, maxDrift, finalDrift))
+    -- The passive baseline: 81 blocks in 48 s, i.e. ~1.67 blocks/s of drift.
+    local baseline = 1.67 * elapsed
+    note(string.format("  passive drift over the same time would be ~%.0f blocks",
+        baseline))
+    if baseline > 0 then
+        note(string.format("  station keeping cut the drift by %.0f%%",
+            (1 - finalDrift / baseline) * 100))
     end
 end
 
@@ -694,8 +713,9 @@ local function mainLoop()
         return
     end
 
-    runLateral()
-    if not session.aborted then runTorque() end
+    local restSpeed = runArrest()
+    if not session.aborted then runStep(restSpeed) end
+    if not session.aborted then runHold() end
 
     note("")
     note("== descend and land ==")
@@ -718,21 +738,28 @@ note("")
 note("=== SUMMARY ===")
 note("pair coherence      : " .. tostring(results.ground.verdict or "not measured")
     .. "   (unmirrored: " .. tostring(results.ground.unmirrored or "--") .. ")")
-if results.hover.lateralPerDegree then
-    note(string.format("lateral force       : %.4f blocks/s^2 per degree of common tilt",
-        results.hover.lateralPerDegree))
+if results.hover.arriveSpeed then
+    note(string.format("arrived drifting    : %.3f blocks/s", results.hover.arriveSpeed))
+    note(string.format("after the arrest    : %.3f blocks/s",
+        results.hover.arrestedSpeed or -1))
 end
-if results.hover.rollPerDegree then
-    note(string.format("roll torque         : %.4f deg/s^2 per degree of differential tilt",
-        results.hover.rollPerDegree))
-    note(string.format("  worst residual    : %.1f%%", (results.hover.rollResidual or 0) * 100))
+if results.hover.stepMeasured then
+    note(string.format("step response       : %.4f measured vs %.4f predicted (%.0f%%)",
+        results.hover.stepMeasured, results.hover.stepPredicted,
+        results.hover.stepMeasured / results.hover.stepPredicted * 100))
+end
+if results.hover.holdMaxDrift then
+    note(string.format("station keeping     : max %.1f blocks, final %.1f, over %.0f s",
+        results.hover.holdMaxDrift, results.hover.holdFinalDrift,
+        results.hover.holdSeconds))
+    note("  passive drift over the same window is ~1.67 blocks/s.")
     note("")
-    note("THIS IS THE DAMPER'S GAIN. Before writing it into a controller, get a")
-    note("SECOND run agreeing within a few percent -- every authority number in")
-    note("this project looked solid in isolation and the roll figure ranged")
-    note("3.98 to 86.03 across nine flights that each looked fine at the time.")
+    note("Before writing any of this into a controller, get a SECOND run")
+    note("agreeing within a few percent. Every authority number in this project")
+    note("looked solid in isolation, and the roll figure ranged 3.98 to 86.03")
+    note("across nine flights that each looked fine at the time.")
 else
-    note("roll torque         : not measured")
+    note("station keeping     : not measured")
 end
 
 writeReport()
