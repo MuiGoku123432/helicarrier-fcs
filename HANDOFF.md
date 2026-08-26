@@ -55,44 +55,65 @@ Three measurements, two flights, two rpm levels, spread 7.7%:
 That clears the two-runs-within-a-few-percent bar, and it is the number
 nineteen axis-response flights never produced for the ions.
 
-**But fix FR first.** It has needed two attempts on nearly every command for a
-whole session and now fails outright ("no reply from the FR pod within
-1000 ms"), which cost a measurement step. A control loop commanding RPM
-continuously will be far more exposed to it than a probe taking three steps,
-and intermittent actuator dropouts are the single hardest class of bug to
-attribute after the fact. It is a known, bounded problem. Do it before building
-on top.
+**FR was not the problem, and that is now measured.** The premise this
+document carried for a session -- "FR has needed two attempts on nearly every
+command and now fails outright" -- did not survive its first measurement.
+`/fcs/podprobe.lua`, grounded, 10 `set_rpm` round trips per corner
+(`flight-logs/podprobe_result.txt`):
 
-**The first action of the next session is one command, grounded:**
+| corner | resolves | transmitting | acks | median | worst | unanswered |
+|---|---|---|---|---|---|---|
+| FL | pinned 2 = live 2 | 8 msgs / 822 ms | 10/10 | 51 ms | 86 ms | 0 |
+| FR | pinned 3 = live 3 | 8 msgs / 815 ms | 9/10 | 51 ms | 67 ms | **1** |
+| RL | pinned 4 = live 4 | 8 msgs / 800 ms | 8/10 | 50 ms | 66 ms | **2** |
+| RR | pinned 5 = live 5 | 8 msgs / 828 ms | 9/10 | 51 ms | 62 ms | **1** |
 
-    /fcs/podprobe.lua
+Read that carefully, because three separate beliefs died:
 
-That symptom has three causes and they need OPPOSITE fixes, so this measures
-which one it is rather than guessing:
+1. **FR IS NOT SPECIAL.** RL dropped twice as many. The per-pod hunt is over.
+2. **NOTHING IS SLOW.** Every ack that landed came back in about 51 ms, worst
+   86. The 1000 ms timeout is ~20x the median, so **raising it cannot help** --
+   it was the fix this document was about to recommend.
+3. **NO GHOST HOST.** Pinned id, looked-up id and the id actually transmitting
+   agree on all four corners. The deployed `fcs/config.lua` pins `podIds`
+   (FL=2, FR=3, RL=4, RR=5), so `rednet.lookup` is never consulted on the live
+   craft and the lookup race is structurally impossible. It is still worth
+   checking, because a pin can go stale.
 
-| verdict | cause | fix |
-|---|---|---|
-| `GHOST HOST` | a second computer still hosts `ENG-FR`; `rednet.lookup` returns whichever answers first | stop the duplicate — **a longer timeout cannot help** |
-| `SLOW POD` | the ack lands, just after 1000 ms | raise `actuators.REPLY_TIMEOUT_MS`, or stop blocking on acks in loops |
-| `TOTAL LOSS` | right id, transmitting, commands unanswered | retry policy; look at range and chunk loading |
+What is left is **4 unanswered commands in 40, spread across three corners,
+with the link otherwise fast and healthy.** That is a uniform few-percent drop
+rate, and it is the thing the damper has to survive.
 
-The ghost is the hypothesis that fits the symptom best and nothing about it has
-been confirmed yet. It predicts exactly this history: `network.podIds` caches
-the first lookup for the life of a program, so a fresh run is a coin flip
-("two attempts on nearly every command") until it caches the dead one, after
-which every command in that run fails ("now fails outright"). It also predicts
-the live pod looking silent while it broadcasts happily, because `banks.lua`
-then rejects its telemetry on `senderMismatch`. **Do not fix anything before
-reading the verdict** — raising the timeout against a ghost changes nothing and
-costs a session.
+**The next measurement is the one that decides the fix**, and the probe now
+takes it: the pod's own `commandsSeen` counter, sampled either side of the
+test. A drop is one of two opposite bugs and replies alone cannot tell them
+apart:
 
-All three verdicts are reproduced offline, so the probe is known to separate
-them: `luajit tools/run_podprobe_harness.lua all`.
+- **COMMAND LOSS** -- the counter did not move. The actuator never moved
+  either. Re-send.
+- **ACK LOSS** -- the counter moved by the full count. The actuator DID move
+  and only the confirmation was lost, so a blocking waiter reports failure for
+  a command that succeeded -- and any caller that then "recovers" is acting on
+  a false picture of where the actuator is.
 
-In-flight the same evidence now lands in `/fcs/heartbeat.txt` as
+Re-run `/fcs/podprobe.lua 20` (the version with counter attribution is
+deployed) and read the verdict line. All six verdicts are reproduced offline:
+`luajit tools/run_podprobe_harness.lua all`.
+
+**Either way, do not put a blocking ack-waiter in the damper loop.** At a few
+percent per command and four corners per iteration, roughly one iteration in
+eight loses something, and `actuators.setPropellerRpm` turns that into a full
+second of no commands at all -- the failure `/fcs/vectorprobe.lua` already hit
+four times and solved by sending fire-and-forget and confirming from telemetry.
+`set_rpm` is set-and-hold with no pod-side watchdog and is idempotent, so a
+re-send costs nothing.
+
+In flight the same evidence now reaches `/fcs/heartbeat.txt` as
 `rejected_per_corner=` and `last_sender_mismatch=` (`corner expected=N got=M`).
-The bare `sender_mismatch` counter could never say WHICH pod was being thrown
-away, and "which" is the entire diagnosis.
+The bare `sender_mismatch` counter could say a pod was being thrown away but
+never WHICH, and "which" is the entire diagnosis. **That change is committed
+but NOT deployed** -- it needs computer 1 rebooted, because the running logger
+holds the old module in memory.
 
 ### The actuator survey is FINISHED — this is the durable result
 
@@ -253,17 +274,13 @@ ratio check is two-sided, and there is a per-axis absolute ceiling.
 
 ### After that
 
-1. **Fix FR, then write the roll damper.**
+1. **Write the roll damper.** `fcs/rolldamp.lua` already has the law, the clamp
+   and the integer rounding; only the flight loop is missing. Against
+   **0.0941 deg/s^2 per rpm**, critical damping is 3.2 rpm against a clamp of 4.
 
-   FR has needed two attempts on nearly every command for a full session and
-   now fails outright. A loop commanding RPM continuously is far more exposed
-   than a probe taking three steps, and intermittent actuator dropouts are the
-   hardest class of bug to attribute afterwards. Either raise the reply timeout
-   for prop commands or find why that pod is slow.
-
-   Then the damper, against **0.0941 deg/s^2 per rpm** (`fcs/rolldamp.lua`
-   already has the law, the clamp and the integer rounding; only the flight
-   loop is missing). Critical damping is 3.2 rpm against a clamp of 4.
+   Send RPM **fire-and-forget and confirm from telemetry** -- see START HERE.
+   The link drops a few percent of commands, and a blocking ack-waiter turns
+   each of those into a full second of silence inside the loop.
 
    *Do NOT put the damper on the bearings.* That was this document's
    long-standing advice and the measurements retired it -- see the actuator

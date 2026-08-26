@@ -68,6 +68,10 @@ harness.model = {
     -- nothing and replying nothing. Counted rather than randomised so runs
     -- stay reproducible.
     dropEveryNthCommand = 0,
+    -- The other half of the same symptom, and the opposite bug: the command IS
+    -- applied and the reply is lost. From the sender's side both look like "no
+    -- reply within 1000 ms"; one left the actuator alone and one moved it.
+    dropEveryNthReply = 0,
     -- Create Aeronautics scales propeller thrust by air density. When true the
     -- craft feels getThrust * pressure while the pods keep REPORTING the raw
     -- getThrust -- which is exactly the discrepancy the live carrier showed.
@@ -631,6 +635,17 @@ function harness.install(env)
                         dropped = true   -- applied nothing, and says nothing
                     else
                         pod.targetRpm = message.rpm
+                        -- The real pod counts every set_rpm it dispatches, and
+                        -- that counter is the only evidence that separates a
+                        -- lost command from a lost ack. Modelling the command
+                        -- without modelling the count would make the harness
+                        -- agree with a probe that cannot tell them apart.
+                        pod.commandsSeen = (pod.commandsSeen or 0) + 1
+                        pod.commandsApplied = (pod.commandsApplied or 0) + 1
+                        if harness.model.dropEveryNthReply > 0
+                            and commandCount % harness.model.dropEveryNthReply == 0 then
+                            dropped = true   -- APPLIED, and says nothing
+                        end
                     end
                 elseif pod.id == recipient and message.type == "arm" then
                     commandCount = commandCount + 1

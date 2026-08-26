@@ -1,40 +1,55 @@
--- Why one pod stops answering: a comms diagnostic for "no reply from the FR
+-- Why a pod stops answering: a comms diagnostic for "no reply from the <corner>
 -- pod within 1000 ms".
 --
 --   /fcs/podprobe.lua            census + 10 ack round trips per corner
 --   /fcs/podprobe.lua 25         25 round trips per corner
 --   /fcs/podprobe.lua --force    run even with a bank armed or holding thrust
 --
--- FR has needed two attempts on nearly every command for a session and now
--- fails outright. That symptom has three structurally different causes, and
--- they need OPPOSITE fixes, so guessing is expensive:
+-- MEASURED 2026-08-26 (flight-logs/podprobe_result.txt), and it retired the
+-- premise this tool was built on: FR IS NOT SPECIAL. All four corners resolve
+-- correctly, all four transmit, acks land in ~51 ms -- and 4 of 40 commands
+-- went unanswered, spread across FR, RL and RR. RL was the worst, not FR.
+-- Whatever made FR look singular for a session, what is here now is a uniform
+-- few-percent drop rate.
 --
---   1. A GHOST HOST. Another computer still hosts ENG-FR (an old pod that was
---      replaced, or a second copy left running). rednet.lookup returns
---      whichever answers first, so a fresh program is a coin flip -- and once
---      it caches the dead one, EVERY command in that run times out, which is
---      exactly "intermittent for a session, then outright". Worse, banks.lua
---      then rejects the live pod's telemetry on senderMismatch, so the pod
---      looks silent while it is broadcasting happily.
+-- The symptom "no reply within 1000 ms" has four structurally different causes
+-- and they need OPPOSITE fixes, so guessing is expensive:
+--
+--   1. A GHOST HOST. Another computer still hosts the corner's hostname (an
+--      old pod that was replaced, or a second copy left running).
+--      rednet.lookup returns whichever answers first, so a fresh program is a
+--      coin flip -- and once it caches the dead one, EVERY command in that run
+--      times out. Worse, banks.lua then rejects the live pod's telemetry on
+--      senderMismatch, so the pod looks silent while it broadcasts happily.
 --      Fix: unhost the ghost. Raising the timeout would do nothing.
+--      (Not possible on the live craft while config pins podIds -- lookup is
+--      never consulted. It is still checked, because that pin can go stale.)
 --
 --   2. A SLOW POD. statusMessage() is 32 thrusters x 5 getters, ~250 ms of
 --      main-thread work, and the pod's networkLoop is single-threaded. A
---      command that lands behind one of those waits it out. If the ack simply
---      arrives at 1100 ms, REPLY_TIMEOUT_MS is the bug.
+--      command landing behind one waits it out. If the ack simply arrives at
+--      1100 ms, REPLY_TIMEOUT_MS is the bug.
 --      Fix: raise the timeout (or stop blocking on acks in loops).
 --
---   3. REAL PACKET LOSS. Neither of the above: the command never lands.
---      Fix: retry policy, and look at range/chunk loading.
+--   3. COMMAND LOSS. The command never reached the pod: its counter did not
+--      move, and the actuator did not either.
+--      Fix: re-send. Waiting longer cannot help.
 --
--- This tells them apart, and it does it without flying:
+--   4. ACK LOSS. The command WAS applied and the reply was lost. Identical
+--      from the sender's side, opposite in consequence -- a blocking waiter
+--      reports failure for a command that succeeded, and a caller that then
+--      "recovers" is acting on a false picture of where the actuator is.
+--      Fix: confirm from telemetry, not from the ack.
 --
---   RESOLUTION  what rednet.lookup hands us per corner
+-- 3 and 4 are indistinguishable from replies alone, so this reads BOTH SIDES:
+-- the pod's own commandsSeen counter, sampled before and after the test.
+--
+-- This tells all four apart, and it does it without flying:
+--
+--   RESOLUTION  what the sender would address, pinned or looked up
 --   CENSUS      who is ACTUALLY transmitting as that corner, passively
---   ACK         round-trip time for the real failing command path, set_rpm
---
--- A ghost shows as census id ~= lookup id. A slow pod shows as one id and long
--- latencies. Loss shows as one id, short latencies, and timeouts anyway.
+--   ACK         round-trip time for the real failing command path, set_rpm,
+--               plus the pod's command counter either side of it
 --
 -- SAFETY: the ack test sends each corner ITS OWN current target RPM -- a real
 -- set_rpm down the same path the flight loop uses, but a no-op at the
@@ -176,6 +191,13 @@ local function census()
         entry.last = os.epoch("utc")
         entry.hostname = message.hostname
         entry.podComputerId = message.podComputerId
+        -- The pod's own count of commands it has SEEN. Sampled here and again
+        -- after the ack test, it says whether a missing ack means the command
+        -- was lost or only the reply was -- which are opposite bugs: one left
+        -- the actuator where it was, the other moved it.
+        if type(message.commandsSeen) == "number" then
+            entry.commandsSeen = message.commandsSeen
+        end
         local prop = message.prop
         if type(prop) == "table" and type(prop.targetRpm) == "number" then
             entry.targetRpm = prop.targetRpm
@@ -255,6 +277,22 @@ local function ackRoundTrip(corner, podId, rpm)
         return false
     end)
     return result
+end
+
+-- commandsSeen rides only on the FULL status payload; lightReply omits it
+-- deliberately, so this waits for ordinary telemetry (~815 ms apart) rather
+-- than for a reply.
+local function awaitCommandsSeen(corner, podId, timeoutMs)
+    local seen = nil
+    receiveUntil(os.epoch("utc") + timeoutMs, function(senderId, message)
+        if senderId == podId and message.corner == corner
+            and type(message.commandsSeen) == "number" then
+            seen = message.commandsSeen
+            return true
+        end
+        return false
+    end)
+    return seen
 end
 
 local function ackTest(corner, podId, rpm)
@@ -344,11 +382,40 @@ local function verdict(corner, resolvedId, transmitters, result)
         if latency > 1000 then overRun = overRun + 1 end
     end
 
-    if overRun > 0 or result.timeouts > 0 then
+    if overRun > 0 then
         note(string.format("  %-3s SLOW POD. %d/%d acks landed after the 1000 ms"
             .. " actuators allows (worst %d ms), %d never landed. The commands"
             .. " ARE being applied; the timeout is what fails.",
             corner, overRun, pings, result.worst or -1, result.timeouts))
+        return
+    end
+
+    -- Timeouts with FAST acks are loss, not slowness, and the first version of
+    -- this tool called them SLOW POD -- printing "0/10 acks landed after the
+    -- 1000 ms allowed (worst 67 ms)", which is self-contradictory and points
+    -- at the one fix that cannot help. Raising a 1000 ms timeout does nothing
+    -- for a reply that was never sent, and nothing at all for one that lands
+    -- in 51 ms.
+    if result.timeouts > 0 then
+        local applied = result.applied
+        if applied == nil then
+            note(string.format("  %-3s LOSS, UNATTRIBUTED. %d/%d unanswered, but"
+                .. " acks land in %d ms. The pod's command counter never"
+                .. " arrived, so it is not known whether the command or the"
+                .. " reply was lost.", corner, result.timeouts, pings,
+                result.median))
+        elseif applied >= pings then
+            note(string.format("  %-3s ACK LOSS. All %d commands were APPLIED"
+                .. " (counter +%d) and %d replies never arrived. The actuator"
+                .. " moved; only the confirmation was lost -- so a blocking"
+                .. " waiter fails a command that in fact succeeded.",
+                corner, pings, applied, result.timeouts))
+        else
+            note(string.format("  %-3s COMMAND LOSS. The counter rose by %d of %d:"
+                .. " %d command(s) never reached the pod. The actuator did NOT"
+                .. " move. Re-send; do not merely wait longer.",
+                corner, applied, pings, pings - applied))
+        end
         return
     end
 
@@ -404,14 +471,29 @@ local function main()
                 .. " Ground the craft, or pass --force to echo it back.",
                 corner, tostring(rpm)))
         else
+            local before = entry.commandsSeen
             local result = ackTest(corner, target, rpm)
             results[corner] = result
+            -- Both sides of the link, which is the only way to attribute a
+            -- missing ack. HANDOFF's rule: sample a counter on each side and
+            -- compare, because static reasoning about CC has repeatedly been
+            -- wrong here and measurement has not.
+            if before and result.timeouts > 0 then
+                local after = awaitCommandsSeen(corner, target, 4000)
+                if after then
+                    result.applied = after - before
+                end
+            end
             note(string.format(
                 "  %-3s id=%-4s rpm=%-5s %d/%d acks  median=%-5s p95=%-5s worst=%-5s"
                 .. " timeouts=%d faults=%d",
                 corner, tostring(target), tostring(rpm), #result.latencies, pings,
                 tostring(result.median), tostring(result.p95), tostring(result.worst),
                 result.timeouts, result.faults))
+            if result.applied then
+                note(string.format("  %-3s pod command counter rose by %d of %d sent",
+                    corner, result.applied, pings))
+            end
             if result.wrongSender > 0 then
                 note(string.format("  %-3s ** %d replies came from a DIFFERENT"
                     .. " computer than the one commanded **",

@@ -6,6 +6,8 @@
 --                                                    computer; lookup gets it
 --   luajit tools/run_podprobe_harness.lua twins      the ghost transmits too
 --   luajit tools/run_podprobe_harness.lua slow       FR acks at 1400 ms
+--   luajit tools/run_podprobe_harness.lua cmdloss    commands never land
+--   luajit tools/run_podprobe_harness.lua ackloss    commands land, acks do not
 --   luajit tools/run_podprobe_harness.lua all
 --
 -- The point is not that the probe runs. It is that each mode produces a
@@ -15,7 +17,7 @@
 package.path = "./?.lua;./?/init.lua;" .. package.path
 local harness = require("tools.cc_harness")
 
-local MODES = { "healthy", "ghost", "twins", "slow" }
+local MODES = { "healthy", "ghost", "twins", "slow", "cmdloss", "ackloss" }
 
 local requested = {}
 for i = 1, #arg do
@@ -66,6 +68,15 @@ elseif mode == "slow" then
     -- Just past actuators.REPLY_TIMEOUT_MS. The pod applies every command; the
     -- sender gives up before hearing so.
     harness.model.podReplyLatencyMs = { FR = 1400 }
+elseif mode == "cmdloss" then
+    -- Every third set_rpm never reaches the pod: the counter does not move and
+    -- the propeller does not either.
+    harness.model.dropEveryNthCommand = 3
+elseif mode == "ackloss" then
+    -- Every third set_rpm IS applied and its ack is lost. Identical from the
+    -- sender's side, opposite in consequence -- the whole reason the probe
+    -- reads the pod's counter as well as its replies.
+    harness.model.dropEveryNthReply = 3
 elseif mode ~= "healthy" then
     error("unknown mode " .. tostring(mode) .. "; use " .. table.concat(MODES, " "))
 end
