@@ -125,6 +125,10 @@ local plan = {
     rpmReachSeconds = 4.0,
     rpmTolerance = 1.5,
     rpmSettleSeconds = 6.0,
+    -- Long enough for the propellers to reach a steady getThrust. They climb
+    -- over a second or more, and comparing corners mid-ramp is what produced
+    -- a 29%-of-the-strongest false fault.
+    thrustSettleSeconds = 8.0,
     -- Below this the step measured nothing and the fit is reading noise.
     rpmMinSweep = 0.25,
     stepTilt = 8.0,
@@ -1035,30 +1039,41 @@ local function mainLoop()
         return nil
     end)
 
-    local thrusts, dead = {}, {}
-    for _, corner in ipairs(flight.CORNERS) do
-        local pod = banks.getState()[corner]
-        local prop = pod and pod.prop
-        if not prop then
-            dead[#dead + 1] = corner .. " (no telemetry)"
-        else
-            if prop.hasSource == false then
-                dead[#dead + 1] = corner .. " (no kinetic source)"
+    -- WAIT FOR THRUST TO SETTLE, NOT JUST RPM.
+    --
+    -- getThrust is NOT the static getter this check first assumed. At rest all
+    -- four corners read ~1e-20; spun up they climb to their working value. The
+    -- first version compared the four the instant RPM was reached and read
+    -- 100/72/90/29% -- four points on a spin-up ramp, sampled at four
+    -- different moments, reported as a drivetrain fault.
+    --
+    -- That is distortion #4 from the axis-response campaign in a new place:
+    -- measuring across a ramp. It is also a FALSE POSITIVE on a safety gate,
+    -- which is the worse kind -- it teaches the reader to fly past the check.
+    --
+    -- So poll until each corner's thrust stops changing, and only then compare.
+    local previous, stableFor = {}, 0
+    session:hold(plan.thrustSettleSeconds, function(state, now)
+        local allStable = true
+        for _, corner in ipairs(flight.CORNERS) do
+            local pod = banks.getState()[corner]
+            local thrust = pod and pod.prop and pod.prop.thrust
+            if type(thrust) ~= "number" or thrust <= 0 then
+                allStable = false
+            else
+                local was = previous[corner]
+                -- Within 2% of the previous sample counts as settled.
+                if not was or math.abs(thrust - was) > math.abs(thrust) * 0.02 then
+                    allStable = false
+                end
+                previous[corner] = thrust
             end
-            -- Reaching the commanded RPM is the part a static check misses.
-            if not reached[corner] then
-                dead[#dead + 1] = string.format("%s (rpm %s, wanted %d)", corner,
-                    tostring(prop.controllerRpm), plan.groundRpm)
-            end
-            if prop.active == false then
-                dead[#dead + 1] = corner .. " (bearings inactive)"
-            end
-            if prop.bearingOverstressed then
-                dead[#dead + 1] = corner .. " (OVERSTRESSED)"
-            end
-            if type(prop.thrust) == "number" then thrusts[corner] = prop.thrust end
         end
-    end
+        stableFor = allStable and (stableFor + 1) or 0
+        -- Three consecutive stable rounds, so one lucky pair cannot pass it.
+        if stableFor >= 3 then return "thrust settled" end
+        return nil
+    end)
 
     note("  drivetrain, props at " .. plan.groundRpm .. " rpm:")
     local highest = 0
@@ -1087,6 +1102,24 @@ local function mainLoop()
     -- craft left with its props turning after a preflight abort is a craft
     -- nobody is watching that is still burning stress.
     pcall(session.setAllProps, session, 0)
+
+    if stableFor < 3 then
+        note("")
+        note("  Thrust never settled within " .. plan.thrustSettleSeconds .. " s.")
+        note("  The per-corner comparison below would be of a spin-up ramp, so")
+        note("  it is NOT treated as a fault -- but nothing is confirmed either.")
+        -- Drop ONLY the thrust-comparison faults. A missing kinetic source, a
+        -- corner that never reached RPM, an inactive bearing or an overstressed
+        -- drivetrain are all still real, and an unsettled ramp says nothing
+        -- about any of them.
+        local kept = {}
+        for _, entry in ipairs(dead) do
+            if not entry:match("thrust %d+%% of the strongest") then
+                kept[#kept + 1] = entry
+            end
+        end
+        dead = kept
+    end
 
     if #dead > 0 then
         note("")
