@@ -119,6 +119,9 @@ local plan = {
     -- so 3 RPM sweeps the 3 degree budget in about 2.7 s -- long enough for
     -- ~20 samples at 0.12 s, which is what the ion pulse could never buy.
     rpmSteps = { 2, 3 },
+    -- Within this of ground counts as down, for deciding whether it is safe to
+    -- cut the propellers.
+    groundedGain = 1.5,
     rpmStepSeconds = 4.0,
     rpmMaxAngle = 3.0,
     rpmSampleSeconds = 0.12,
@@ -1289,11 +1292,51 @@ if not ok then
     note("PROBE ERROR: " .. tostring(err))
 end
 
--- Tilts cleared on every exit path, including an error. A bearing left tilted
--- is a standing lateral force on a craft nobody is watching.
-clearAllTilts()
-pcall(session.setAllProps, session, 0)
-pcall(session.finish, session)
+-- SHUTDOWN RUNS UNDER THE LISTENER TOO.
+--
+-- parallel.waitForAny kills listenLoop the moment mainLoop returns, so
+-- everything after it used to run with NOTHING pumping the rednet queue. Any
+-- command that waits for a reply -- which set_rpm does -- could not possibly
+-- receive one:
+--
+--     WARNING: props left ASYMMETRIC -- RR: no reply within 1000 ms,
+--                                       FR: no reply, RL: no reply
+--
+-- Three corners kept their old RPM while one was zeroed, which is the same
+-- large roll couple that has ended several runs on the craft's side. The
+-- retry logic added for this could not help: no number of retries produces a
+-- reply when nothing is listening.
+--
+-- AND DO NOT CUT THE PROPS IN THE AIR. They carry ~52% of craft weight at 64
+-- rpm. Zeroing them at +4.7 blocks removes that support while the ions are
+-- deliberately left at level 2, so the craft drops. Props come off only once
+-- the hull is actually down.
+local function shutdown()
+    clearAllTilts()
+
+    local state = session:read()
+    local altitude = state and session:craftY(state)
+    local gain = (altitude and session.groundY) and (altitude - session.groundY) or nil
+
+    if gain and gain > plan.groundedGain then
+        note("")
+        note(string.format("  STILL AIRBORNE at +%.1f -- leaving props at %d rpm.",
+            gain, plan.propRpm))
+        note("  Cutting them here removes ~52% of the lift while the banks are")
+        note("  deliberately held at level 2, which is a drop, and cutting them")
+        note("  UNEVENLY is the roll that has put this craft on its side more")
+        note("  than once. Land it with /fcs/bankctl.lua; the props are level.")
+    else
+        local stopped, reason = session:setAllProps(0)
+        if not stopped then
+            note("  WARNING: could not stop all props -- " .. tostring(reason))
+        end
+    end
+
+    pcall(session.finish, session)
+end
+
+pcall(parallel.waitForAny, shutdown, listenLoop)
 
 note("")
 note("=== SUMMARY ===")
