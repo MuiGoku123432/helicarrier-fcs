@@ -210,12 +210,57 @@ function Session:setProps(corner, rpm, attempts)
     return false, lastError
 end
 
+-- EVERY corner, even after one fails.
+--
+-- This used to return on the first failure, leaving the rest untouched -- and
+-- a partial application is worse than either extreme. Propellers carry ~52% of
+-- craft weight at 64 rpm, so three corners at 64 against one at 0 is a large
+-- roll couple.
+--
+-- Measured 2026-08-26. The craft had LANDED cleanly (y -26.47 against a ground
+-- of -26.578, roll -0.00, speed 0.09) when the end-of-run cleanup called
+-- setAllProps(0). FR was cut, a later corner failed, the other three stayed at
+-- 64, and the craft rolled to 29 degrees and lifted back off the ground:
+--
+--     t=219.1  roll -0.00   FL 64  FR  0  RL 64  RR 64
+--     t=225.4  roll 14.01
+--     t=228.1  roll 29.35   speed 7.0   airborne again
+--
+-- It then thrashed for seventy seconds before settling on its side. That is
+-- the "stuck sideways at the end of a run" symptom, and it is this function.
+--
+-- So: try all four, retry the ones that failed, and only then report. Leaving
+-- the props ASYMMETRIC is the outcome to avoid at almost any cost -- a craft
+-- with all four at the wrong speed is level, which is recoverable.
 function Session:setAllProps(rpm)
+    local failed = {}
     for _, corner in ipairs(flight.CORNERS) do
         local ok, err = self:setProps(corner, rpm)
-        if not ok then
-            return false, corner .. ": " .. tostring(err)
+        if not ok then failed[corner] = tostring(err) end
+    end
+
+    -- A second pass over just the stragglers. FR has needed two attempts on
+    -- most runs, so one flaky corner should not decide the craft's attitude.
+    for corner, previousError in pairs(failed) do
+        local ok, err = self:setProps(corner, rpm, 4)
+        if ok then
+            failed[corner] = nil
+        else
+            failed[corner] = tostring(err or previousError)
         end
+    end
+
+    local reasons = {}
+    for corner, err in pairs(failed) do
+        reasons[#reasons + 1] = corner .. ": " .. err
+    end
+    if #reasons > 0 then
+        -- Say so loudly: the craft is now asymmetric and that is a roll torque.
+        if self.note then
+            self.note("  WARNING: props left ASYMMETRIC -- " ..
+                table.concat(reasons, ", "))
+        end
+        return false, table.concat(reasons, ", ")
     end
     return true
 end

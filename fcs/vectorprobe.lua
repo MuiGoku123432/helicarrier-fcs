@@ -118,7 +118,7 @@ local plan = {
     -- B0, the differential-RPM staircase. Predicted 0.2712 deg/s^2 per RPM,
     -- so 3 RPM sweeps the 3 degree budget in about 2.7 s -- long enough for
     -- ~20 samples at 0.12 s, which is what the ion pulse could never buy.
-    rpmSteps = { 1, 2, 3 },
+    rpmSteps = { 2, 3 },
     rpmStepSeconds = 4.0,
     rpmMaxAngle = 3.0,
     rpmSampleSeconds = 0.12,
@@ -765,25 +765,60 @@ local function runRollAuthority()
     local predicted = rolldamp.authorityPerRpm()
     note(string.format("  predicted %.4f deg/s^2 per RPM (%.0f%% of critical damping)",
         predicted, predicted / rolldamp.criticalDamping() * 100))
+    note("  each level flown +N then -N; alpha is half the difference")
     note(string.format("  %6s %8s %9s %9s %9s %s",
-        "rpm", "samples", "swept", "implied", "alpha", "verdict"))
+        "rpm", "samples", "swept+", "swept-", "alpha", "verdict"))
 
+    -- REVERSE PAIRS. Each level is flown +N then -N, and the answer is half
+    -- the difference.
+    --
+    -- The craft carries the strafe oscillation into every step: 42 s period,
+    -- peak rate 0.90 deg/s, so up to 3.6 degrees of hull motion inside a 4 s
+    -- window. Against a signal of 2.2 degrees at 1 rpm, THE DISTURBANCE IS
+    -- BIGGER THAN WHAT IS BEING MEASURED. That is why the single-sided run
+    -- produced 0.1060, 0.2556 and 0.3335 for 1, 2 and 3 rpm -- rising, but not
+    -- in the 1:2:3 the physics requires -- and why two of three were caught by
+    -- the sweep cross-check.
+    --
+    -- Two adjacent 4 s windows sit at nearly the same phase of a 42 s
+    -- oscillation, so the hull's own contribution is very nearly identical in
+    -- both while the commanded torque flips sign. Differencing cancels it to
+    -- first order and doubles the signal. Averaging more single-sided steps
+    -- would not: the contamination is not zero-mean over a few samples.
     local points = {}
     for _, differential in ipairs(plan.rpmSteps) do
-        local result, reason = runRpmStep(differential)
-        if not result then
-            note(string.format("  %6d %8s   %s", differential, "-", tostring(reason)))
+        local forward = runRpmStep(differential)
+        session:hold(plan.rpmSettleSeconds, function(state)
+            session:trim(plan.climbGain, flight.MAX_CLIMB_RATE, 0, state)
+            return nil
+        end)
+        local reverse = runRpmStep(-differential)
+
+        if not forward or not reverse then
+            note(string.format("  %6d %8s   one half of the pair did not fit",
+                differential, "-"))
         else
+            local alpha = (forward.alpha - reverse.alpha) / 2
+            -- Both halves must have reached their commanded RPM, and the pair
+            -- must be roughly antisymmetric. A pair that is NOT antisymmetric
+            -- is one where something other than the commanded torque moved the
+            -- craft, and no amount of differencing rescues it.
+            local common = (forward.alpha + reverse.alpha) / 2
+            local antisymmetric = math.abs(alpha) > math.abs(common)
             note(string.format("  %6d %8d %9.2f %9.2f %9.4f %s",
-                differential, result.samples, result.swept, result.implied,
-                result.alpha,
-                result.consistent and "ok"
-                    or "FIT DISAGREES WITH SWEEP -- discarded"))
-            if not result.reached then
-                note("         (props never reached the commanded rpm)")
-            end
-            if result.consistent and result.reached then
-                points[#points + 1] = { x = differential, y = result.alpha }
+                differential, forward.samples + reverse.samples,
+                forward.swept, reverse.swept, alpha,
+                (forward.reached and reverse.reached and antisymmetric) and "ok"
+                    or "discarded"))
+            note(string.format("         +%d gave %+.4f, -%d gave %+.4f, common-mode %+.4f",
+                differential, forward.alpha, differential, reverse.alpha, common))
+            if not (forward.reached and reverse.reached) then
+                note("         (a half never reached the commanded rpm)")
+            elseif not antisymmetric then
+                note("         (common-mode exceeds the signal -- the hull moved")
+                note("          more than the command did)")
+            else
+                points[#points + 1] = { x = differential, y = alpha }
             end
         end
         session:hold(plan.rpmSettleSeconds, function(state)
