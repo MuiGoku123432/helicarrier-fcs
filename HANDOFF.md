@@ -84,23 +84,38 @@ What is left is **4 unanswered commands in 40, spread across three corners,
 with the link otherwise fast and healthy.** That is a uniform few-percent drop
 rate, and it is the thing the damper has to survive.
 
-**The next measurement is the one that decides the fix**, and the probe now
-takes it: the pod's own `commandsSeen` counter, sampled either side of the
-test. A drop is one of two opposite bugs and replies alone cannot tell them
-apart:
+**It is COMMAND LOSS, and it is attributed.** Second run, 20 round trips per
+corner, with the pod's own `commandsSeen` counter sampled either side
+(`flight-logs/podprobe_result_run2.txt`):
 
-- **COMMAND LOSS** -- the counter did not move. The actuator never moved
-  either. Re-send.
-- **ACK LOSS** -- the counter moved by the full count. The actuator DID move
-  and only the confirmation was lost, so a blocking waiter reports failure for
-  a command that succeeded -- and any caller that then "recovers" is acting on
-  a false picture of where the actuator is.
+| corner | acks | median | worst | unanswered | pod counter |
+|---|---|---|---|---|---|
+| FL | 20/20 | 52 ms | 85 ms | 0 | — |
+| FR | **20/20** | 51 ms | 58 ms | **0** | — |
+| RL | 19/20 | 52 ms | 86 ms | 1 | rose by 19 of 20 |
+| RR | 19/20 | 51 ms | 81 ms | 1 | rose by 19 of 20 |
 
-Re-run `/fcs/podprobe.lua 20` (the version with counter attribution is
-deployed) and read the verdict line. All six verdicts are reproduced offline:
-`luajit tools/run_podprobe_harness.lua all`.
+The counter agrees exactly with the reply count, so the two drops are
+**commands that never reached the pod** -- not lost acks. The actuator did not
+move, and nothing on the craft was left in a state the FCS misread. `faults=0`
+throughout, so these are not `not_armed` rejections either; this is genuine
+loss, distinct from the ~5% rejection tail this document already says not to
+chase.
 
-**Either way, do not put a blocking ack-waiter in the damper loop.** At a few
+**FR answered 20 of 20.** Across both runs it is 29/30 while RL is 27/30. FR is
+cleared; do not spend another session on it.
+
+Rate across both runs: **6 lost in 120, about 5%.** Mechanism unknown beyond
+"it did not arrive" -- separating a radio drop from a pod that was busy would
+need pod-side instrumentation, and it does not change what the sender must do.
+
+**What that means for the damper is better than it sounds.** A control loop
+recomputes and re-sends every iteration, so the loop IS the retry: a lost
+command is corrected ~0.13 s later by the next one, and at 5% the chance of a
+corner missing two in a row is 1 in 400. The actuator is at most one iteration
+stale. No retry logic is needed -- *provided nothing blocks waiting for an ack.*
+
+**So: do not put a blocking ack-waiter in the damper loop.** At a few
 percent per command and four corners per iteration, roughly one iteration in
 eight loses something, and `actuators.setPropellerRpm` turns that into a full
 second of no commands at all -- the failure `/fcs/vectorprobe.lua` already hit

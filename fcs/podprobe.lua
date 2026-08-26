@@ -5,12 +5,13 @@
 --   /fcs/podprobe.lua 25         25 round trips per corner
 --   /fcs/podprobe.lua --force    run even with a bank armed or holding thrust
 --
--- MEASURED 2026-08-26 (flight-logs/podprobe_result.txt), and it retired the
--- premise this tool was built on: FR IS NOT SPECIAL. All four corners resolve
--- correctly, all four transmit, acks land in ~51 ms -- and 4 of 40 commands
--- went unanswered, spread across FR, RL and RR. RL was the worst, not FR.
--- Whatever made FR look singular for a session, what is here now is a uniform
--- few-percent drop rate.
+-- MEASURED 2026-08-26 (flight-logs/podprobe_result.txt and _run2.txt), and it
+-- retired the premise this tool was built on: FR IS NOT SPECIAL. All four
+-- corners resolve correctly, all four transmit, acks land in ~51 ms, and FR
+-- answered 29 of 30. What is here is a uniform ~5% drop rate -- 6 lost in 120
+-- across two runs -- and the pod counter attributes it: COMMAND LOSS, the
+-- command never arrived. Not lost acks, so no actuator was left somewhere the
+-- FCS misread.
 --
 -- The symptom "no reply within 1000 ms" has four structurally different causes
 -- and they need OPPOSITE fixes, so guessing is expensive:
