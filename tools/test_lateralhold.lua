@@ -186,6 +186,89 @@ checkTrue("1 degree does not", not lateralhold.rollAbort(1))
 checkTrue("the abort fires far below the 28 deg the runaway reached",
     lateralhold.DEFAULTS.rollAbortDegrees < 10)
 
+-- --------------------------------------------------------------------------
+-- SUPERPOSITION. Two demands, one bearing each way.
+--
+-- The craft's REAL configurations, from the four-corner ground sweep: FL has
+-- bearing_1 facing up, RL has bearing_7 facing DOWN. Both appear here, because
+-- assuming index 1 is the upper one is exactly the bug this guards.
+-- --------------------------------------------------------------------------
+local FL = {  -- bearing_1 up, bearing_2 down
+    { thrustVector = { 0, 1, 0 } },
+    { thrustVector = { 0, -1, 0 } },
+}
+local RL = {  -- bearing_7 DOWN, bearing_8 up -- reversed from FL
+    { thrustVector = { 0, -1, 0 } },
+    { thrustVector = { 0, 1, 0 } },
+}
+
+-- Where a bearing actually pushes, given what we command it. Inverse of
+-- azimuthFor, and the relationship the ground sweep measured.
+local function pushHeading(command)
+    return (command.azimuth + (command.facingUp and 90 or 270)) % 360
+end
+
+-- PURE TRANSLATION: both bearings must push the SAME way. That is the mirrored
+-- command, reproduced as the A = 0 special case.
+for name, corner in pairs({ FL = FL, RL = RL }) do
+    local commands = lateralhold.bearingCommands({ heading = 90, tilt = 8 }, nil, corner)
+    check(name .. " pure translation: bearing 1 pushes 90",
+        pushHeading(commands[1]), 90, 1e-6)
+    check(name .. " pure translation: bearing 2 pushes 90 too",
+        pushHeading(commands[2]), 90, 1e-6)
+    check(name .. " pure translation: both tilt 8", commands[1].tilt, 8, 1e-9)
+    check(name .. " pure translation: second also 8", commands[2].tilt, 8, 1e-9)
+    -- The two bearings face opposite ways, so equal push means azimuths 180 apart
+    -- -- which is precisely what the mirror flag used to do.
+    check(name .. " ...via azimuths 180 apart",
+        math.abs((commands[1].azimuth - commands[2].azimuth + 540) % 360 - 180), 180, 1e-6)
+end
+
+-- PURE ATTITUDE: the bearings must push OPPOSITE ways -- zero net lateral, and
+-- the couple that the ground sweep measured at lateral exactly 0.0.
+for name, corner in pairs({ FL = FL, RL = RL }) do
+    local commands = lateralhold.bearingCommands(nil, { heading = 90, tilt = 8 }, corner)
+    local separation = math.abs(
+        (pushHeading(commands[1]) - pushHeading(commands[2]) + 540) % 360 - 180)
+    check(name .. " pure attitude: bearings push OPPOSITE ways", separation, 180, 1e-6)
+    check(name .. " pure attitude: equal magnitudes", commands[1].tilt, commands[2].tilt, 1e-9)
+    -- Opposite pushes of equal size: the lateral forces cancel exactly.
+    local netBow, netStarboard = 0, 0
+    for _, command in ipairs(commands) do
+        local radians = math.rad(pushHeading(command))
+        netBow = netBow + command.tilt * math.cos(radians)
+        netStarboard = netStarboard + command.tilt * math.sin(radians)
+    end
+    check(name .. " pure attitude: net lateral is ZERO",
+        math.sqrt(netBow ^ 2 + netStarboard ^ 2), 0, 1e-6)
+end
+
+-- The UP-facing bearing must respond the same way on both corners even though
+-- it is index 1 on FL and index 2 on RL. Polarity is read, not indexed.
+local flUp = lateralhold.bearingCommands(nil, { heading = 0, tilt = 5 }, FL)[1]
+local rlUp = lateralhold.bearingCommands(nil, { heading = 0, tilt = 5 }, RL)[2]
+checkTrue("FL's up-facing bearing is index 1", flUp.facingUp)
+checkTrue("RL's up-facing bearing is index 2", rlUp.facingUp)
+check("the up-facing bearing gets the same azimuth on both corners",
+    flUp.azimuth, rlUp.azimuth, 1e-9)
+
+-- MIXED: a translation and an attitude demand at once must give the two
+-- bearings DIFFERENT tilts -- that is superposition doing its job.
+local mixed = lateralhold.bearingCommands(
+    { heading = 90, tilt = 6 }, { heading = 90, tilt = 3 }, FL)
+check("mixed: upper gets L + A", mixed[1].tilt, 9, 1e-9)
+check("mixed: lower gets L - A", mixed[2].tilt, 3, 1e-9)
+
+-- Per-bearing clamp, and it must clamp the RESULTANT, not the demand.
+local huge = lateralhold.bearingCommands(
+    { heading = 90, tilt = 30 }, { heading = 0, tilt = 30 }, FL)
+checkTrue("a saturating demand clamps",
+    huge[1].tilt <= lateralhold.DEFAULTS.maxTiltDegrees + 1e-9)
+checkTrue("...and says so", huge[1].saturated)
+
+checkTrue("no bearings -> no commands",
+    lateralhold.bearingCommands(nil, nil, {}) == nil)
+
 print("")
 print(string.format("clamp %.0f deg -> holds against %.2f blocks/s (strafe: 1.67 mean, 2.27 peak)",
     lateralhold.DEFAULTS.maxTiltDegrees, terminal12))

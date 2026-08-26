@@ -111,6 +111,15 @@ local plan = {
     -- rollForLateral turns into 1.3 degrees -- inside the 2 degree limit, so
     -- the loop is not fighting its own clamp at the speeds it will actually see.
     velocityGain = 0.15,
+    -- B0, the couple. 6 degrees is well inside the clamp, and the roll budget
+    -- is 3 degrees -- half the 6 degree abort, and a ninth of the 28 the
+    -- runaway reached.
+    coupleTilt = 6.0,
+    coupleHeading = 90,
+    coupleSeconds = 3.0,
+    coupleMaxAngle = 3.0,
+    coupleSampleSeconds = 0.12,
+    coupleMinAlpha = 0.02,
     stepTilt = 8.0,
     stepSeconds = 2.0,
     holdStationSeconds = 30.0,
@@ -437,6 +446,25 @@ local function sendTilt(corner, angle, azimuth)
     })
 end
 
+-- Send a translation demand and an attitude demand to every corner, resolved
+-- per bearing. mirror=false because the azimuths already carry the polarity --
+-- the pod's own mirror flag would flip them a second time.
+local function commandSuperposed(translation, attitude)
+    for _, corner in ipairs(flight.CORNERS) do
+        local reading = readCorner(corner)
+        local commands = reading and lateralhold.bearingCommands(
+            translation, attitude, reading.bearings)
+        if commands then
+            for _, command in ipairs(commands) do
+                banks.send(corner, "set_tilt", {
+                    angle = command.tilt, azimuth = command.azimuth,
+                    bearing = command.index, mirror = false,
+                })
+            end
+        end
+    end
+end
+
 local function commandAllTilts(angle, azimuth)
     for _, corner in ipairs(flight.CORNERS) do
         sendTilt(corner, angle, azimuth)
@@ -614,6 +642,117 @@ local function holdLateral(seconds, label)
     note(string.format("    peak tilt %.1f deg, saturated on %d of %d samples",
         peakTilt, saturatedSamples, samples))
     return finalSpeed, peakSpeed
+end
+
+-- B0: THE COUPLE, AND THE SIGN CHECK THAT GATES EVERYTHING AFTER IT.
+--
+-- Commands a pure attitude demand -- bearings opposite, net lateral zero,
+-- measured at exactly 0.0 on the ground across three tilts and four corners --
+-- and watches which way the craft rolls and how fast.
+--
+-- It yields (ha + hb) as a roll authority in deg/s^2 per degree of tilt, which
+-- is the damper's gain. And it answers the question that caused the runaway:
+-- WHICH WAY. That sign is a difference of two similar numbers in the other
+-- channel and could not be derived; here it is read straight off a 2 second
+-- step at a couple of degrees of roll, instead of discovered at 28.
+local function runCouple()
+    note("")
+    note("== PHASE B0: pure couple -- roll authority and SIGN ==")
+    note("  bearings opposed: net lateral force is zero by construction")
+    note(string.format("  commanding attitude tilt %.0f deg toward heading %d",
+        plan.coupleTilt, plan.coupleHeading))
+
+    local before = session:readCheap()
+    local startRoll = before and before.roll or 0
+    local startSpeed = horizontalSpeed(session:read()) or 0
+
+    commandSuperposed(nil, { heading = plan.coupleHeading, tilt = plan.coupleTilt })
+
+    local samples = {}
+    local startAt = os.epoch("utc")
+    local restore = session.sampleSeconds
+    session.sampleSeconds = plan.coupleSampleSeconds
+    session:hold(plan.coupleSeconds, function(state, now)
+        session:trim(plan.climbGain, flight.MAX_CLIMB_RATE, 0, state)
+        if state and state.roll then
+            samples[#samples + 1] =
+                { t = (now - startAt) / 1000, angle = state.roll - startRoll }
+            if math.abs(state.roll - startRoll) >= plan.coupleMaxAngle
+                and #samples >= 5 then
+                return "angle reached"
+            end
+        end
+        return nil
+    end)
+    session.sampleSeconds = restore
+    clearAllTilts()
+
+    if #samples < 3 then
+        note("  NOT ENOUGH SAMPLES. Nothing measured; not closing the loop.")
+        return false
+    end
+
+    -- alpha from angle = 0.5*alpha*t^2 + w0*t, the same fit axisresponse uses.
+    local s11, s12, s22, y1, y2 = 0, 0, 0, 0, 0
+    for _, sample in ipairs(samples) do
+        local a, b = 0.5 * sample.t ^ 2, sample.t
+        s11 = s11 + a * a; s12 = s12 + a * b; s22 = s22 + b * b
+        y1 = y1 + a * sample.angle; y2 = y2 + b * sample.angle
+    end
+    local determinant = s11 * s22 - s12 * s12
+    if math.abs(determinant) < 1e-12 then
+        note("  fit is degenerate; not closing the loop.")
+        return false
+    end
+    local alpha = (y1 * s22 - y2 * s12) / determinant
+    local swept = samples[#samples].angle
+
+    note(string.format("  rolled %+.2f deg over %.2f s (%d samples)",
+        swept, samples[#samples].t, #samples))
+    note(string.format("  roll authority = %+.4f deg/s^2 = %+.4f per degree of tilt",
+        alpha, alpha / plan.coupleTilt))
+
+    -- Did it stay put? The ground says this command makes no lateral force;
+    -- this is the in-flight check on that, and it is the claim the whole
+    -- two-channel design rests on.
+    local endSpeed = horizontalSpeed(session:read()) or 0
+    note(string.format("  horizontal speed %.3f -> %.3f blocks/s (should barely move)",
+        startSpeed, endSpeed))
+
+    results.hover.rollPerTiltDegree = alpha / plan.coupleTilt
+    results.hover.coupleSign = alpha >= 0 and 1 or -1
+
+    -- THE SIGN. A positive attitude demand toward starboard should roll
+    -- starboard-low, which attitude.lua reports as POSITIVE roll.
+    note("")
+    if math.abs(alpha) < plan.coupleMinAlpha then
+        note(string.format("  *** COUPLE TOO WEAK: |%.4f| < %.4f deg/s^2 ***",
+            alpha, plan.coupleMinAlpha))
+        note("  The bearings straddle the COM too evenly to make a couple, or")
+        note("  the command did not take. Not closing the loop.")
+        return false
+    end
+
+    local expected = 1
+    if results.hover.coupleSign ~= expected then
+        note("  *** THE COUPLE IS INVERTED relative to the assumed sign. ***")
+        note("  Not a fault -- this is the measurement this phase exists for,")
+        note("  and it is the sign that ran the craft away last time. The")
+        note("  controller sign flips to match; NOT closing the loop this run.")
+        note("  Re-run to fly it with the measured sign.")
+        return false
+    end
+
+    local critical = 2 * math.sqrt(0.0223)
+    note(string.format("  critical damping needs %.4f deg/s^2 per deg/s;", critical))
+    note(string.format("  at the %.0f deg clamp this couple delivers %.4f deg/s^2,",
+        lateralhold.DEFAULTS.maxTiltDegrees,
+        math.abs(results.hover.rollPerTiltDegree) * lateralhold.DEFAULTS.maxTiltDegrees))
+    note("  so full critical damping is " ..
+        (math.abs(results.hover.rollPerTiltDegree)
+            * lateralhold.DEFAULTS.maxTiltDegrees >= critical * 0.9
+            and "REACHABLE." or "NOT reachable; expect underdamped."))
+    return true
 end
 
 -- B1: can the loop bring a drifting craft to rest?
@@ -838,6 +977,13 @@ local function mainLoop()
         return
     end
 
+    if not runCouple() then
+        note("")
+        note("  Phase B0 did not clear. Landing without closing any loop.")
+        session:descend()
+        return
+    end
+
     local restSpeed = runArrest()
     if not session.aborted then runStep(restSpeed) end
     if not session.aborted then runHold() end
@@ -863,6 +1009,10 @@ note("")
 note("=== SUMMARY ===")
 note("pair coherence      : " .. tostring(results.ground.verdict or "not measured")
     .. "   (unmirrored: " .. tostring(results.ground.unmirrored or "--") .. ")")
+if results.hover.rollPerTiltDegree then
+    note(string.format("roll authority      : %+.4f deg/s^2 per degree of tilt (couple)",
+        results.hover.rollPerTiltDegree))
+end
 if results.hover.arriveSpeed then
     note(string.format("arrived drifting    : %.3f blocks/s", results.hover.arriveSpeed))
     note(string.format("after the arrest    : %.3f blocks/s",

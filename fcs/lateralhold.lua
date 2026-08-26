@@ -212,6 +212,110 @@ function lateralhold.terminalSpeed(tiltDegrees, options)
     return acceleration / drag, acceleration
 end
 
+-- ---------------------------------------------------------------------------
+-- SUPERPOSITION: one bearing, two demands
+--
+-- Each corner carries a prop facing UP and a prop facing DOWN, straddling the
+-- centre of mass at +ha and -hb. That gives two independent channels, and the
+-- ground sweep measured both:
+--
+--   both bearings pushed the SAME way  -> lateral 2F, torque as (ha - hb)
+--   both bearings pushed OPPOSITE ways -> lateral 0.0 (measured, exactly),
+--                                         torque as (ha + hb)
+--
+-- The second is a PURE ROLL COUPLE with no translation, and it is the strong
+-- one: a sum where the other is a difference. |ha - hb| solves to 8.6 blocks
+-- from the observed coupling, so if ha + hb is 20 blocks the couple delivers
+-- 0.307 deg/s^2 at 12 degrees -- past the 0.268 critical damping needs. The
+-- zeta = 0.5 ceiling was an artefact of using the weak channel.
+--
+-- It also explains the sign that caused the runaway: (ha - hb) is a difference
+-- of two similar numbers, so which way it rolls depends on which prop sits
+-- further from the COM. Not derivable. Only measurable.
+--
+-- A bearing can only point one way, so the two demands SUPERPOSE as 2D vectors
+-- in force-heading space, magnitudes in degrees of tilt:
+--
+--     upper bearing  <-  L + A
+--     lower bearing  <-  L - A
+--
+-- A = 0 reproduces the mirrored command exactly, so "mirrored" stops being a
+-- mode and becomes a special case.
+--
+-- POLARITY IS READ, NEVER ASSUMED. Commanding azimuth phi to an UP-facing
+-- bearing produces force at heading phi + 90; to a DOWN-facing one, phi + 270.
+-- Which physical bearing faces which way DIFFERS BY CORNER -- FL's bearing_1
+-- faces up, RL's bearing_7 faces down -- so it comes from the telemetry vy
+-- sign, the same thing props.lua keys its own vertical sign off.
+-- ---------------------------------------------------------------------------
+
+local function toVector(headingDegrees, magnitude)
+    local radians = math.rad(headingDegrees or 0)
+    return {
+        bow = (magnitude or 0) * math.cos(radians),
+        starboard = (magnitude or 0) * math.sin(radians),
+    }
+end
+
+local function toPolar(vector)
+    local magnitude = math.sqrt(vector.bow ^ 2 + vector.starboard ^ 2)
+    if magnitude < 1e-9 then return 0, 0 end
+    return math.deg(math.atan2(vector.starboard, vector.bow)) % 360, magnitude
+end
+
+-- Azimuth that makes ONE bearing push toward `heading`, given which way it
+-- faces. facingUp is the sign of the bearing's own thrust vector y component.
+function lateralhold.azimuthFor(heading, facingUp)
+    local offset = facingUp and 90 or 270
+    return (heading - offset) % 360
+end
+
+-- Per-bearing commands for a translation demand and an attitude demand.
+--
+-- `translation` and `attitude` are { heading, tilt } -- a direction in
+-- force-heading space and a magnitude in DEGREES OF TILT. `bearings` is the
+-- corner's telemetry, each entry carrying a thrustVector whose y component
+-- says which way that bearing faces.
+--
+-- Returns one entry per bearing: { index, tilt, azimuth, facingUp }.
+function lateralhold.bearingCommands(translation, attitude, bearings, options)
+    options = options or {}
+    local maxTilt = options.maxTiltDegrees or lateralhold.DEFAULTS.maxTiltDegrees
+    if type(bearings) ~= "table" then return nil end
+
+    local L = toVector(translation and translation.heading,
+        translation and translation.tilt)
+    local A = toVector(attitude and attitude.heading, attitude and attitude.tilt)
+
+    local commands = {}
+    for index, bearing in ipairs(bearings) do
+        local vector = bearing.thrustVector
+        local vy = vector and (vector[2] or vector.y)
+        if type(vy) == "number" and math.abs(vy) > 1e-6 then
+            local facingUp = vy > 0
+            local sign = facingUp and 1 or -1
+            local combined = {
+                bow = L.bow + sign * A.bow,
+                starboard = L.starboard + sign * A.starboard,
+            }
+            local heading, tilt = toPolar(combined)
+            -- Clamped per bearing. Clamping the DEMAND instead would silently
+            -- rotate the resultant, turning a saturated roll command into a
+            -- translation command pointing somewhere nobody asked for.
+            if tilt > maxTilt then tilt = maxTilt end
+            commands[#commands + 1] = {
+                index = index,
+                tilt = tilt,
+                azimuth = lateralhold.azimuthFor(heading, facingUp),
+                facingUp = facingUp,
+                saturated = tilt >= maxTilt,
+            }
+        end
+    end
+    if #commands == 0 then return nil end
+    return commands
+end
+
 -- The INNER loop: hold a roll angle, using tilt as the torque source.
 --
 -- Proportional on the angle error plus a rate term, and the rate term is the
