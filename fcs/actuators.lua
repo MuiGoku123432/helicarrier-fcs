@@ -120,7 +120,7 @@ end
 -- it completely -- isActive is false, and nothing moves.
 -- ---------------------------------------------------------------------------
 
-function actuators.setTilt(corner, angleDegrees, azimuthDegrees, bearingIndex)
+function actuators.setTilt(corner, angleDegrees, azimuthDegrees, bearingIndex, mirror)
     corner = normalizeCorner(corner)
 
     local angle = tonumber(angleDegrees)
@@ -133,6 +133,11 @@ function actuators.setTilt(corner, angleDegrees, azimuthDegrees, bearingIndex)
         angle = angle,
         azimuth = tonumber(azimuthDegrees) or 0,
         bearing = bearingIndex,
+        -- Mirrors the down-facing bearing of each counter-rotating pair so the
+        -- two lateral forces ADD instead of cancelling. Measured: unmirrored
+        -- is exactly zero lateral force. Defaults true pod-side; passed
+        -- explicitly only when a caller wants the old behaviour to compare.
+        mirror = mirror,
     })
     if not sent then
         error(reason, 0)

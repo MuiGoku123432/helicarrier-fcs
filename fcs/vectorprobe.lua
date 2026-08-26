@@ -64,7 +64,9 @@ local plan = {
 
     -- Tilt steps for phase A. Small, and well inside props.lua's own 15 degree
     -- clamp. Three of them so a bad single reading cannot carry the verdict.
-    groundTilts = { 4, 8, 12 },
+    -- Capped at 8. The first ground run commanded 12 and the bearing reported
+    -- 10.84 -- it did not reach, so a 12 degree row measures an unknown angle.
+    groundTilts = { 4, 6, 8 },
 
     -- Azimuth to probe on the ground. NOT assumed to mean anything: props.lua's
     -- tiltTarget comment claims azimuth 0 points at the bow, but that comment
@@ -236,46 +238,74 @@ local function runGround()
             bearing.thrustVector[2], bearing.thrustVector[3]))
     end
 
-    note("")
-    note(string.format("  %6s %10s %12s %12s %11s %s",
-        "tilt", "reported", "lift", "lateral", "coherence", "verdict"))
+    -- BOTH MODES, same corner, same angles, back to back.
+    --
+    -- The first ground run measured coherence 0.000 with every bearing sent the
+    -- same azimuth, and the mirrored command is predicted to fix it. Measuring
+    -- them in ONE run is what makes that a comparison rather than two readings
+    -- taken minutes apart under conditions nobody wrote down -- and if mirroring
+    -- does nothing, the unmirrored rows prove the rig still reproduces the
+    -- original result rather than having quietly broken.
+    local function sweep(mirror, label)
+        note("")
+        note("  --- " .. label .. " ---")
+        note(string.format("  %6s %10s %12s %12s %11s %s",
+            "tilt", "reported", "lift", "lateral", "coherence", "verdict"))
 
-    local verdicts, samples = {}, {}
-    for _, angle in ipairs(plan.groundTilts) do
-        local applied, tiltErr = pcall(actuators.setTilt, corner, angle,
-            plan.groundAzimuth)
-        if not applied then
-            note("    tilt " .. angle .. " failed: " .. tostring(tiltErr))
-        else
-            waitSeconds(plan.tiltSettleSeconds)
-            local reading = readCorner(corner)
-            if reading and reading.force then
-                local verdict = vectoring.verdict(reading.force)
-                verdicts[#verdicts + 1] = verdict
-                note(string.format("  %6.1f %10s %12.1f %12.1f %11s %s",
-                    angle,
-                    reading.tiltAngle and string.format("%.2f", reading.tiltAngle)
-                        or "--",
-                    reading.force.vertical, reading.force.lateralOfSum,
-                    reading.force.coherence
-                        and string.format("%.3f", reading.force.coherence) or "--",
-                    verdict))
-
-                local heading = vectoring.headingFromBow(reading.force.force,
-                    config.axes)
-                samples[#samples + 1] = {
-                    angle = angle, heading = heading,
-                    lateral = reading.force.lateralOfSum,
-                    reported = reading.tiltAngle,
-                }
+        local verdicts, samples = {}, {}
+        for _, angle in ipairs(plan.groundTilts) do
+            local applied, tiltErr = pcall(actuators.setTilt, corner, angle,
+                plan.groundAzimuth, nil, mirror)
+            if not applied then
+                note("    tilt " .. angle .. " failed: " .. tostring(tiltErr))
             else
-                note(string.format("  %6.1f   -- no usable reading --", angle))
+                waitSeconds(plan.tiltSettleSeconds)
+                local reading = readCorner(corner)
+                if reading and reading.force then
+                    local verdict = vectoring.verdict(reading.force)
+                    verdicts[#verdicts + 1] = verdict
+                    note(string.format("  %6.1f %10s %12.1f %12.1f %11s %s",
+                        angle,
+                        reading.tiltAngle and string.format("%.2f", reading.tiltAngle)
+                            or "--",
+                        reading.force.vertical, reading.force.lateralOfSum,
+                        reading.force.coherence
+                            and string.format("%.3f", reading.force.coherence) or "--",
+                        verdict))
+
+                    -- THE PER-BEARING VECTORS ARE THE EVIDENCE for the headline
+                    -- claim, and the first run printed them only for the neutral
+                    -- baseline -- so "the laterals cancel" had to be taken on
+                    -- trust. Printed at every step now.
+                    for _, bearing in ipairs(reading.bearings) do
+                        note(string.format("           %-30s t %11.2f  vec {%+.4f, %+.4f, %+.4f}",
+                            bearing.name, bearing.thrust,
+                            bearing.thrustVector[1], bearing.thrustVector[2],
+                            bearing.thrustVector[3]))
+                    end
+
+                    local heading = vectoring.headingFromBow(reading.force.force,
+                        config.axes)
+                    samples[#samples + 1] = {
+                        angle = angle, heading = heading,
+                        lateral = reading.force.lateralOfSum,
+                        reported = reading.tiltAngle,
+                    }
+                else
+                    note(string.format("  %6.1f   -- no usable reading --", angle))
+                end
             end
         end
+        pcall(actuators.setTilt, corner, 0, 0)
+        waitSeconds(1.0)
+        return verdicts, samples
     end
 
-    pcall(actuators.setTilt, corner, 0, 0)
-    waitSeconds(1.0)
+    local plainVerdicts = sweep(false, "UNMIRRORED (both bearings same azimuth)")
+    local verdicts, samples = sweep(true, "MIRRORED (down-facing bearing flipped 180)")
+
+    results.ground.unmirrored = plainVerdicts[1]
+
     pcall(session.setAllProps, session, 0)
 
     -- The verdict has to be unanimous. A tool that averages ADDS and CANCELS
@@ -301,14 +331,15 @@ local function runGround()
     results.ground.samples = samples
 
     if agreed == vectoring.CANCELS then
-        note("  *** THE PAIR CANCELS. Common-mode tilt makes NO lateral force. ***")
-        note("  Vectoring cannot translate this craft as built. Phase B is")
-        note("  pointless and will not run.")
-        note("")
-        note("  This is a real answer, not a failure: it was the thing worth")
-        note("  knowing, and it cost no flight. The remaining routes are")
-        note("  setThrustHandedness reaction torque, or re-mounting one bearing")
-        note("  of each pair so the pair no longer mirrors.")
+        note("  *** THE PAIR CANCELS EVEN MIRRORED. No lateral force. ***")
+        note("  Mirroring the down-facing bearing was the fix predicted from the")
+        note("  first run's measured vectors, and it did not take. Compare the")
+        note("  two sweeps above: if the vectors are identical in both, the")
+        note("  mirror flag never reached props.lua -- check that the pods are")
+        note("  running the build that accepts message.mirror. If the vectors")
+        note("  DID change and the laterals still cancel, the model is wrong")
+        note("  and the routes left are setThrustHandedness reaction torque or")
+        note("  re-mounting one bearing of each pair.")
         return false
     elseif agreed == vectoring.PARTIAL then
         note("  PARTIAL coherence. Some lateral force survives, but the pair")
@@ -685,7 +716,8 @@ pcall(session.finish, session)
 
 note("")
 note("=== SUMMARY ===")
-note("pair coherence      : " .. tostring(results.ground.verdict or "not measured"))
+note("pair coherence      : " .. tostring(results.ground.verdict or "not measured")
+    .. "   (unmirrored: " .. tostring(results.ground.unmirrored or "--") .. ")")
 if results.hover.lateralPerDegree then
     note(string.format("lateral force       : %.4f blocks/s^2 per degree of common tilt",
         results.hover.lateralPerDegree))

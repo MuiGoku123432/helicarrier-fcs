@@ -342,7 +342,37 @@ local MAX_TILT_DEGREES = 15
 -- handedness and each bearing tilts about its OWN normal. Redefining a
 -- convention to match an assumption is how this project acquired six of these.
 -- /fcs/vectorprobe.lua measures the real mapping and prints it.
-local function tiltTarget(bearing, angle, azimuth)
+--
+-- MEASURED 2026-08-26, and it changes what this function has to do.
+--
+-- /fcs/vectorprobe.lua tilted FL through 4, 8 and 12 degrees on the ground and
+-- read the pair back:
+--
+--     bearing_1  thrust -11498.03  vec { 0,  1, 0}
+--     bearing_2  thrust +11498.03  vec { 0, -1, 0}
+--     coherence 0.000 at every step -- THE LATERAL FORCES CANCEL EXACTLY
+--
+-- Opposite normals AND opposite thrust signs. Tilt both to the same azimuth
+-- and the partner's lateral component points the same way in space, but its
+-- inverted thrust flips the force -- so the pair pushes the craft nowhere
+-- sideways while still lifting. Commanding a common azimuth is not a weak
+-- control input, it is exactly zero.
+--
+-- MIRRORING FIXES IT. Flip the azimuth by 180 degrees for the down-facing
+-- bearing and the two lateral forces align:
+--
+--     both bearings azimuth 0   ->  lateral      0.0   coherence 0.000
+--     bearing 2 mirrored        ->  lateral   3200.4   coherence 1.000
+--
+-- with the vertical component identical in both cases. The normal already
+-- decides the vertical sign below, and it tracks the thrust sign on this
+-- craft, so it is the right thing to key off -- getThrust is not available
+-- here without another peripheral call per bearing.
+--
+-- `mirror` defaults TRUE because the unmirrored behaviour has no use: it
+-- generates no lateral force by construction. Pass mirror = false to
+-- reproduce the old behaviour for comparison, which is what the probe does.
+local function tiltTarget(bearing, angle, azimuth, mirror)
     local normal = { 0, 1, 0 }
     local getBlockNormal = optional(bearing, "getBlockNormal")
     if getBlockNormal then
@@ -355,6 +385,9 @@ local function tiltTarget(bearing, angle, azimuth)
     local sign = (normal[2] >= 0) and 1 or -1
     local tilt = math.rad(angle)
     local swing = math.rad(azimuth or 0)
+    if mirror ~= false and sign < 0 then
+        swing = swing + math.pi
+    end
 
     return {
         math.sin(tilt) * math.cos(swing),
@@ -365,7 +398,7 @@ end
 
 -- Apply a tilt to every bearing on this corner, or to one of them by index.
 -- Returns a per-bearing report so the caller can see what actually took.
-function props.setTilt(angle, azimuth, index)
+function props.setTilt(angle, azimuth, index, mirror)
     local requested = tonumber(angle)
     if not requested then
         error("tilt angle must be a number", 0)
@@ -384,7 +417,7 @@ function props.setTilt(angle, azimuth, index)
             if not setManualTarget then
                 applied[bearingIndex] = { error = "setManualTarget absent" }
             else
-                local target = tiltTarget(bearing, requested, azimuth)
+                local target = tiltTarget(bearing, requested, azimuth, mirror)
                 local ok, err = pcall(setManualTarget, target)
                 applied[bearingIndex] = ok
                     and { target = target, requested = requested, azimuth = azimuth }
@@ -393,7 +426,8 @@ function props.setTilt(angle, azimuth, index)
         end
     end
 
-    return { angle = requested, azimuth = azimuth, bearings = applied }
+    return { angle = requested, azimuth = azimuth,
+             mirror = (mirror ~= false), bearings = applied }
 end
 
 function props.clearTilt(index)

@@ -206,6 +206,41 @@ check("clean staircase has no residual", worst, 0, 1e-9)
 checkEqual("a single point is not a fit",
     vectoring.fitThroughOrigin({ { x = 1, y = 2 } }), nil)
 
+-- --------------------------------------------------------------------------
+-- THE MIRROR RULE, against the configuration the craft actually reported.
+--
+-- Ground run 2026-08-26 on FL: bearing_1 thrust -11498.03 vec {0,1,0},
+-- bearing_2 thrust +11498.03 vec {0,-1,0}, coherence 0.000 at 4, 6 and 8 deg.
+-- These reproduce that from the measured inputs, and pin the fix.
+-- --------------------------------------------------------------------------
+local MEASURED = 11498.03
+local function commandedPair(azimuth1, azimuth2, tiltDegrees)
+    local function target(azimuth, up)
+        local t, a = math.rad(tiltDegrees), math.rad(azimuth)
+        return { math.sin(t) * math.cos(a), up * math.cos(t), math.sin(t) * math.sin(a) }
+    end
+    return vectoring.cornerForce({
+        { thrustVector = target(azimuth1, 1), thrust = -MEASURED },
+        { thrustVector = target(azimuth2, -1), thrust = MEASURED },
+    })
+end
+
+local unmirrored = commandedPair(0, 0, 8)
+checkEqual("unmirrored reproduces the measured CANCELS",
+    vectoring.verdict(unmirrored), vectoring.CANCELS)
+check("unmirrored lateral is zero, as measured", unmirrored.lateralOfSum, 0, 1e-6)
+
+local mirrored = commandedPair(0, 180, 8)
+checkEqual("mirroring the down-facing bearing gives ADDS",
+    vectoring.verdict(mirrored), vectoring.ADDS)
+check("mirrored coherence is 1.0", mirrored.coherence, 1.0, 1e-9)
+check("mirrored lateral is the full 2 x T x sin(tilt)",
+    mirrored.lateralOfSum, 2 * MEASURED * math.sin(math.rad(8)), 1e-6)
+
+-- Lift MUST be untouched by mirroring -- the fix must not cost altitude.
+check("mirroring does not change lift",
+    mirrored.vertical - unmirrored.vertical, 0, 1e-9)
+
 print("")
 print(string.format("arms from tensor: lateral %.2f  longitudinal %.2f blocks",
     arms.lateral, arms.longitudinal))

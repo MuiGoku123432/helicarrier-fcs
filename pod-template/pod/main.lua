@@ -360,7 +360,8 @@ local function networkLoop()
                         rejectReply(senderId, "bad_tilt")
                     else
                         local ok, applied = pcall(props.setTilt,
-                            message.angle, message.azimuth, message.bearing)
+                            message.angle, message.azimuth, message.bearing,
+                            message.mirror)
                         if ok then
                             acceptCommand(message)
                             state.lastTilt = applied and applied.angle
