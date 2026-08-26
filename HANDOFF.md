@@ -231,6 +231,64 @@ MEASURED PHYSICS above says 52.1%. The difference is probably the altitude
 reference for the air-density correction. It does not change the conclusion —
 at either figure the craft is using well under a quarter of its thrust.)*
 
+### The settle gate worked — pitch measured clean, ratio now legal
+
+2026-08-26 11:05, `flight-logs/axisresponse_result_run12_settlegate.txt`.
+
+| | run 11 (old gate) | run 12 (new gate) |
+|---|---|---|
+| roll at pitch-pulse start | **-6.89 deg** | **+0.48 deg** |
+| roll/pitch ratio | **11.02** — exceeds the 4.49 bound | **1.67** — legal |
+| pitch response | 2.0681 (contaminated) | **8.4040** |
+
+    RESPONSE MATRIX (deg/s^2 per unit demand):
+      demand              roll resp     pitch resp
+      roll                  14.0724        -1.4054
+      pitch                  4.9651         8.4040
+
+No SUSPECT flag: both pulses started from a genuinely settled craft. **Pitch
+has now been measured properly for the first time**, and the ratio 1.67 implies
+an arm ratio of 0.37 — a craft about 2.7x longer than wide, which independently
+matches the ~2.4x estimated from run 8's geometry. Two different runs agreeing
+on the hull's proportions is a real cross-check.
+
+**BUT ROLL IS STILL DRIFTING, and it is not converging:**
+
+| run | roll response | collective at hold |
+|---|---|---|
+| 9 | 28.33 | — |
+| 10 | 26.93 | 0.223 |
+| 11 | 22.79 | 0.192 |
+| **12** | **14.07** | 0.197 |
+
+A **2.0x range, monotonically declining**. That is not measurement noise; noise
+scatters, it does not trend. Do not quote a roll authority until this is
+understood.
+
+**Leading hypothesis: the pulse differential is quantisation-dependent and the
+trim is moving collective underneath it.** The demand is 0.3 x authority 0.25 =
++/-0.0375 per corner, a total spread of 0.075 = **1.125 ion quanta**. Whether
+that lands as a ONE-level or TWO-level differential depends on where collective
+sits on the level grid:
+
+    collective 0.200 -> corners 0.2375 / 0.1625 -> levels 3 / 2 -> 1 level
+    collective 0.230 -> corners 0.2675 / 0.1925 -> levels 4 / 2 -> 2 LEVELS
+    collective 0.170 -> corners 0.2075 / 0.1325 -> levels 3 / 1 -> 2 LEVELS
+
+A 2x swing in applied torque, which is exactly the observed range. The
+collective REPORTED at hold does not settle it, because trim keeps moving
+collective during the pulse.
+
+**Confirming it needs the per-sample corner powers, i.e. `main.lua` running.**
+It has been down since 09:57 (heartbeat frozen at sequence 1113) and no flight
+CSV exists for runs 9-12. Start the logger in its own tab before the next run.
+
+The honest reading of this project's own lesson — *"a correction smaller than
+one ion level is not a small correction, it is an intermittent large one"* —
+is that a pulse spanning 1.125 quanta was never a clean experiment. A pulse
+sized to an EXACT integer number of levels, or one that pins collective for
+its duration, would remove the ambiguity.
+
 ### First COMPLETE run — and why the pitch number is still not usable
 
 2026-08-26 10:52. No abort, both axes pulsed, landed clean. The cancel worked:
