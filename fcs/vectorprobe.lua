@@ -1016,6 +1016,18 @@ local function mainLoop()
     -- So spin them up first, and require every corner to actually REACH the
     -- commanded RPM and report active. That is a load test, not an inventory.
     -- 16 rpm is 13% of craft weight, nowhere near lift.
+    -- STATIC thrust first, props stopped. This is the reading that actually
+    -- discriminates: it caught the dead FR at 7.6e-32 against 111688 on the
+    -- others, and passed all four at 111687-111688 once repaired.
+    local staticThrust = {}
+    for _, corner in ipairs(flight.CORNERS) do
+        local pod = banks.getState()[corner]
+        local prop = pod and pod.prop
+        if prop and type(prop.thrust) == "number" then
+            staticThrust[corner] = prop.thrust
+        end
+    end
+
     local spun, spinError = session:setAllProps(plan.groundRpm)
     if not spun then
         note("  PREFLIGHT FAILED to start props: " .. tostring(spinError))
@@ -1038,41 +1050,26 @@ local function mainLoop()
         return nil
     end)
 
-    -- WAIT FOR THRUST TO SETTLE, NOT JUST RPM.
+    -- NO THRUST COMPARISON WHILE SPINNING. It was tried and it does not work.
     --
-    -- getThrust is NOT the static getter this check first assumed. At rest all
-    -- four corners read ~1e-20; spun up they climb to their working value. The
-    -- first version compared the four the instant RPM was reached and read
-    -- 100/72/90/29% -- four points on a spin-up ramp, sampled at four
-    -- different moments, reported as a drivetrain fault.
+    -- Two ground runs ten minutes apart, same craft, nothing touched between:
     --
-    -- That is distortion #4 from the axis-response campaign in a new place:
-    -- measuring across a ramp. It is also a FALSE POSITIVE on a safety gate,
-    -- which is the worse kind -- it teaches the reader to fly past the check.
+    --     run A   FL 100%   FR  66%   RL 100%   RR 100%
+    --     run B   FL 100%   FR  97%   RL  19%   RR   0%
     --
-    -- So poll until each corner's thrust stops changing, and only then compare.
-    local previous, stableFor = {}, 0
-    session:hold(plan.thrustSettleSeconds, function(state, now)
-        local allStable = true
-        for _, corner in ipairs(flight.CORNERS) do
-            local pod = banks.getState()[corner]
-            local thrust = pod and pod.prop and pod.prop.thrust
-            if type(thrust) ~= "number" or thrust <= 0 then
-                allStable = false
-            else
-                local was = previous[corner]
-                -- Within 2% of the previous sample counts as settled.
-                if not was or math.abs(thrust - was) > math.abs(thrust) * 0.02 then
-                    allStable = false
-                end
-                previous[corner] = thrust
-            end
-        end
-        stableFor = allStable and (stableFor + 1) or 0
-        -- Three consecutive stable rounds, so one lucky pair cannot pass it.
-        if stableFor >= 3 then return "thrust settled" end
-        return nil
-    end)
+    -- Three different corners "failed". The per-bearing values do not
+    -- reconcile with the corner totals either -- RR read 0.00 while its two
+    -- bearings read +/-9917.72 -- and rot reads 0 on all eight while active is
+    -- true. getThrust is not a stable quantity under rotation: it oscillates,
+    -- and the aggregate and per-bearing reads are taken at different moments.
+    --
+    -- A "settle" of 2% across three rounds passed on luck and produced three
+    -- consecutive FALSE FAULTS, which is worse than no check -- it is the
+    -- cry-wolf failure this file already learned about from the ratio bound.
+    --
+    -- So thrust is compared at REST, where it discriminated correctly, and the
+    -- spun-up pass tests only what is reliable under load: a kinetic source,
+    -- reaching the commanded RPM, active bearings, and no overstress.
 
     -- Collect the per-corner verdict from the SETTLED readings.
     local thrusts, dead = {}, {}
@@ -1095,14 +1092,14 @@ local function mainLoop()
             if prop.bearingOverstressed then
                 dead[#dead + 1] = corner .. " (OVERSTRESSED)"
             end
-            local settledThrust = previous[corner] or prop.thrust
-            if type(settledThrust) == "number" then
-                thrusts[corner] = settledThrust
+            -- The AT-REST reading, taken before the props were started.
+            if type(staticThrust[corner]) == "number" then
+                thrusts[corner] = staticThrust[corner]
             end
         end
     end
 
-    note("  drivetrain, props at " .. plan.groundRpm .. " rpm:")
+    note("  drivetrain (thrust at rest, rpm/active under load):")
     local highest = 0
     for _, corner in ipairs(flight.CORNERS) do
         local thrust = thrusts[corner]
@@ -1130,24 +1127,6 @@ local function mainLoop()
     -- nobody is watching that is still burning stress.
     pcall(session.setAllProps, session, 0)
 
-    if stableFor < 3 then
-        note("")
-        note("  Thrust never settled within " .. plan.thrustSettleSeconds .. " s.")
-        note("  The per-corner comparison below would be of a spin-up ramp, so")
-        note("  it is NOT treated as a fault -- but nothing is confirmed either.")
-        -- Drop ONLY the thrust-comparison faults. A missing kinetic source, a
-        -- corner that never reached RPM, an inactive bearing or an overstressed
-        -- drivetrain are all still real, and an unsettled ramp says nothing
-        -- about any of them.
-        local kept = {}
-        for _, entry in ipairs(dead) do
-            if not entry:match("thrust %d+%% of the strongest") then
-                kept[#kept + 1] = entry
-            end
-        end
-        dead = kept
-    end
-
     if #dead > 0 then
         note("")
         note("  *** DRIVETRAIN FAULT: " .. table.concat(dead, ", ") .. " ***")
@@ -1165,19 +1144,22 @@ local function mainLoop()
             local perBearing = prop and prop.perBearing
             if type(perBearing) == "table" then
                 for index, bearing in ipairs(perBearing) do
-                    note(string.format("    %-4s %-30s thrust %14s  rot %s",
+                    -- Thrust only. bearingAngularSpeed reads 0 on all eight
+                    -- bearings even at 16 rpm with active true, the same way
+                    -- bearingRpm does, so printing it just invites someone to
+                    -- read a fault into a field that never reports.
+                    note(string.format("    %-4s %-30s thrust %14s",
                         corner, tostring(bearing.name or index),
                         type(bearing.thrust) == "number"
-                            and string.format("%.2f", bearing.thrust) or "--",
-                        tostring(prop.bearingAngularSpeed)))
+                            and string.format("%.2f", bearing.thrust) or "--"))
                 end
             end
         end
         note("")
-        note("  A pair that splits UNEVENLY is one bearing's drivetrain.")
-        note("  A pair that is evenly low is the corner's controller or its")
-        note("  rotational supply -- in Create, not enough stress capacity to")
-        note("  hold the commanded speed under load.")
+        note("  These are AT-REST readings. A pair that splits UNEVENLY is one")
+        note("  bearing's drivetrain -- the bearing_5 defect had exactly that")
+        note("  shape, 13804 against 13961 on its own partner. A pair that is")
+        note("  evenly low is the corner's controller or its supply.")
         note("  A corner that makes no thrust is a standing torque, and every")
         note("  number measured afterwards is of that rather than of whatever")
         note("  was commanded. Repair it in-world before flying this again.")
