@@ -59,6 +59,7 @@ local banks = require("fcs.banks")
 local profile = require("fcs.mixer_profile")
 local atmosphere = require("fcs.atmosphere")
 local flight = require("fcs.flight")
+local craftgeom = require("fcs.craftgeom")
 
 local plan = {
     groundPowers = { 0.00, 0.03, 0.06, 0.09, 0.12, 0.15 },
@@ -279,6 +280,12 @@ local function sampleTensor(label)
     -- ~1.6 s sample here leaves the craft rotating uncancelled. That is
     -- exactly what took the 2026-08-26 10:23 run to 44 deg of roll.
     local state = session:readCheap()
+    -- Mass alongside the tensor, because the two are only meaningful together:
+    -- the box solve divides one by the other. Read live rather than reusing
+    -- the 1158293.4 weight constant further down -- if the hull is ever
+    -- rebuilt, a stale mass would silently reshape the predicted geometry.
+    local massOk, mass = pcall(sublevel.getMass)
+
     tensorSamples[#tensorSamples + 1] = {
         label = label,
         roll = state and state.roll or 0,
@@ -288,6 +295,10 @@ local function sampleTensor(label)
         zz = tensor[3] and tensor[3][3],
         xy = tensor[1][2], xz = tensor[1][3],
         yz = tensor[2] and tensor[2][3],
+        -- Kept whole for fcs.craftgeom, which needs all three diagonals at
+        -- once to solve the hull box.
+        tensor = tensor,
+        mass = (massOk and type(mass) == "number") and mass or nil,
     }
 end
 
@@ -1027,65 +1038,147 @@ if results.roll and results.pitch and results.roll.perDemand and results.pitch.p
             note("    diagonal: a roll demand pitches the craft and vice versa.")
             note("    Do NOT quote these as authority.roll / authority.pitch.")
             note("")
-            note("    Cross-check before changing any sign -- the CHEAP inertia")
-            note("    axis (index 3, 4.49x cheaper than index 1) must be the one")
-            note("    that responds more:")
+            note("    Cross-check before changing any sign -- if the labels are")
+            note("    merely rotated, the off-diagonal ratio should land on the")
+            note("    SAME geometric prediction the diagonal one would have:")
             local ratio = math.abs(pc) > 1e-9 and math.abs(rc / pc) or nil
-            if ratio then
+            local sample = tensorSamples[1]
+            local expected
+            if sample and sample.tensor and sample.mass then
+                expected = craftgeom.expectedRatio(
+                    sample.tensor, sample.mass, config.axes)
+            end
+            if ratio and expected then
                 note(string.format("      measured off-diagonal ratio = %.2f", ratio))
-                note("      inertia t[1][1]/t[3][3]     = 4.49")
-                if math.abs(ratio - 4.49) < 1.0 then
+                note(string.format("      geometry predicts           = %.2f", expected))
+                -- Compared against the arm-corrected prediction, not against
+                -- t[1][1]/t[3][3]. That bare tensor ratio assumes equal moment
+                -- arms, and on a hull 2.35x longer than wide it is 2.3x too
+                -- large -- so this test used to "AGREE" with the wrong number.
+                if math.abs(ratio - expected) < expected * 0.30 then
                     note("      AGREES -- attitude.lua is right and the CORNER LABELS")
                     note("      are rotated relative to the hull. Fix the mixer's")
                     note("      corner map, not the attitude code.")
                 end
+            elseif ratio then
+                note(string.format("      measured off-diagonal ratio = %.2f", ratio))
+                note("      no tensor/mass sample, so no geometric comparison")
             end
         else
             local ratio = results.roll.perDemand / results.pitch.perDemand
             note(string.format("roll/pitch ratio     : %.2f", ratio))
 
-            -- HARD BOUND. alpha = torque/I and torque = arm x the same
-            -- one-level force, so ratio = arm_ratio x t[1][1]/t[3][3].
-            -- t[3][3] (the bow axis) is the SMALLEST of the three, so the
-            -- craft is long and narrow, the lateral arm is the shorter one,
-            -- and arm_ratio < 1. The ratio therefore cannot exceed 4.49.
+            -- THE BOUND, DERIVED FROM THIS HULL RATHER THAN ASSUMED.
             --
-            -- The 2026-08-26 10:52 run reported 11.02 and nothing objected.
-            -- A number on the wrong side of a physical bound is not a
-            -- calibration, and it must not be quoted as one.
-            local BOUND = 389348390.47 / 86744908.79
-            local TOLERANCE = 1.20
-            local excess = math.abs(ratio) / BOUND
-            if excess > TOLERANCE then
+            -- alpha = torque/I and torque = arm x the same one-level force, so
+            --     ratio = (lateral arm / longitudinal arm) x I_pitch / I_roll
+            -- and the old check set the arm ratio to 1, giving 4.49.
+            --
+            -- THAT IS THE VALUE FOR A SQUARE CRAFT. This hull is 205 x 87
+            -- blocks -- 2.35x longer than wide -- so the arm ratio is 0.425
+            -- and the expected ratio is 1.91. Run 18 measured 4.07, PASSED the
+            -- 4.49 check, and was about twice too high. The check was not
+            -- loose; it was measuring the wrong thing, and only ever caught
+            -- readings that were too HIGH.
+            --
+            -- fcs.craftgeom solves the hull box from the three tensor
+            -- diagonals, so the bound now comes from the craft Sable reports
+            -- rather than from a constant pasted in at authoring time.
+            local sample = tensorSamples[1]
+            local expected, box
+            if sample and sample.tensor and sample.mass then
+                expected, box = craftgeom.expectedRatio(
+                    sample.tensor, sample.mass, config.axes)
+            end
+
+            if not expected then
                 note("")
-                note(string.format("*** RATIO %.2f EXCEEDS THE PHYSICAL BOUND %.2f by %.0f%% ***",
-                    math.abs(ratio), BOUND, (excess - 1) * 100))
-                note("    alpha = torque/I with a common force, so the ratio is")
-                note("    arm_ratio x t[1][1]/t[3][3]. The bow axis has the")
-                note("    SMALLEST inertia, so the craft is long and narrow and")
-                note("    arm_ratio < 1 -- the ratio cannot exceed the tensor's.")
-                note("    One of these two numbers is wrong. Usual causes: a pulse")
-                note("    that began before the craft settled, or too few samples")
-                note("    on the fast axis.")
-            elseif math.abs(ratio) > BOUND then
-                -- A hard bound with no tolerance cries wolf. The harness, whose
-                -- true ratio IS the tensor's 4.48, measures 4.80 -- 7% high from
-                -- discretisation alone. Flagging that as "one of these numbers is
-                -- wrong" trains the reader to ignore the check.
-                note("")
-                note(string.format("  ratio %.2f is %.0f%% above the %.2f bound -- at it,",
-                    math.abs(ratio), (excess - 1) * 100, BOUND))
-                note("  and consistent with it within measurement error. Not a")
-                note("  violation; the bound assumes arm_ratio = 1, which is its")
-                note("  own upper limit.")
+                note("  No usable tensor/mass sample, so the ratio cannot be")
+                note("  checked against the hull geometry this run.")
+            else
+                note(string.format("expected ratio       : %.2f  (hull %.0f x %.0f blocks)",
+                    expected, box.length, box.beam))
+
+                -- Two-sided, and that is the point. The old check could only
+                -- fire on a high reading, so a roll number that came in LOW
+                -- would have been quoted as a calibration without complaint.
+                local excess = math.abs(ratio) / expected
+                if excess > 1.30 or excess < 0.70 then
+                    note("")
+                    note(string.format("*** RATIO %.2f IS %.0f%% %s THE %.2f THE GEOMETRY PREDICTS ***",
+                        math.abs(ratio),
+                        math.abs(excess - 1) * 100,
+                        excess > 1 and "ABOVE" or "BELOW",
+                        expected))
+                    note("    The arms come from the hull box, which the inertia")
+                    note("    tensor over-determines, so this is not a tunable.")
+                    note("    Usual cause: too few samples on the fast axis --")
+                    note("    roll crosses the 6 deg cap in under a second, and a")
+                    note("    quadratic fit over 6 points is mostly fit noise.")
+                    note("    Cross-check each axis against the bound below before")
+                    note("    quoting EITHER number.")
+                else
+                    note(string.format("  ratio is within %.0f%% of the %.2f the geometry predicts.",
+                        math.abs(excess - 1) * 100, expected))
+                end
+
+                -- ABSOLUTE bounds, which the ratio alone cannot give: a run can
+                -- have a perfectly good ratio with both axes scaled wrong.
+                --
+                -- A pod cannot sit outboard of the hull it is bolted to, so
+                -- half the hull box is a ceiling no honest measurement passes.
+                -- It is tight on this craft -- runs 9 and 10 measured 97% and
+                -- 102% of it -- which is what corner-mounted pods should do.
+                --
+                -- GATED on Phase A having produced a force that is physically
+                -- plausible for this craft. Gravity is -11 in this dimension
+                -- (aero.getGravity, flight-logs/airprofile.txt), so the craft
+                -- weighs mass x 11 and the ions measure 3.34x that.
+                --
+                -- Without this gate the ceiling inherits whatever Phase A got.
+                -- The offline harness reports 2000 against its own internal
+                -- 3,870,720, and the check duly printed "roll 19.83 of 0.01 =
+                -- 137791% IMPOSSIBLE" -- which is precisely the cry-wolf output
+                -- that teaches a reader to skip past this section.
+                local weight = sample.mass * 11.0
+                local plausible = phaseA.forcePerPower
+                    and phaseA.forcePerPower > weight * 0.5
+                    and phaseA.forcePerPower < weight * 20
+                if not plausible and phaseA.forcePerPower then
+                    note("")
+                    note(string.format("  no physical ceiling: Phase A's %.1f is %.3fx craft",
+                        phaseA.forcePerPower, phaseA.forcePerPower / weight))
+                    note("  weight, which is not a usable force calibration.")
+                end
+                if plausible and sample.mass then
+                    local bound = craftgeom.authorityBound({
+                        tensor = sample.tensor, mass = sample.mass,
+                        axes = config.axes,
+                        ionForceFull = phaseA.forcePerPower,
+                        authority = profile.authority.roll,
+                    })
+                    if bound then
+                        note("")
+                        note("  physical ceiling (pods at the hull extremes):")
+                        for _, axis in ipairs({ "roll", "pitch" }) do
+                            local got = results[axis].perDemand
+                            local share = got / bound[axis]
+                            note(string.format("    %-6s %7.2f of %7.2f  = %3.0f%%%s",
+                                axis, got, bound[axis], share * 100,
+                                share > 1.05 and "   <-- IMPOSSIBLE" or ""))
+                        end
+                        note("  Anything over 100% is measurement error, not a")
+                        note("  stronger craft. Over 105% do not quote it at all.")
+                    end
+                end
             end
             -- Under the CORRECTED convention (bow = +Z) the cheap tensor axis
             -- index 3 IS the bow axis, and roll is rotation about the bow --
             -- so ROLL is the cheap one. This line said PITCH while the code
             -- still believed the bow was +X.
-            note("getInertiaTensor's cheap axis is index 3 = +Z = the BOW axis.")
-            note("Roll is rotation about the bow, so expect ROLL to respond")
-            note(string.format("more, by about t[1][1]/t[3][3] = %.2f.", 389348390.47 / 86744908.79))
+            note("getInertiaTensor's cheap axis is index 3 = +Z = the BOW axis,")
+            note("so roll responds more -- but by the ARM-CORRECTED ratio above,")
+            note("not by t[1][1]/t[3][3], which assumes equal moment arms.")
         end
     end
 end
