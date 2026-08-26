@@ -688,7 +688,12 @@ local function runRpmStep(differential)
         local settled = true
         for corner, rpm in pairs(target) do
             local pod = banks.getState()[corner]
-            local actual = pod and pod.prop and pod.prop.bearingRpm
+            -- controllerRpm, NOT bearingRpm. bearingRpm reads 0 in every
+            -- sample ever logged -- including with the props verifiably
+            -- turning at 64 -- so gating on it could never succeed and every
+            -- step reported "props never reached the commanded rpm".
+            -- controllerRpm tracks the target exactly.
+            local actual = pod and pod.prop and pod.prop.controllerRpm
             if not actual or math.abs(actual - rpm) > plan.rpmTolerance then
                 settled = false
             end
@@ -991,6 +996,61 @@ local function mainLoop()
         return
     end
     note(string.format("preflight: 4/4 pods online, ground y = %.4f", session.groundY))
+
+    -- DRIVETRAIN CHECK. FR flew this run with its Rotation Speed Controller
+    -- reporting hasSource = FALSE: no kinetic input, no rotation, no thrust,
+    -- while sail_power stayed 534 and both bearings reported assembled. It was
+    -- HEALTHY in phase A on the ground and dead by the staircase, so the craft
+    -- flew a whole measurement with one corner contributing nothing and a
+    -- standing torque nobody had accounted for. All three steps measured that
+    -- instead of the differential.
+    --
+    -- Every field needed to catch it was already in the heartbeat. This is the
+    -- same shape as the bearing_5 deficit: a per-corner asymmetry, visible at
+    -- rest, that silently contaminates everything measured afterwards.
+    local thrusts, dead = {}, {}
+    for _, corner in ipairs(flight.CORNERS) do
+        local pod = banks.getState()[corner]
+        local prop = pod and pod.prop
+        if not prop then
+            dead[#dead + 1] = corner .. " (no telemetry)"
+        else
+            if prop.hasSource == false then
+                dead[#dead + 1] = corner .. " (no kinetic source)"
+            end
+            if type(prop.thrust) == "number" then thrusts[corner] = prop.thrust end
+        end
+    end
+
+    note("  drivetrain:")
+    local highest = 0
+    for _, corner in ipairs(flight.CORNERS) do
+        local thrust = thrusts[corner]
+        if thrust and thrust > highest then highest = thrust end
+    end
+    for _, corner in ipairs(flight.CORNERS) do
+        local pod = banks.getState()[corner]
+        local prop = pod and pod.prop
+        local thrust = thrusts[corner]
+        local share = (highest > 0 and thrust) and (thrust / highest * 100) or nil
+        note(string.format("    %-4s source %-5s thrust %16.2f %s", corner,
+            tostring(prop and prop.hasSource), thrust or 0,
+            share and string.format("(%3.0f%% of the strongest)", share) or ""))
+        -- A corner at less than 90% of the best is the bearing_5 defect again.
+        if share and share < 90 then
+            dead[#dead + 1] = string.format("%s (thrust %.0f%% of the strongest)",
+                corner, share)
+        end
+    end
+
+    if #dead > 0 then
+        note("")
+        note("  *** DRIVETRAIN FAULT: " .. table.concat(dead, ", ") .. " ***")
+        note("  A corner that makes no thrust is a standing torque, and every")
+        note("  number measured afterwards is of that rather than of whatever")
+        note("  was commanded. Repair it in-world before flying this again.")
+        return
+    end
 
     if not runGround() then
         note("")
