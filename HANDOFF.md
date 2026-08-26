@@ -496,6 +496,44 @@ each rule broken on purpose, each caught):
    a pod will drop lift by reading exactly those. A one-second-old arm state is
    a safety-relevant lie.
 
+### The FCS side: poll only what has gone quiet
+
+`banks.tick` used to send a `status_request` to all four corners every 2 s
+regardless of whether anything was wrong, and **its timer is per PROCESS** --
+the logger polls, and so does every flight tool in another tab. So the forced
+sampling scaled with how many tabs happened to be open. Two tabs doubled it.
+Nothing would ever have shown that; the pods just quietly did twice the work.
+
+That was survivable when a poll was answered from whatever the pod had lying
+around. It is not now: a `status_request` deliberately forces a FRESH ~250 ms
+sample, so that a caller reading back its own command is not served a value
+from before it.
+
+**The pods PUSH full telemetry every ~1 s, so the poll is redundant except when
+that stream fails.** `banks.tick` now asks a corner for a status only when the
+corner has gone quiet for `quietPollAfterMs` (2500), rate-limited per corner by
+`statusRequestPeriodMs` (2000, now a MINIMUM SPACING rather than a period).
+
+- Steady state is **zero** pod-directed traffic, from any number of tabs.
+- A fresh program still probes immediately -- never-heard-from counts as
+  infinitely quiet, so a tool does not start blind for two seconds.
+- Offline detection got FASTER, not slower: a quiet corner is probed at 2.5 s
+  instead of waiting on a 2 s round-robin, and `offlineAfterMs` is still 5000.
+- `quietPollAfterMs` must sit BETWEEN the pod push period and `offlineAfterMs`.
+  Above the push period or a healthy pod is polled forever; below
+  `offlineAfterMs` or a pod is declared dead before anyone asked it anything.
+  `tools/test_banks_poll.lua` pins that invariant along with the policy.
+
+The key is **defaulted in `banks.lua`, not assumed**: the deployed
+`fcs/config.lua` deliberately differs from the repo template, so a new key does
+not reach the craft just because it was added here -- and a nil on the right of
+a `>=` would crash the logger the moment it ticked.
+
+`actuators.getPropellerStatus` still forces a fresh sample on demand, which is
+exactly what it is for. That is the supported way to get a guaranteed-current
+reading; everything else should consume the push and read `sampleAgeMs` if it
+cares how old the numbers are.
+
 Writes are still done inline in `networkLoop` (`props.setRpm`,
 `thrusters.applyCommand`), which is about one tick of deafness per command
 applied. That is self-limiting for a steady sender -- the pod applies, then
@@ -1978,6 +2016,7 @@ answers on this project; measurement has not.
     luajit tools/test_vectoring.lua     bearing pair maths, ADDS vs CANCELS
     luajit tools/test_craftgeom.lua     hull box and authority ceilings
     luajit tools/test_pod_payload.lua   the pod sampler's two cached-data rules
+    luajit tools/test_banks_poll.lua    poll only what has gone quiet
     luajit tools/run_podprobe_harness.lua all   the comms probe, in each
                                         failure mode it must tell apart
 

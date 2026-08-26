@@ -97,7 +97,17 @@ return {
             RR = nil,
         },
 
+        -- MINIMUM SPACING between status_requests to the SAME corner. Not a
+        -- poll interval any more: a healthy corner is never polled at all.
         statusRequestPeriodMs = 2000,
+
+        -- How long a corner may go unheard before it is probed. The pods push
+        -- full telemetry every ~1 s, so this only fires when that stream has
+        -- actually failed -- two missed pushes, with margin. Must stay
+        -- comfortably above the pod's telemetryPeriodSeconds and below
+        -- offlineAfterMs, or a healthy pod is polled forever / a dead one is
+        -- declared offline before anyone asks it anything.
+        quietPollAfterMs = 2500,
         -- Pods rebuild a full 32-thruster telemetry payload per message and
         -- land about every 440 ms at best, so a 1500 ms window flagged them
         -- offline on every ordinary hiccup.

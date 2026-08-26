@@ -5,7 +5,8 @@ local protocol = require("fcs.protocol")
 local banks = {}
 local CORNERS = { "FL", "FR", "RL", "RR" }
 local state = {}
-local lastStatusRequest = 0
+-- Per corner, and only used when a corner has gone QUIET. See banks.tick.
+local lastRequestAt = {}
 local sequence = 0
 local session = tostring(os.getComputerID()) .. ":" .. tostring(os.epoch("utc"))
 
@@ -185,17 +186,45 @@ function banks.listen(timeout)
 end
 
 -- Periodic upkeep: poll requests and offline marking. Cheap, no receiving.
+--
+-- POLL ONLY WHAT HAS GONE QUIET. This used to send a status_request to all four
+-- corners every 2 s no matter what, and that became expensive the moment the
+-- pods grew a central sampler: a status_request now forces a FRESH ~250 ms
+-- sample, deliberately, so that a caller reading back its own command is not
+-- served a cached value from before it.
+--
+-- Worse, `lastRequestAt` is per PROCESS. The logger polls, and so does every
+-- flight tool running in another tab -- so the forced-sample rate scaled with
+-- how many tabs happened to be open, which is not a thing anyone would choose.
+--
+-- The pods PUSH full telemetry every ~1 s. So the poll is redundant except in
+-- the one case it was really wanted: a corner that has stopped talking. Ask
+-- then, and only then. Steady-state pod-directed traffic is now zero, from any
+-- number of tabs, and offline detection is FASTER than before -- a corner is
+-- probed after quietPollAfterMs rather than waiting on a 2 s round-robin.
 function banks.tick()
     if not config.wireless.enabled or not network.open() then
         return
     end
 
     local now = os.epoch("utc")
-    if now - lastStatusRequest >= config.wireless.statusRequestPeriodMs then
-        for _, corner in ipairs(CORNERS) do
+    -- Defaulted, not assumed. The DEPLOYED fcs/config.lua deliberately differs
+    -- from the repo template (it pins podIds), so a new key does not arrive on
+    -- the craft just because it was added here -- and a nil on the right of a
+    -- `>=` would crash the logger the moment it ticked.
+    local quietAfter = config.wireless.quietPollAfterMs or 2500
+    local minimumSpacing = config.wireless.statusRequestPeriodMs or 2000
+
+    for _, corner in ipairs(CORNERS) do
+        local pod = state[corner]
+        -- Never heard from = infinitely quiet, so a fresh program probes
+        -- immediately rather than waiting out its first interval.
+        local quietFor = pod.receivedAt and (now - pod.receivedAt) or math.huge
+        if quietFor >= quietAfter
+            and (now - (lastRequestAt[corner] or 0)) >= minimumSpacing then
             send(corner, "status_request", nil, false)
+            lastRequestAt[corner] = now
         end
-        lastStatusRequest = now
     end
 
     for _, corner in ipairs(CORNERS) do
