@@ -893,11 +893,37 @@ local function runRollAuthority()
         note("  and re-run. NOT closing the loop.")
         return false
     end
-    note(string.format("  one RPM is %.0f%% of critical damping -- the damper is %s.",
-        slope / rolldamp.criticalDamping() * 100,
-        slope >= rolldamp.criticalDamping() * 0.5 and "WRITABLE"
-            or "too weak to be useful"))
-    return slope >= rolldamp.criticalDamping() * 0.5
+    -- THE VERDICT COMPARES THE WRONG THINGS IF IT USES ONE RPM.
+    --
+    -- The damper is not limited to a single RPM of differential; it may use up
+    -- to maxDifferentialRpm. So what matters is whether the CLAMP reaches
+    -- critical damping, and how many usable steps sit underneath it.
+    --
+    -- The first version tested one RPM against critical damping, called 31%
+    -- "too weak to be useful", and would have thrown away a working damper.
+    local critical = rolldamp.criticalDamping()
+    local clamp = rolldamp.DEFAULTS.maxDifferentialRpm
+    local atClamp = slope * clamp
+    local steps = slope > 0 and (critical / slope) or math.huge
+
+    note("")
+    note(string.format("  one RPM   = %.4f deg/s^2 = %.0f%% of critical damping",
+        slope, slope / critical * 100))
+    note(string.format("  %d rpm clamp = %.4f deg/s^2 = %.0f%% of critical",
+        clamp, atClamp, atClamp / critical * 100))
+    note(string.format("  critical damping is reached at %.1f rpm", steps))
+
+    if atClamp < critical then
+        note("  THE CLAMP CANNOT REACH CRITICAL DAMPING. Expect underdamped.")
+        return false
+    end
+
+    note("  The damper is WRITABLE: full critical damping is inside the clamp,")
+    note(string.format("  with about %d usable steps below it. Coming in UNDER the",
+        clamp))
+    note("  prediction helps here -- at the predicted 0.2712 one RPM would have")
+    note("  been 91% of critical, a nearly one-bit actuator with no resolution.")
+    return true
 end
 
 -- B1: can the loop bring a drifting craft to rest?

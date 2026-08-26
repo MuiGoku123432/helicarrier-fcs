@@ -116,6 +116,38 @@ local starved = rolldamp.cornerRpm(9, 4)
 checkTrue("a corner is never commanded below the floor", starved.FR >= 8)
 checkTrue("...on either starboard corner", starved.RR >= 8)
 
+-- --------------------------------------------------------------------------
+-- MEASURED IN FLIGHT, 2026-08-26. Two paired levels, linear to 2%:
+--     2 rpm  alpha 0.1820  ->  0.0910 per rpm
+--     3 rpm  alpha 0.2793  ->  0.0931 per rpm
+--     staircase through the origin: 0.0924 per rpm, 34% of prediction
+-- --------------------------------------------------------------------------
+local MEASURED_PER_RPM = 0.0924
+check("the measured staircase is linear across its two levels",
+    (0.1820 / 2) / (0.2793 / 3), 1.0, 0.03)
+
+-- What matters is the CLAMP against critical damping, not one rpm. A verdict
+-- that tests one rpm calls 31% "too weak" and throws away a working damper.
+local reachable = MEASURED_PER_RPM * rolldamp.DEFAULTS.maxDifferentialRpm
+checkTrue("the clamp reaches critical damping at the MEASURED authority",
+    reachable >= critical)
+check("critical damping arrives at about 3.2 rpm",
+    critical / MEASURED_PER_RPM, 3.2, 0.1)
+
+-- Coming in under prediction buys resolution. At the predicted value one rpm
+-- would be 91% of critical -- a nearly one-bit actuator.
+checkTrue("the measured authority gives at least 3 usable steps",
+    critical / MEASURED_PER_RPM >= 3)
+checkTrue("...where the prediction would have given barely one",
+    critical / perRpm < 1.5)
+
+-- And the damper asks for something inside the clamp at the strafe's peak.
+local asked = math.abs(rolldamp.differentialFor(0.90,
+    { authorityPerRpm = MEASURED_PER_RPM }))
+checkTrue("at the 0.90 deg/s peak it asks for a differential inside the clamp",
+    asked <= rolldamp.DEFAULTS.maxDifferentialRpm)
+check("...specifically 3 rpm", asked, 3)
+
 print("")
 print(string.format("one RPM differential = %.4f deg/s^2 = %.0f%% of critical damping",
     perRpm, perRpm / critical * 100))
