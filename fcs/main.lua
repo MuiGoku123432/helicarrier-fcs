@@ -369,6 +369,10 @@ local function sample()
             "sender_mismatch=" .. tostring(st.senderMismatch),
             "per_corner=" .. string.format("FL=%d FR=%d RL=%d RR=%d",
                 st.perCorner.FL, st.perCorner.FR, st.perCorner.RL, st.perCorner.RR),
+            "rejected_per_corner=" .. string.format("FL=%d FR=%d RL=%d RR=%d",
+                st.rejectedPerCorner.FL, st.rejectedPerCorner.FR,
+                st.rejectedPerCorner.RL, st.rejectedPerCorner.RR),
+            "last_sender_mismatch=" .. tostring(st.lastSenderMismatch),
             "ages_ms=" .. table.concat(ages, " "),
             "net_errors=" .. table.concat(network.errors, " | "),
         })

@@ -25,6 +25,7 @@ local FILES = {
     "fcs/rolldamp.lua", "fcs/craftgeom.lua", "fcs/axisresponse.lua",
     "fcs/flight.lua", "fcs/mixer.lua", "fcs/attitude.lua", "fcs/actuators.lua",
     "fcs/banks.lua", "fcs/sensors.lua", "fcs/tiltctl.lua",
+    "fcs/podprobe.lua",
 }
 
 -- Lua 5.1 / LuaJIT base library.

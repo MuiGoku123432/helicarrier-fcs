@@ -63,6 +63,37 @@ and intermittent actuator dropouts are the single hardest class of bug to
 attribute after the fact. It is a known, bounded problem. Do it before building
 on top.
 
+**The first action of the next session is one command, grounded:**
+
+    /fcs/podprobe.lua
+
+That symptom has three causes and they need OPPOSITE fixes, so this measures
+which one it is rather than guessing:
+
+| verdict | cause | fix |
+|---|---|---|
+| `GHOST HOST` | a second computer still hosts `ENG-FR`; `rednet.lookup` returns whichever answers first | stop the duplicate — **a longer timeout cannot help** |
+| `SLOW POD` | the ack lands, just after 1000 ms | raise `actuators.REPLY_TIMEOUT_MS`, or stop blocking on acks in loops |
+| `TOTAL LOSS` | right id, transmitting, commands unanswered | retry policy; look at range and chunk loading |
+
+The ghost is the hypothesis that fits the symptom best and nothing about it has
+been confirmed yet. It predicts exactly this history: `network.podIds` caches
+the first lookup for the life of a program, so a fresh run is a coin flip
+("two attempts on nearly every command") until it caches the dead one, after
+which every command in that run fails ("now fails outright"). It also predicts
+the live pod looking silent while it broadcasts happily, because `banks.lua`
+then rejects its telemetry on `senderMismatch`. **Do not fix anything before
+reading the verdict** — raising the timeout against a ghost changes nothing and
+costs a session.
+
+All three verdicts are reproduced offline, so the probe is known to separate
+them: `luajit tools/run_podprobe_harness.lua all`.
+
+In-flight the same evidence now lands in `/fcs/heartbeat.txt` as
+`rejected_per_corner=` and `last_sender_mismatch=` (`corner expected=N got=M`).
+The bare `sender_mismatch` counter could never say WHICH pod was being thrown
+away, and "which" is the entire diagnosis.
+
 ### The actuator survey is FINISHED — this is the durable result
 
 Three actuators, each now measured rather than assumed, and each good at
@@ -1722,16 +1753,43 @@ each bearing's own axis. Measure it before closing any loop.
 | `/fcs/airprofile.lua` | pressure vs altitude + API dump | read-only, safe |
 | `/fcs/reboot.lua` | reboot pods from FCS-DEV | refuses while banks carry thrust |
 | `/fcs/propctl.lua`, `/fcs/bankctl.lua` | manual single commands | commands hardware |
+| `/fcs/podprobe.lua` | why a pod stops answering: ghost host vs slow pod vs packet loss | grounded; echoes each corner its OWN rpm |
 | probes | `/pod/yawprobe.lua`, `obstructionprobe.lua`, `thrustprobe.lua`, `stabprobe.lua`, `/fcs/pressureprobe.lua` | read-only diagnostics |
 | `tools/test_mixer.lua` | 102 assertions | offline |
 | `tools/test_atmosphere.lua` | 37 assertions, pinned to in-game measurements | offline |
 | `tools/test_attitude.lua` | 133 assertions; axis mapping, yaw-invariance, harness round-trip, transposition guard | offline |
 | `tools/test_flight_window.lua` | 49 assertions; the stable-hold window gate across loop periods, and the cheap read vs the full read | offline |
 | `tools/analyze_tensor.py` | body- vs world-frame verdict from a flight CSV | offline |
-| `tools/run_*_harness.lua` | sweep, ionsweep, reboot, axisresponse, rolldrift | offline |
+| `tools/run_*_harness.lua` | sweep, ionsweep, reboot, axisresponse, rolldrift, podprobe | offline |
 
 Reports from every probe are archived in `flight-logs/`.
 
+
+### `/fcs/podprobe.lua`
+
+    /fcs/podprobe.lua            census + 10 ack round trips per corner
+    /fcs/podprobe.lua 25         more round trips
+    /fcs/podprobe.lua --force    run with a propeller still turning
+
+Three phases. **RESOLUTION** prints what `rednet.lookup` hands the sender.
+**CENSUS** listens passively for 6 s and prints who is actually transmitting as
+each corner — pods send telemetry directed at the main they resolved, so this
+is the one fact `rednet.lookup` cannot be trusted for. **ACK** then times real
+`set_rpm` round trips in a 4000 ms window, deliberately wider than the 1000 ms
+`actuators.lua` allows, because a 1000 ms window cannot tell 1100 ms apart from
+never.
+
+It reads the wire RAW rather than through `banks.handle`, for the reason that
+makes it worth having: the messages `banks` throws away on `senderMismatch` are
+invisible from inside `banks`, and they are the signature of a ghost host.
+
+Two things it deliberately does not do. It never guesses an RPM — each corner
+is echoed the RPM its own telemetry reports, and a corner whose RPM never
+arrived is skipped, because sending 0 to a corner that might be lifting is the
+documented way to end a run on the craft's side. And it never treats a `status`
+as a reply: only `ack` and `fault` answer a command, which is the same trap
+`banks.lua` documents, and reading `type` loosely shows up here as a phantom
+200 ms round trip.
 
 ### `/fcs/sweep.lua`
 
@@ -1810,6 +1868,8 @@ answers on this project; measurement has not.
     luajit tools/test_lateralhold.lua   the translation law and its sign guards
     luajit tools/test_vectoring.lua     bearing pair maths, ADDS vs CANCELS
     luajit tools/test_craftgeom.lua     hull box and authority ceilings
+    luajit tools/run_podprobe_harness.lua all   the comms probe, in each
+                                        failure mode it must tell apart
 
 **THE TWO LINTS EXIST BECAUSE DEPLOYED FLIGHT CODE DIED TWICE ON A NIL NAME.**
 `commandAllTilts` was a `local function` referenced fifty lines above its own

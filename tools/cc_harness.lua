@@ -49,6 +49,17 @@ harness.model = {
     rrDeficit = false,
     telemetryPeriodMs = 1000,
     replyLatencyMs = 60,
+    -- Per-corner override, for the "one pod is slow" hypothesis. A pod's
+    -- networkLoop is single-threaded and statusMessage() is ~250 ms of
+    -- main-thread work, so a command landing behind one waits it out -- which
+    -- looks identical to a lost packet from the sender's side.
+    podReplyLatencyMs = {},
+    -- A second computer still hosting a pod's rednet hostname: an old pod that
+    -- was replaced and left running. rednet.lookup answers with whichever
+    -- responds first, so this is the shape of "intermittent for a session,
+    -- then outright" -- and no timeout change can fix it.
+    --   { corner = "FR", id = 13, transmits = false }
+    ghostHost = nil,
     -- Drivetrain ceiling: above this the RSC cannot reach the commanded speed.
     maxAchievableRpm = math.huge,
     overstressAboveRpm = math.huge,
@@ -472,6 +483,15 @@ local function advance(ms)
                     pod.nextTelemetry = now + harness.model.telemetryPeriodMs
                     queue({ "rednet_message", pod.id, podTelemetry(corner, "status"),
                             "helicarrier.fcs.v1" })
+                    -- A ghost that still resolved FCS-MAIN keeps transmitting
+                    -- as its corner too, so the corner has two senders on the
+                    -- wire. A ghost that never resolved main is silent and can
+                    -- only be caught by addressing it -- both are modelled.
+                    local ghost = harness.model.ghostHost
+                    if ghost and ghost.transmits and ghost.corner == corner then
+                        queue({ "rednet_message", ghost.id,
+                                podTelemetry(corner, "status"), "helicarrier.fcs.v1" })
+                    end
                 end
             end
         end
@@ -588,6 +608,13 @@ function harness.install(env)
         host = function() end,
         unhost = function() end,
         lookup = function(_, hostname)
+            -- The ghost wins the race. That is not pessimism: rednet.lookup
+            -- returns the first host to answer, and a program has no way to
+            -- tell which one it got.
+            local ghost = harness.model.ghostHost
+            if ghost and HOSTNAMES[ghost.corner] == hostname then
+                return ghost.id
+            end
             for corner, name in pairs(HOSTNAMES) do
                 if name == hostname then return POD_IDS[corner] end
             end
@@ -667,7 +694,8 @@ function harness.install(env)
                     -- Deliver on the next advance, not instantly, so a caller
                     -- that never yields cannot see its own reply.
                     harness.pending[#harness.pending + 1] =
-                        { at = now + harness.model.replyLatencyMs,
+                        { at = now + (harness.model.podReplyLatencyMs[corner]
+                                      or harness.model.replyLatencyMs),
                           event = { "rednet_message", pod.id, reply, protocol } }
                 end
             end

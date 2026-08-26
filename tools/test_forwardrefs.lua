@@ -23,7 +23,7 @@ local FILES = {
     "fcs/vectorprobe.lua", "fcs/vectoring.lua", "fcs/lateralhold.lua",
     "fcs/craftgeom.lua", "fcs/axisresponse.lua", "fcs/flight.lua",
     "fcs/mixer.lua", "fcs/attitude.lua", "fcs/actuators.lua",
-    "fcs/tiltctl.lua", "fcs/banks.lua",
+    "fcs/tiltctl.lua", "fcs/banks.lua", "fcs/podprobe.lua",
 }
 
 local failures = 0

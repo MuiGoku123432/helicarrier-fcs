@@ -52,6 +52,13 @@ banks.stats = {
     seen = 0, badProtocol = 0, wrongType = 0, unknownCorner = 0,
     hostnameMismatch = 0, senderMismatch = 0, accepted = 0,
     perCorner = { FL = 0, FR = 0, RL = 0, RR = 0 },
+    -- Rejections attributed to the corner that claimed them, and the last one
+    -- in full. A bare senderMismatch counter says a pod is being thrown away
+    -- but not WHICH, and "which" is the whole diagnosis: a corner whose
+    -- messages are all rejected on sender id is a duplicate host, not a dead
+    -- pod, and no timeout change touches it. See /fcs/podprobe.lua.
+    rejectedPerCorner = { FL = 0, FR = 0, RL = 0, RR = 0 },
+    lastSenderMismatch = nil,
 }
 
 local function acceptStatus(senderId, message)
@@ -63,12 +70,18 @@ local function acceptStatus(senderId, message)
 
     if message.hostname ~= config.wireless.podHostnames[corner] then
         banks.stats.hostnameMismatch = banks.stats.hostnameMismatch + 1
+        banks.stats.rejectedPerCorner[corner] =
+            (banks.stats.rejectedPerCorner[corner] or 0) + 1
         return
     end
 
     local expectedId = network.lookupPod(corner)
     if expectedId and senderId ~= expectedId then
         banks.stats.senderMismatch = banks.stats.senderMismatch + 1
+        banks.stats.rejectedPerCorner[corner] =
+            (banks.stats.rejectedPerCorner[corner] or 0) + 1
+        banks.stats.lastSenderMismatch = string.format("%s expected=%s got=%s",
+            corner, tostring(expectedId), tostring(senderId))
         return
     end
 
