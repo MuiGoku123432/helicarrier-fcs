@@ -97,6 +97,42 @@ local state = {
     lastReject = nil,
 }
 
+-- Faults were an UNBOUNDED list, appended to and never cleared.
+--
+-- statusMessage copies the whole list into EVERY telemetry message, and
+-- fcs/main.lua writes it into EVERY CSV row. After ~74 minutes the four pods
+-- had accumulated 1716 COMMAND_TIMEOUTs between them, which is 30 KB of
+-- repeated strings PER ROW. Flight logs then rotated every ~17 seconds at 20
+-- rows each, so the pulse data a run existed to capture was gone before it
+-- could be pulled -- six runs' worth.
+--
+-- Capped and run-length collapsed: "COMMAND_TIMEOUT x429" carries strictly
+-- more information than 429 copies of it, in 20 bytes instead of 6 KB. The
+-- running total is kept separately so nothing is lost by trimming.
+local FAULT_LIMIT = 12
+
+local function recordFault(text)
+    state.faultTotal = (state.faultTotal or 0) + 1
+
+    local last = state.faults[#state.faults]
+    if last then
+        local base, count = last:match("^(.*) x(%d+)$")
+        if base == text then
+            state.faults[#state.faults] = text .. " x" .. (tonumber(count) + 1)
+            return
+        elseif last == text then
+            state.faults[#state.faults] = text .. " x2"
+            return
+        end
+    end
+
+    state.faults[#state.faults + 1] = text
+    while #state.faults > FAULT_LIMIT do
+        table.remove(state.faults, 1)
+    end
+end
+
+
 -- Written to disk so a pod that is running but silent can be diagnosed without
 -- standing in front of its screen. A crash leaves last_error.txt; a live pod
 -- refreshes heartbeat.txt, and the send counters show whether telemetryLoop is
@@ -278,7 +314,7 @@ local function networkLoop()
                             state.lastCommandAt = os.epoch("utc")
                             lightReply(senderId, "ack")
                         else
-                            state.faults[#state.faults + 1] = "SET_POWER: " .. tostring(applied)
+                            recordFault("SET_POWER: " .. tostring(applied))
                             state.armed = false
                             state.currentPower = thrusters.applyExact(config.fallbackPower)
                             reply(senderId, "fault")
@@ -300,7 +336,7 @@ local function networkLoop()
                             state.lastPropRpm = applied
                             lightReply(senderId, "ack")
                         else
-                            state.faults[#state.faults + 1] = "SET_RPM: " .. tostring(applied)
+                            recordFault("SET_RPM: " .. tostring(applied))
                             reply(senderId, "fault")
                         end
                     end
@@ -331,7 +367,7 @@ local function networkLoop()
                             state.lastTiltAzimuth = applied and applied.azimuth
                             lightReply(senderId, "ack")
                         else
-                            state.faults[#state.faults + 1] = "SET_TILT: " .. tostring(applied)
+                            recordFault("SET_TILT: " .. tostring(applied))
                             reply(senderId, "fault")
                         end
                     end
@@ -348,7 +384,7 @@ local function networkLoop()
                             state.lastTilt = nil
                             lightReply(senderId, "ack")
                         else
-                            state.faults[#state.faults + 1] = "CLEAR_TILT: " .. tostring(err)
+                            recordFault("CLEAR_TILT: " .. tostring(err))
                             reply(senderId, "fault")
                         end
                     end
@@ -382,7 +418,7 @@ local function watchdogLoop()
             -- not armed -- see the guard in fcs/reboot.lua.
             state.armed = false
             state.currentPower = thrusters.applyExact(config.commsLossPower)
-            state.faults[#state.faults + 1] = "COMMAND_TIMEOUT"
+            recordFault("COMMAND_TIMEOUT")
         end
         sleep(0.05)
     end

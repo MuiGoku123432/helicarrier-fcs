@@ -20,7 +20,36 @@ if multishell and shell and shell.openTab then
     local tab = shell.openTab("/fcs/main.lua")
     multishell.setTitle(tab, "FCS Telemetry")
     print("Telemetry tab: " .. tostring(tab))
-    print("Use the shell for /fcs/discover.lua and /fcs/bankctl.lua")
+
+    -- A THIRD TAB, dedicated to flight tools, and focused on boot.
+    --
+    -- The logger already had its own tab, yet it still ended up stopped for
+    -- runs 9-13 -- every one of them flew with no flight CSV at all, which is
+    -- exactly the data needed to explain the 2x scatter in measured authority.
+    -- The failure mode is quiet: a tool started in the telemetry tab replaces
+    -- main.lua, and nothing says so. last_error.txt stays EMPTY, because the
+    -- loop never reached its own exit handler.
+    --
+    -- So make the safe tab the obvious one: label it, and land the operator in
+    -- it. Nothing here prevents running a tool in the telemetry tab; it just
+    -- stops being the path of least resistance.
+    --
+    -- pcall'd: the telemetry tab is already up by this point, and a failure to
+    -- open a convenience tab must never be what stops the logger booting.
+    local opened, toolTab = pcall(shell.openTab, "shell")
+    if opened and toolTab then
+        pcall(multishell.setTitle, toolTab, "Flight Tools")
+        print("Flight tools tab: " .. tostring(toolTab))
+        print("")
+        print("Run flight tools in the 'Flight Tools' tab.")
+        print("Running one in 'FCS Telemetry' kills the logger.")
+        if multishell.setFocus then
+            pcall(multishell.setFocus, toolTab)
+        end
+    else
+        print("Could not open a flight-tools tab: " .. tostring(toolTab))
+        print("Use THIS tab for tools -- not the telemetry tab.")
+    end
 else
     local ok = shell.run("/fcs/main.lua")
     if not ok then

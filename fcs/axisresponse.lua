@@ -104,6 +104,33 @@ local plan = {
     -- above the 3 the quadratic fit needs, and a short pulse measures exactly
     -- as well as a long one (verified: 11.92 vs 12.00).
     pulseMaxAngle = 6.0,
+    -- How long to wait for the pods to slew to the commanded differential, and
+    -- how much of it counts as "applied". Not 1.0: quantisation means the
+    -- reported spread lands on level boundaries, so demanding the exact value
+    -- would never be satisfied.
+    pulseReachTimeoutSeconds = 3.0,
+    pulseReachFraction = 0.9,
+
+    -- SAMPLE FASTER DURING THE PULSE. 0.25 s was set when a sample cost a full
+    -- sensors.read (~1.6 s), so it was never the binding constraint. With the
+    -- cheap read it is: two Sable calls is ~0.1 s, so 0.25 throws away half the
+    -- samples the loop could take.
+    --
+    -- It matters because the reach gate made the fast axis FASTER. Once the
+    -- differential is applied from the first instant, roll accelerates at
+    -- ~25.8 deg/s^2 and crosses the 6 deg cap in 0.75 s -- which at 0.25 s
+    -- sampling is THREE samples, the bare minimum for the fit, with a nonzero
+    -- start rate to subtract. Run 17 reported roll 86.03 that way and tripped
+    -- the physical-bound check.
+    --
+    -- 0.12 s is roughly the floor a two-call read allows; asking for less just
+    -- means "every iteration", which is harmless. Sends are on their own clock
+    -- (keepAliveMs), so this does not touch the watchdog margin.
+    pulseSampleSeconds = 0.12,
+    -- Do not let the angle cap end a pulse before the fit has enough points.
+    -- At 0.12 s these arrive in 0.6 s, inside the 6 deg budget even at the
+    -- fastest alpha measured.
+    pulseMinSamples = 5,
     -- Ceiling on the cancel, which now ends when the rate is arrested. Longer
     -- than the pulse because the cancel has to undo whatever the pulse built
     -- up, and a cancel cut short by a timer is how the craft keeps rotating.
@@ -167,6 +194,27 @@ local session = flight.new({
 })
 
 local phaseA = {}
+-- CHEAP READS FOR THE ENTIRE FLIGHT, not just the pulse.
+--
+-- hold() runs *send-if-due, then read*. A full sensors.read blocks ~1.6 s and
+-- no set_power goes out during it, against a pod COMMAND_TIMEOUT of 750 ms --
+-- so the watchdog fires EVERY cycle, disarms the bank, and forces a uniform
+-- commsLossPower of 0.195. Measured on 2026-08-26: 1716 COMMAND_TIMEOUT faults
+-- across the four pods, i.e. ~429 arm->timeout cycles per pod per flight.
+--
+-- The bank therefore held the commanded differential for only ~750 ms out of
+-- every ~1.6 s -- a 47% duty cycle, varying run to run with loop timing. That
+-- is the leading explanation for measured roll authority scattering 2x
+-- (14.07 .. 28.33) across otherwise identical runs.
+--
+-- Two Sable calls instead of a dozen puts the gap at ~0.13 s, comfortably
+-- inside the watchdog. The pulse window alone was not enough: the climb, the
+-- hold, the cancel and the descent were all being starved the same way.
+--
+-- Session:rates needs angular velocity, which the cheap read omits. Both
+-- callers here already take an explicit full read outside any hold loop.
+session.cheapRead = true
+
 local results = {}
 
 -- Inertia tensor samples, taken at DIFFERENT ATTITUDES, to settle whether
@@ -218,7 +266,7 @@ local function waitUntilSettled(axis)
         end
         return nil
     end)
-    session.cheapRead = false
+    session.cheapRead = true   -- restore: cheap is the default here
 
     return settled, session:read()
 end
@@ -564,7 +612,69 @@ local function pulseAxis(axis)
     -- Restored immediately after, because the hold and descent phases DO want
     -- the full telemetry.
     session.cheapRead = true
+    local restoreSampleSeconds = session.sampleSeconds
+    session.sampleSeconds = plan.pulseSampleSeconds
     session.commanded[axis] = plan.pulseDemand
+
+    -- WAIT FOR THE DIFFERENTIAL TO ACTUALLY BE APPLIED before timing anything.
+    --
+    -- The pods slew-rate-limit power: config.maximumChangePerCommand = 0.05.
+    -- The pulse steps each corner by demand x authority = 0.075, so it takes
+    -- TWO commands to reach full differential -- and every watchdog fire
+    -- resets the pod to commsLossPower, after which the ramp restarts.
+    --
+    -- Seen directly in run 16's pitch pulse, corner spread sample by sample:
+    --     0.150 (fully slewed, 3 levels)
+    --     0.150
+    --     0.050 (ONE slew step, 1 level) -- reset, re-ramping
+    --
+    -- A 3x swing in applied torque WITHIN one pulse. alpha averaged over that
+    -- ramp depends on how many commands landed, which is why nominally
+    -- identical runs scattered 2x.
+    --
+    -- Phase A already solved this for its power steps ("the pod has actually
+    -- REACHED the commanded power"). The pulse never did.
+    local wantSpread = 2 * plan.pulseDemand * profile.authority[axis]
+    local reachedAt, spreadSeen = nil, 0
+    session:hold(plan.pulseReachTimeoutSeconds, function(state, now)
+        session:trim(plan.climbGain, flight.MAX_CLIMB_RATE, 0, state)
+        local low, high
+        for _, corner in ipairs(flight.CORNERS) do
+            local pod = banks.getState()[corner]
+            local power = pod and pod.currentPower
+            if not power then return nil end
+            if not low or power < low then low = power end
+            if not high or power > high then high = power end
+        end
+        spreadSeen = high - low
+        if spreadSeen >= wantSpread * plan.pulseReachFraction then
+            reachedAt = now
+            return "differential applied"
+        end
+        return nil
+    end)
+
+    if reachedAt then
+        note(string.format("  differential applied: spread %.4f of %.4f wanted",
+            spreadSeen, wantSpread))
+    else
+        note(string.format("  WARNING: differential only reached %.4f of %.4f",
+            spreadSeen, wantSpread))
+        note("  The pods never fully slewed. alpha will UNDER-report; treat")
+        note("  this run as suspect rather than averaging it with good ones.")
+        unsettled[axis] = true
+    end
+
+    -- Clock and reference angle start HERE, once the torque is real.
+    do
+        local nowState = session:readCheap()
+        if nowState and nowState[axis] then
+            startAngle = nowState[axis]
+            startOther = nowState[other]
+        end
+        startAt = os.epoch("utc")
+    end
+
     session:hold(plan.pulseSeconds, function(state, now)
         session:trim(plan.climbGain, flight.MAX_CLIMB_RATE, 0, state)
         if state and state[axis] then
@@ -600,7 +710,8 @@ local function pulseAxis(axis)
                     projected = swept + math.abs(rate) * dt
                 end
             end
-            if projected >= plan.pulseMaxAngle and #samples >= 3 then
+            if projected >= plan.pulseMaxAngle
+                and #samples >= plan.pulseMinSamples then
                 return "pulse angle reached"
             end
         end
@@ -764,7 +875,8 @@ local function pulseAxis(axis)
         session:trim(plan.climbGain, flight.MAX_CLIMB_RATE, 0, state)
         return nil
     end)
-    session.cheapRead = false
+    session.cheapRead = true   -- restore: cheap is the default here
+    session.sampleSeconds = restoreSampleSeconds
 
     local after = session:rates(session:read())
     if after then
@@ -942,16 +1054,30 @@ if results.roll and results.pitch and results.roll.perDemand and results.pitch.p
             -- A number on the wrong side of a physical bound is not a
             -- calibration, and it must not be quoted as one.
             local BOUND = 389348390.47 / 86744908.79
-            if math.abs(ratio) > BOUND then
+            local TOLERANCE = 1.20
+            local excess = math.abs(ratio) / BOUND
+            if excess > TOLERANCE then
                 note("")
-                note(string.format("*** RATIO %.2f EXCEEDS THE PHYSICAL BOUND %.2f ***",
-                    math.abs(ratio), BOUND))
+                note(string.format("*** RATIO %.2f EXCEEDS THE PHYSICAL BOUND %.2f by %.0f%% ***",
+                    math.abs(ratio), BOUND, (excess - 1) * 100))
                 note("    alpha = torque/I with a common force, so the ratio is")
                 note("    arm_ratio x t[1][1]/t[3][3]. The bow axis has the")
                 note("    SMALLEST inertia, so the craft is long and narrow and")
                 note("    arm_ratio < 1 -- the ratio cannot exceed the tensor's.")
-                note("    One of these two numbers is wrong. The usual cause is a")
-                note("    pulse that began before the craft settled.")
+                note("    One of these two numbers is wrong. Usual causes: a pulse")
+                note("    that began before the craft settled, or too few samples")
+                note("    on the fast axis.")
+            elseif math.abs(ratio) > BOUND then
+                -- A hard bound with no tolerance cries wolf. The harness, whose
+                -- true ratio IS the tensor's 4.48, measures 4.80 -- 7% high from
+                -- discretisation alone. Flagging that as "one of these numbers is
+                -- wrong" trains the reader to ignore the check.
+                note("")
+                note(string.format("  ratio %.2f is %.0f%% above the %.2f bound -- at it,",
+                    math.abs(ratio), (excess - 1) * 100, BOUND))
+                note("  and consistent with it within measurement error. Not a")
+                note("  violation; the bound assumes arm_ratio = 1, which is its")
+                note("  own upper limit.")
             end
             -- Under the CORRECTED convention (bow = +Z) the cheap tensor axis
             -- index 3 IS the bow axis, and roll is rotation about the bow --

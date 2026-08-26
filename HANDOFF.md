@@ -1,8 +1,10 @@
 # Helicarrier FCS — session handoff
 
-Last updated: 2026-08-26. bearing_5 repair VERIFIED; the craft is symmetric.
-Written for a fresh session picking this up cold. Rewritten rather than patched: superseded findings are REMOVED, not
-annotated, except where the wrong answer is instructive. Keep it that way.
+Last updated: 2026-08-26 (late morning). Axis convention calibrated; five
+stacked distortions removed from the axis-response measurement; SSH key auth.
+Written for a fresh session picking this up cold. Rewritten rather than
+patched: superseded findings are REMOVED, not annotated, except where the wrong
+answer is instructive. Keep it that way.
 
 ---
 
@@ -35,60 +37,71 @@ gathering real data over perfecting the offline harness — but see
 
 ## START HERE: what to do first
 
-**The bearing_5 repair is VERIFIED. It took.** The previous session's headline
-open question is closed, and everything that hung off it collapses with it.
+**Run `/fcs/axisresponse.lua` in the FCS-DEV "Flight Tools" tab and read the
+RESPONSE MATRIX.** Everything below is context for why that one number is worth
+another flight.
 
-Measured from the live pod heartbeats, all four corners now agree:
+### State of the craft, in one place
 
-| corner | bearings | per-bearing \|thrust\| | pod sail |
-|---|---|---|---|
-| FL | _1, _2 | 6980.5197679275 | 534 |
-| FR | _3, _4 | 6980.4918912001185 | 534 |
-| RL | _7, _8 | 6980.5197679275 | 534 |
-| **RR** | **_5, _6** | **6980.4918912001185** | **534** |
+- **bearing_5 repair: VERIFIED.** All four corners bit-for-bit identical. The
+  standing roll torque is gone. Do not re-investigate the RR deficit.
+- **The axis convention is CALIBRATED: bow = body +Z, port = body +X.**
+  `attitude.lua` had assumed +X forward and was reporting roll and pitch
+  TRANSPOSED. Fixed, and pinned by `tools/test_attitude.lua` (133 assertions).
+- **`getInertiaTensor()` is BODY-FRAME**, confirmed on five separate flights
+  across tilts up to 20 deg. So "index 3 (+Z, the bow) is the cheap axis" and
+  the 32% coupling figure hold as written.
+- **Force-per-power is 3.342x craft weight**, confirmed in flight at 0.0%
+  residual.
+- **The craft still STRAFES**, and not for the reason this document assumed for
+  most of its life. See **THE STRAFE**. It is the main open problem after the
+  calibration.
+- The craft is grounded and disarmed; the logger and all four pods are running
+  current code.
 
-`bearing_5` now reads bit-for-bit identical to `bearing_6`, its own partner, and
-to the FR pair. Pod total `getThrust` = **13,960.98**, exactly the predicted
-post-repair figure (was 13,804.41). Pod sail = **534** = 267 + 267 (was 532).
+### What is being measured, and why it kept failing
 
-**Why a 0-RPM reading is legitimate here, given THE RULE.** It is legitimate
-because the archived pre-repair probes prove it, not because it seemed safe:
-`flight-logs/stabprobe_RR.txt` (isActive **false**) and
-`stabprobe_RR_active.txt` (isActive **true**, 4.8 rad/s) were taken 3 minutes
-apart and report `getStressImpact` = **530 in both**. The structural getters do
-not depend on rotation, so comparing them at rest is valid. That same pair is
-what pinned the deficit in the first place: 530 on `_5` against 534 on `_6`.
+`authority.roll` / `authority.pitch` in `mixer_profile.lua` are still
+placeholders at **0.25**. They are the hard blocker on any attitude
+controller — and the attitude controller is what fixes the strafe, because the
+strafe is an underdamped oscillation and you cannot trim away an oscillation.
 
-The residual FL/RL vs FR/RR split of 0.0279 units is **0.0004%** — four orders
-of magnitude below the 1.121% deficit that was just fixed. Do not chase it.
+Measuring them took **nine flights**, because FIVE separate distortions were
+stacked on top of each other. All five are now fixed, but a fresh session
+should know they existed, because each one produced plausible numbers:
 
-**Consequences — this is the part that matters:**
+| # | distortion | effect on the measurement |
+|---|---|---|
+| 1 | logger dead (`fcs.snapshot` missing) | no flight CSV at all, runs 9-15 |
+| 2 | unbounded pod fault list | 30 KB/row, logs rotated every 17 s, pulse data lost |
+| 3 | watchdog starvation | differential applied only ~47% of the time |
+| 4 | pod slew-rate limit, no wait | torque ramped in DURING the measurement |
+| 5 | 0.25 s sampling | 3 samples on the fast axis once 1-4 were fixed |
 
-- The standing roll torque is **gone**: the equilibrium offset fell from
-  1.23 deg to ~0.3-0.6 deg. **But the craft still strafes** — 81 blocks in 48 s
-  on a passive flight. The cause is different from what this document long
-  assumed, and it is now the main open problem. See **THE STRAFE**.
-- **`tiltctl.lua rolltrim` now REFUSES**, and that is deliberate: it tilts the
-  port bearings 4.29 deg to cancel a torque the craft no longer has, so running
-  it would CREATE the strafe it was written to remove. Manual vectoring is
-  untouched and is the part that matters for yaw. `--force` overrides.
-- **"Is the deficit a constant fraction or a constant offset?" is retired,
-  not answered.** It only ever mattered for scaling a trim correction from 16
-  RPM to 64. There is no deficit left to scale. Do not spend a sweep on it.
+Roll authority read 3.98, 5.43, 28.33, 26.93, 22.79, 14.07, 17.32, 20.01,
+12.97, 86.03 across those runs. **None of that spread was physics.**
 
-**So the next thing to do is item 4 on the old list, now item 1:**
+### The next run is the first with all five off
 
-**Calibrate `Aroll` / `Apitch` with `/fcs/axisresponse.lua`** (pulse demand
-0.30, above the ion quantum). `authority.roll` / `authority.pitch` in
-`mixer_profile.lua` are still placeholders at 0.25, and they are the hard
-blocker on any attitude controller. Its roll/pitch ratio also settles the
-axis-convention question the inertia tensor raised. This now runs on a
-**symmetric craft**, which is exactly the condition that makes the measurement
-clean — it would have been contaminated before.
+Expect: both axes reaching `differential applied: spread 0.1500 of 0.1500`,
+roll with 8+ samples rather than 3, and a `roll/pitch ratio` at or below **4.49**
+(the bound the inertia tensor imposes — the tool checks this itself now and
+flags a real violation separately from measurement error).
 
-Worth re-running `/fcs/rolldrift.lua` first if you want the self-levelling
-stiffness re-measured without the standing torque; it is a passive +5 block
-flight and it is cheap.
+**Two consecutive runs agreeing within a few percent is the bar.** Until then
+do not write anything into `mixer_profile.lua`. Everything in the table above
+looked repeatable at the time.
+
+### After that
+
+1. **Write the rate-damping term.** That is what the calibration is for, and it
+   is what kills the strafe. It belongs on the BEARINGS (continuous) rather
+   than the ions (quantised at 22.28% of weight per step).
+2. **Yaw is still unsolved.** `getMagneticNorth()` is `{0,0,0}`; vectoring is
+   the route and the command path exists. Measure the sign of the lateral force
+   from a bearing tilt first — it has never been verified.
+3. **The +23 block hold ceiling** may have lifted on its own now the watchdog
+   is not forcing `commsLossPower` half the time. Untested.
 
 ---
 
@@ -124,6 +137,22 @@ wrongly did.
 - The craft has flown under script: climb, hold, and a rate-controlled landing
 - **The hull self-levels** (measured — see below)
 - bearing_5 repair: **VERIFIED** — all four corners symmetric (see START HERE)
+- **Session of 2026-08-26 (late morning), current state:**
+  - SSH key auth to the host is set up; `ssh mcserver` / `scp mcserver:...`.
+    **Do not use sshpass.** `pack_config.py` defaults `USE_SSH_KEY = 1`.
+  - FCS-DEV opens THREE tabs at boot: shell, **FCS Telemetry** (the logger),
+    and **Flight Tools** (focused). Run flight tools in the third tab —
+    running one in the telemetry tab kills the logger.
+  - Repo moved to `~/repos/mine/luaScripts/helicarrier-fcs`, git-tracked, and
+    indexed by Gortex.
+  - Deployed and current: `axisresponse.lua`, `flight.lua`, `sensors.lua`,
+    `attitude.lua`, `mixer_profile.lua`, `main.lua`, `snapshot.lua`,
+    `startup.lua` on computer 1; `pod/main.lua` on all four pods.
+  - `fcs/config.lua` deliberately DIFFERS from the repo template (it carries
+    `podIds`); the repo template also has a `hub` block that is not deployed.
+  - **`/fcs-dev.lua` (the monitor hub) is NOT deployed.** The repo's
+    `startup.lua` would launch it; the deployed one does not. Deploy it as its
+    own piece of work if you want the hub live.
 - **The craft is now symmetric.** No standing roll torque — but it STILL
   STRAFES, for a different reason. See **THE STRAFE**.
 
@@ -231,6 +260,151 @@ MEASURED PHYSICS above says 52.1%. The difference is probably the altitude
 reference for the air-density correction. It does not change the conclusion —
 at either figure the craft is using well under a quarter of its thrust.)*
 
+### Fixing the ramp made the fast axis too fast to measure
+
+Run 17, first with the reach gate: **`differential applied: spread 0.1500 of
+0.1500 wanted`** on both axes — the gate does what it says.
+
+But with full torque from the first instant, roll accelerates at ~25.8 deg/s^2
+and crosses the 6 deg cap in **0.75 s = THREE samples**, the bare minimum for
+the fit and with a 0.464 deg/s start rate to subtract. It reported roll 86.03
+and a ratio of 7.23, which the bound check caught.
+
+The 0.25 s sample period was set when a sample cost a full `sensors.read`
+(~1.6 s), so it was never the binding constraint. With the cheap read it is:
+two Sable calls is ~0.1 s, so 0.25 was discarding half the available samples.
+
+**`pulseSampleSeconds = 0.12`** for the pulse window, and
+**`pulseMinSamples = 5`** so the angle cap cannot end a pulse before the fit has
+enough points. Harness: roll 6 -> **10 samples**, pitch 8 -> **14**. Sends stay
+on their own clock (`keepAliveMs`), so the watchdog margin is untouched, and the
+6 deg safety budget is unchanged.
+
+### The bound check needed a tolerance
+
+The hard bound had none, and the harness — whose TRUE ratio is the tensor's
+4.48 — measures 4.80, 7% high from discretisation alone. Flagging that as "one
+of these numbers is wrong" trains the reader to ignore the check.
+
+Now graded at 20%: above that is a real flag, between the bound and 20% reads
+as "at the bound, consistent within measurement error". Applied to the runs so
+far, it flags exactly the two that were genuinely broken:
+
+| run | ratio | verdict |
+|---|---|---|
+| 11 | 11.02 | HARD FLAG (146% over) — unsettled pitch start |
+| 15 | 5.04 | at the bound (12%) — within error |
+| 17 | 7.23 | HARD FLAG (61% over) — 3-sample roll fit |
+| 12, 13, 14, 16 | 1.67-3.70 | ok |
+
+### THE SCATTER, FOUND: the pods slew-rate-limit power, and the pulse never waited
+
+With the logger alive and the CSV no longer 30 KB per row, the pulse window was
+finally readable. Run 16, corner powers sample by sample:
+
+    ROLL  pulse  t=148.1  FL 0.2706  FR 0.1206  ->  levels [4,1,4,1]  spread 0.150
+                 t=149.0  FL 0.2671  FR 0.1171  ->  levels [4,1,4,1]  spread 0.150
+
+    PITCH pulse  t=173.3  FL 0.2918  RL 0.1418  ->  levels [4,4,2,2]  spread 0.150
+                 t=174.2  FL 0.2720  RL 0.1220  ->  levels [4,4,1,1]  spread 0.150
+                 t=175.1  FL 0.2161  RL 0.1661  ->  levels [3,3,2,2]  spread 0.050
+
+**The applied torque changed by 3x WITHIN a single pitch pulse**, and the last
+line is not quantisation — the commanded spread itself was a third of nominal.
+
+**Cause: `config.maximumChangePerCommand = 0.05`.** The pods slew-rate-limit
+power. The pulse steps each corner by `demand x authority` = 0.075, so it takes
+**two commands** to reach full differential, and the cancel's 0.15 swing takes
+**three**. Every watchdog fire drops the pod to `commsLossPower` and the ramp
+restarts from there.
+
+So alpha was being averaged over the ramp-in, and how much of the ramp landed
+inside the measurement window varied with command timing. **That is the 2x
+scatter** (14.07 .. 28.33).
+
+Also note: the differential is **3 ion levels**, not the 1 assumed earlier in
+this document. `[4,1,4,1]` — the earlier arithmetic that reasoned about a
+one-level differential was wrong about the magnitude too.
+
+**Fix: wait until the differential is actually applied before starting the
+clock.** `pulseReachTimeoutSeconds` / `pulseReachFraction` (3.0 s, 0.9) hold
+until the corner spread reaches 90% of nominal, THEN reset `startAt` and the
+reference angle. If it never gets there the run is flagged suspect rather than
+quietly under-reporting.
+
+Phase A had solved exactly this for its power steps ("the pod has actually
+REACHED the commanded power") since the beginning. The pulse never did — the
+lesson was already in the file, applied one function away.
+
+**Validated in the harness, which models the slew limit:** measured roll went
+12.76 -> 25.57 and pitch 2.39 -> 4.16 once the ramp was excluded. Very close to
+the 2x dilution seen in flight, from an independent implementation of the same
+physics.
+
+### THE WATCHDOG WAS EATING EVERY FLIGHT — confirmed, and I had wrongly cleared it
+
+The first flight CSV since run 8 (the logger had been dead — see the
+`fcs.snapshot` gotcha) settled this outright.
+
+**1716 `COMMAND_TIMEOUT` faults across the four pods in one session.** The
+watchdog guard requires `state.armed` and CLEARS it when it fires, so that is
+~429 separate arm -> timeout cycles PER POD PER FLIGHT.
+
+That is `hold()` exactly: *send-if-due, then read*. A full `sensors.read`
+blocks ~1.6 s with no `set_power` going out, against a 750 ms
+`COMMAND_TIMEOUT`. So:
+
+    armed, holding the commanded differential : ~750 ms
+    disarmed, forced to uniform 0.195         : ~850 ms
+    duty cycle of the real differential       : 47%
+
+**A uniform `commsLossPower` applies NO differential.** Every pulse was being
+delivered at roughly half strength, varying run to run with loop timing — the
+leading explanation for roll authority scattering 2x (14.07 .. 28.33) across
+otherwise identical runs.
+
+**I had reported this theory DISPROVED and that was wrong.** I checked run 5's
+corner powers, saw `[3,2,3,2]` in some samples, and concluded the watchdog was
+not suppressing the differential. But a 47% duty cycle looks exactly like that
+— and the uniform rows I filtered out of the listing read **0.1950**, which is
+`commsLossPower` to four decimals. I discarded the evidence and then reported
+its absence. **Do not "disprove" a mechanism with a filtered view of the data.**
+
+**Fix: cheap reads for the ENTIRE axis-response flight**, not just the pulse
+window. Two Sable calls instead of a dozen puts the send gap at ~0.13 s,
+comfortably inside the watchdog. The climb, the hold, the cancel and the
+descent were all being starved the same way the pulse was.
+
+`rolldrift.lua` is deliberately NOT switched over: it calls `session:rates()`
+inside its sample loop, which needs angular velocity that the cheap read omits.
+It is also a passive symmetric test, so a watchdog that forces all four corners
+to the same power does not bias its conclusion.
+
+### The fault list was unbounded, and it destroyed six runs of flight data
+
+`state.faults` in `pod/main.lua` was appended to and **never cleared**.
+`statusMessage` copies the whole list into every telemetry message and
+`fcs/main.lua` writes it into every CSV row — so each row carried **30 KB** of
+repeated fault strings.
+
+Flight logs then rotated every ~17 seconds at 20 rows each, and with only a few
+kept, the pulse window a run existed to capture was gone before it could be
+pulled. Combined with the logger being down, runs 9-15 produced no usable
+per-sample data at all.
+
+Now capped at 12 entries and run-length collapsed: **`COMMAND_TIMEOUT x1716`**
+is 21 bytes and strictly more informative than 1716 copies. A running
+`faultTotal` is kept so trimming loses nothing.
+
+**Note the ordering trap this nearly repeated.** `recordFault` was first placed
+below its call sites — and a `local function` declared after the code that
+calls it is a nil global at that point, silently. This document already records
+that exact bug (`hoverTrim`, which killed a run mid-flight). Caught before
+deploy this time, but only by reading the line numbers.
+
+**Both fixes need a POD REBOOT to take effect** — a running pod holds its old
+`main.lua` in memory. `/fcs/reboot.lua all` works while grounded and disarmed.
+
 ### The settle gate worked — pitch measured clean, ratio now legal
 
 2026-08-26 11:05, `flight-logs/axisresponse_result_run12_settlegate.txt`.
@@ -252,42 +426,49 @@ an arm ratio of 0.37 — a craft about 2.7x longer than wide, which independentl
 matches the ~2.4x estimated from run 8's geometry. Two different runs agreeing
 on the hull's proportions is a real cross-check.
 
-**BUT ROLL IS STILL DRIFTING, and it is not converging:**
+**BOTH AXES SCATTER ABOUT 2x, AND THE CAUSE IS NOT YET KNOWN:**
 
-| run | roll response | collective at hold |
-|---|---|---|
-| 9 | 28.33 | — |
-| 10 | 26.93 | 0.223 |
-| 11 | 22.79 | 0.192 |
-| **12** | **14.07** | 0.197 |
+| run | roll | pitch | ratio | collective at hold |
+|---|---|---|---|---|
+| 9 | 28.33 | — | — | — |
+| 10 | 26.93 | — | — | 0.223 |
+| 11 | 22.79 | 2.07 (unsettled) | 11.02 | 0.192 |
+| 12 | 14.07 | 8.40 | 1.67 | 0.197 |
+| 13 | 17.32 | 4.68 | 3.70 | 0.219 |
 
-A **2.0x range, monotonically declining**. That is not measurement noise; noise
-scatters, it does not trend. Do not quote a roll authority until this is
-understood.
+roll: **14.07 .. 28.33, a 2.01x range**, mean 21.89, sd 6.12.
+pitch, settled runs only: 8.40 and 4.68, a 1.80x spread.
 
-**Leading hypothesis: the pulse differential is quantisation-dependent and the
-trim is moving collective underneath it.** The demand is 0.3 x authority 0.25 =
-+/-0.0375 per corner, a total spread of 0.075 = **1.125 ion quanta**. Whether
-that lands as a ONE-level or TWO-level differential depends on where collective
-sits on the level grid:
+**A CORRECTION.** After run 12 this document said roll was *"monotonically
+declining — noise scatters, it does not trend"*. Run 13 went 14.07 -> 17.32.
+It scattered. That was four points of noise read as a trend, and the inference
+drawn from it was wrong. **Do not quote a roll authority yet** — but the reason
+is plain scatter, not a systematic drift.
 
-    collective 0.200 -> corners 0.2375 / 0.1625 -> levels 3 / 2 -> 1 level
-    collective 0.230 -> corners 0.2675 / 0.1925 -> levels 4 / 2 -> 2 LEVELS
-    collective 0.170 -> corners 0.2075 / 0.1325 -> levels 3 / 1 -> 2 LEVELS
+**A SECOND CORRECTION, to the arithmetic.** The pulse was described as spanning
+1.125 ion quanta. That is the offset applied to EACH corner
+(0.3 x 0.25 = 0.075 = 1.125 quanta); the SPREAD between the raised and lowered
+corners is twice that, **2.25 quanta**.
 
-A 2x swing in applied torque, which is exactly the observed range. The
-collective REPORTED at hold does not settle it, because trim keeps moving
-collective during the pulse.
+**The quantisation hypothesis does not survive its own test.** Computing the
+realized level differential from the collective reported at hold:
 
-**Confirming it needs the per-sample corner powers, i.e. `main.lua` running.**
-It has been down since 09:57 (heartbeat frozen at sequence 1113) and no flight
-CSV exists for runs 9-12. Start the logger in its own tab before the next run.
+    run 10  coll 0.223 -> levels 4/2 -> 2 levels -> roll 26.93
+    run 13  coll 0.219 -> levels 4/2 -> 2 levels -> roll 17.32
+    run 11  coll 0.192 -> levels 4/1 -> 3 levels -> roll 22.79
+    run 12  coll 0.197 -> levels 4/1 -> 3 levels -> roll 14.07
 
-The honest reading of this project's own lesson — *"a correction smaller than
-one ion level is not a small correction, it is an intermittent large one"* —
-is that a pulse spanning 1.125 quanta was never a clean experiment. A pulse
-sized to an EXACT integer number of levels, or one that pins collective for
-its duration, would remove the ambiguity.
+More levels should mean more torque. It does not, and the two runs sharing a
+differential disagree by as much as the whole spread. So the hold collective
+does not explain the scatter — and it could not, because trim keeps moving
+collective throughout the 1.75-2.1 s pulse.
+
+**This is now blocked on data, not on theory.** Diagnosing it needs the
+per-sample per-corner powers during the pulse, which only `main.lua` logs. It
+has been down since 09:57 (heartbeat frozen at sequence 1113) and **no flight
+CSV exists for runs 9-13**. Start the logger in its own tab before the next
+run; without it, any further explanation is guesswork of the kind that has
+already been wrong twice here.
 
 ### First COMPLETE run — and why the pitch number is still not usable
 
@@ -609,7 +790,7 @@ behave: it validated the tool three times before failing.
 Fixed by keeping `window[1]` as the NEWEST sample still at least a full window
 old, so the span genuinely covers `windowMs`. Extracted as
 **`flight.trimWindow`** specifically so the test can call the real function —
-`tools/test_flight_window.lua` (23 assertions) exercises every plausible loop
+`tools/test_flight_window.lua` (49 assertions) exercises every plausible loop
 period including the three that scored zero. A test that reimplemented the
 trim would have reimplemented the bug and agreed with it.
 
@@ -1228,10 +1409,10 @@ each bearing's own axis. Measure it before closing any loop.
 | `/fcs/reboot.lua` | reboot pods from FCS-DEV | refuses while banks carry thrust |
 | `/fcs/propctl.lua`, `/fcs/bankctl.lua` | manual single commands | commands hardware |
 | probes | `/pod/yawprobe.lua`, `obstructionprobe.lua`, `thrustprobe.lua`, `stabprobe.lua`, `/fcs/pressureprobe.lua` | read-only diagnostics |
-| `tools/test_mixer.lua` | 101 assertions | offline |
+| `tools/test_mixer.lua` | 102 assertions | offline |
 | `tools/test_atmosphere.lua` | 37 assertions, pinned to in-game measurements | offline |
 | `tools/test_attitude.lua` | 133 assertions; axis mapping, yaw-invariance, harness round-trip, transposition guard | offline |
-| `tools/test_flight_window.lua` | 23 assertions; the stable-hold window gate across loop periods | offline |
+| `tools/test_flight_window.lua` | 49 assertions; the stable-hold window gate across loop periods, and the cheap read vs the full read | offline |
 | `tools/analyze_tensor.py` | body- vs world-frame verdict from a flight CSV | offline |
 | `tools/run_*_harness.lua` | sweep, ionsweep, reboot, axisresponse, rolldrift | offline |
 
@@ -1686,11 +1867,46 @@ per command, which any inner control loop will need.
   `/fcs/config.lua` carries `podIds = {FL=2, FR=3, RL=4, RR=5}` and pod configs
   carry peripheral names — none of which exist in the templates. Fetch, patch
   with a targeted regex, assert the values survived, then push.
+
+- **CHECK THE DEPENDENCY CLOSURE BEFORE PUSHING ANY MODULE.** The repo is ahead
+  of the deployed computers, so a repo file can `require` something the target
+  has never had. Pushing `main.lua` for the sake of six new CSV columns also
+  brought in `require("fcs.snapshot")` from the undeployed monitor-hub work,
+  and `snapshot.lua` was not on computer 1. The logger then failed at line 19
+  on EVERY boot, silently:
+
+      /fcs/main.lua:19: module 'fcs.snapshot' not found
+
+  It cost runs 9-14 — six flights with no CSV at all, which is exactly the data
+  needed to explain the 2x scatter in measured authority. And it was invisible
+  from outside: the error goes to the tab's screen, `last_error.txt` stays
+  EMPTY because the program dies before its own handler is reached, and the
+  heartbeat simply stops updating.
+
+  Before pushing a module, diff its `require` list against the target:
+
+      grep -oE 'require\("fcs\.[a-zA-Z_]+"\)' fcs/<file>.lua | sort -u
+      ssh <host> "cd <computer>/fcs && ls *.lua"
+
+  **A frozen `/fcs/heartbeat.txt` sequence is the symptom.** Sample it twice a
+  few seconds apart before trusting any run that is supposed to log.
 - `rsync --delete` on computer directories is **approved**, but keep excluding
   generated files: `thruster_manifest.lua`, `device_report.txt`, `logs/`,
   `peripheral_manifest.txt`.
-- sshpass auth to the host is flaky (~1 in 30). Retry loops are built into the
-  deploy commands. `ssh-copy-id` would remove this class of error.
+- **SSH KEY AUTH IS SET UP (2026-08-26). Do not use sshpass any more.**
+  `~/.ssh/id_ed25519` (no passphrase) is authorised on the host, and there is a
+  `mcserver` alias in `~/.ssh/config`:
+
+      ssh mcserver
+      scp mcserver:server/creative-test-superflat/... .
+
+  `packDev/pack_config.py` now defaults `USE_SSH_KEY = 1`, so `ssh_prefix()`
+  returns `[]`. Set `FNF_USE_SSH_KEY=0` to fall back to the password on a
+  machine without the key.
+
+  This retires the old "sshpass is flaky (~1 in 30), retry loops are built into
+  the deploy commands" note — that flakiness was an artifact of password auth
+  and is gone with it.
 - Changing config values requires **rebooting the affected computer**; changing
   `computer_space_limit` requires restarting the Minecraft server.
 - Editing `fcs/main.lua`'s column list requires rebooting computer 1 — the
@@ -1739,25 +1955,44 @@ per command, which any inner control loop will need.
 
 The first three items on the previous list are done or retired. What is left:
 
-1. **Calibrate `Aroll` / `Apitch`** with `/fcs/axisresponse.lua` (pulse demand
-   0.30, above the ion quantum). `mixer_profile.lua` still carries placeholder
-   0.25s. This is the hard blocker on any attitude controller, and its
-   roll/pitch ratio settles the axis-convention question. It now runs on a
-   symmetric craft, so the measurement is clean.
-   ~~Re-run `/fcs/rolldrift.lua` first~~ — **DONE 2026-08-26.** Self-levelling
-   re-confirmed on the symmetric craft (5 zero crossings), which is the safety
-   gate this run depended on. See *The hull self-levels*.
-2. **Solve yaw with the bearings.** The vectoring command path exists and is
+1. **Calibrate `Aroll` / `Apitch`** with `/fcs/axisresponse.lua` — still the
+   hard blocker. `mixer_profile.lua` carries placeholder 0.25s.
+
+   **The instrument is finally clean.** Nine flights were spent removing five
+   stacked distortions (see START HERE); the next run is the first with all of
+   them off. Require, before believing a number:
+
+   - `differential applied: spread 0.1500 of 0.1500 wanted` on BOTH axes
+   - 8+ samples on roll, not 3
+   - no `SUSPECT` flag and no hard bound violation
+   - **and a second run agreeing within a few percent**
+
+   That last one is not optional. Every previous value looked solid in
+   isolation, and the spread across runs was 3.98 to 86.03.
+
+   ~~Re-run `/fcs/rolldrift.lua` first~~ — **DONE.** Self-levelling re-confirmed
+   on the symmetric craft (5 zero crossings). See *The hull self-levels*.
+
+2. **Write the rate-damping term, and point it at the strafe.** This is what
+   the calibration is FOR. The strafe is an underdamped oscillation in two axes
+   out of phase, so trim cannot touch it — only damping can. Put it on the
+   BEARINGS: continuous, against 22.28% of weight per ion step.
+3. **Solve yaw with the bearings.** The vectoring command path exists and is
    closed-loop; nothing is wired to the axis. `mixer.allocate` already accepts
    `demand.yaw`, echoes it in `unmet.yaw`, and gates it behind
    `yawAvailable = false` — turning it on is a coefficient table and a flag.
    Measure the sign of the lateral force first (see THE STRAFE).
-3. **Validate the 280->320 atmosphere segment** with
+4. **Validate the 280->320 atmosphere segment** with
    `atmosphere.verify(model, {285, 290, 300, 310})`. Nothing was ever measured
    between, and y=320 is a hard flight-envelope ceiling.
-4. **Then, and only then, a controller.** Note what it must respect: no hover
-   level (dither between ion levels 2 and 3), 32% axis coupling, ~950 ms loop,
-   and fine trim living on the bearings rather than the ions.
+5. **Then a full controller.** Note what it must respect: no hover level
+   (dither between ion levels 2 and 3), 32% axis coupling, and fine trim living
+   on the bearings rather than the ions. The ~950 ms loop figure is now stale —
+   with `Session:readCheap` the flight loop runs at ~0.13 s.
+
+6. **Re-test the +23 block hold ceiling.** It was measured while the watchdog
+   was forcing `commsLossPower` roughly half the time, which is exactly the
+   level-2/level-3 dither that set the ceiling. It may have lifted on its own.
 
 **`props.lua` fix is LIVE** (pods rebooted 2026-08-26). Confirmed by the
 heartbeat: `vec=` now reports real direction vectors — `{~0, +/-1, ~0}`, the
