@@ -13,6 +13,7 @@ local config = require("pod.config")
 local protocol = require("pod.protocol")
 local thrusters = require("pod.thrusters")
 local props = require("pod.props")
+local payload = require("pod.payload")
 
 local VALID_CORNERS = { FL = true, FR = true, RL = true, RR = true }
 if not VALID_CORNERS[config.corner] then
@@ -154,32 +155,63 @@ local function resolveMain()
     return state.trustedMainId
 end
 
-local function statusMessage(messageType)
-    local telemetry = thrusters.telemetry()
-    telemetry.corner = config.corner
-    telemetry.hostname = config.hostname
-    telemetry.armed = state.armed
-    telemetry.currentPower = state.currentPower
-    telemetry.fallbackPower = config.fallbackPower
-    telemetry.commsLossPower = config.commsLossPower
-    telemetry.commandedTilt = state.lastTilt
-    telemetry.commandedTiltAzimuth = state.lastTiltAzimuth
-    telemetry.lastCommandAt = state.lastCommandAt
-    telemetry.podComputerId = os.getComputerID()
-    -- Cheap scalars, so the FCS can see where commands went without reading
-    -- /pod/heartbeat.txt over SSH.
-    telemetry.bootedAt = state.bootedAt
-    telemetry.commandsSeen = state.commandsSeen
-    telemetry.commandsApplied = state.commandsApplied
-    telemetry.commandsRejected = state.commandsRejected
-    telemetry.lastReject = state.lastReject
-    telemetry.prop = props.telemetry()
+-- ---------------------------------------------------------------------------
+-- THE SAMPLE: the one place this pod reads its hardware.
+--
+-- Everything else -- replies, telemetry sends, the display, the heartbeat --
+-- reads this table and touches no peripheral. That is not tidiness; it is the
+-- fix for a measured 2.5-5% command loss. See pod/payload.lua for the
+-- mechanism and the numbers.
+--
+-- Held as ONE table replaced wholesale rather than fields updated in place, so
+-- a reader can never catch a half-written sample: taking a local reference to
+-- `sample` gives a consistent set of readings for as long as it is held.
+-- ---------------------------------------------------------------------------
 
-    for _, fault in ipairs(state.faults) do
-        telemetry.faults[#telemetry.faults + 1] = fault
+local sample = { at = nil, thrusters = nil, props = nil, count = 0 }
+
+-- Recipients waiting for a FRESH status. A status_request is a request for
+-- data, so it is answered from a new sample rather than from the cache --
+-- ionsweep and axisresponse command a power and then read it back, and a
+-- cached averagePower would hand them the value from BEFORE their own command.
+-- It costs no more than the old code did: the same ~250 ms read, on a
+-- coroutine that is not listening for commands.
+local pendingStatus = {}
+
+local function refreshSample()
+    local at = os.epoch("utc")
+    local okThrusters, thrusterReading = pcall(thrusters.telemetry)
+    local okProps, propReading = pcall(props.telemetry)
+
+    if not okThrusters then
+        recordFault("SAMPLE_THRUSTERS: " .. tostring(thrusterReading))
+    end
+    if not okProps then
+        recordFault("SAMPLE_PROPS: " .. tostring(propReading))
     end
 
-    return protocol.message(messageType or "status", telemetry)
+    -- A failed read keeps the PREVIOUS reading rather than publishing nil.
+    -- Absent keys leave the FCS's stored pod state intact (banks.acceptStatus
+    -- copies keys over), so nil-ing a half would silently freeze half the
+    -- telemetry with no way to tell. sampleAgeMs is what reveals a stuck
+    -- sampler, and it only works if `at` advances honestly.
+    sample = {
+        at = at,
+        thrusters = okThrusters and thrusterReading or sample.thrusters,
+        props = okProps and propReading or sample.props,
+        count = sample.count + 1,
+        healthy = okThrusters and okProps,
+    }
+end
+
+local function statusMessage(messageType)
+    return protocol.message(messageType or "status", payload.status(messageType, {
+        sample = sample,
+        state = state,
+        config = config,
+        computerId = os.getComputerID(),
+        now = os.epoch("utc"),
+    }))
 end
 
 local function reply(recipient, messageType)
@@ -280,8 +312,20 @@ local function networkLoop()
                 state.untrusted = state.untrusted + 1
             end
             if addressedHere then
-                if message.type == "ping" or message.type == "status_request" then
+                if message.type == "ping" then
+                    -- Liveness, not data. Answered immediately from the cache:
+                    -- making a caller wait a sample for "are you there" would
+                    -- be the wrong trade, and the cheap scalars in it (armed,
+                    -- currentPower) are live regardless.
                     reply(senderId, "status")
+
+                elseif message.type == "status_request" then
+                    -- A request for DATA. Handed to the sampler, which takes a
+                    -- fresh reading and answers. networkLoop does no peripheral
+                    -- work here -- doing it inline is what made the pod deaf
+                    -- for ~250 ms per poll and cost 2.5-5% of all commands.
+                    pendingStatus[#pendingStatus + 1] = senderId
+                    os.queueEvent("pod_sample_request")
 
                 elseif message.type == "arm" then
                     state.commandsSeen = state.commandsSeen + 1
@@ -425,15 +469,59 @@ local function watchdogLoop()
     end
 end
 
-local function telemetryLoop()
+-- THE CENTRAL DATA LOOP.
+--
+-- Samples the hardware, publishes the sample, sends it to the FCS, and answers
+-- anyone who asked for a fresh one. It is the only coroutine that touches a
+-- peripheral for reading, so it is the only one that can go deaf -- and it
+-- listens for nothing, so being deaf costs nothing. Run 3 measured exactly
+-- that: this loop was building a payload 20% of the time and networkLoop lost
+-- 0 of 80 commands.
+local function samplerLoop()
     while true do
+        refreshSample()
+
         local mainId = resolveMain()
         if mainId then
             rednet.send(mainId, statusMessage("status"), config.protocol)
             state.telemetrySends = state.telemetrySends + 1
             state.lastSendAt = os.epoch("utc")
         end
-        sleep(config.telemetryPeriodSeconds)
+
+        -- Drained AFTER the sample, and coalesced: four requests arriving
+        -- together are served by one read rather than four. Anything that
+        -- arrived DURING the sample is served here too -- it is at most a few
+        -- hundred ms old, and fresher than the reply the old code sent.
+        if #pendingStatus > 0 then
+            -- Safe without a lock: coroutines here are cooperative, and there
+            -- is no yield between reading the queue and replacing it, so
+            -- networkLoop cannot append to a list that is about to be dropped.
+            local waiting = pendingStatus
+            pendingStatus = {}
+            for _, recipient in ipairs(waiting) do
+                reply(recipient, "status")
+            end
+        end
+
+        -- Wake on the period OR on a request, whichever comes first, so a
+        -- status_request is not held for up to a whole telemetry period.
+        -- Pulling unfiltered is deliberate: a filtered wait would drop the
+        -- other event, and this loop must not care which one it got.
+        -- The QUEUE is the state; the event is only a wakeup. A request that
+        -- lands while this loop is sampling or replying has its event dropped
+        -- (that work yields on task_complete, and parallel discards what does
+        -- not match) -- so the loop condition reads the queue rather than
+        -- trusting the event to arrive. Without that, a request landing in
+        -- that narrow window waits a full telemetry period instead of ~250 ms.
+        local timer = os.startTimer(config.telemetryPeriodSeconds)
+        while #pendingStatus == 0 do
+            local event, id = os.pullEvent()
+            if event == "pod_sample_request" then
+                break
+            elseif event == "timer" and id == timer then
+                break
+            end
+        end
     end
 end
 
@@ -479,8 +567,17 @@ local function displayLoop()
                 "thrusters=" .. tostring(#thrusters.devices),
                 "prop_controller=" .. tostring(props.controllerName),
                 "prop_bearings=" .. tostring(props.bearingName),
+                "sample_at=" .. tostring(sample.at),
+                "sample_age_ms=" .. tostring(sample.at and (os.epoch("utc") - sample.at)),
+                "sample_count=" .. tostring(sample.count),
+                "sample_healthy=" .. tostring(sample.healthy),
+                "pending_status=" .. tostring(#pendingStatus),
+                -- Read from the SAMPLE, not from the hardware. This used to
+                -- call props.telemetry() twice per heartbeat, which is a
+                -- second sampler nobody declared and a second answer that
+                -- could disagree with the one being transmitted.
                 "prop_diag=" .. (function()
-                    local t = props.telemetry()
+                    local t = sample.props or {}
                     return string.format(
                         "bearings=%d assembled=%s thrust=%s rot=%s angular=%s kinetic=%s airflow=%s sail=%s",
                         t.bearingCount or 0, tostring(t.bearingsAssembled),
@@ -489,7 +586,7 @@ local function displayLoop()
                         tostring(t.airflow), tostring(t.sailPower))
                 end)(),
                 "prop_per_bearing=" .. (function()
-                    local t, out = props.telemetry(), {}
+                    local t, out = sample.props or {}, {}
                     for i, b in ipairs(t.perBearing or {}) do
                         out[#out + 1] = string.format(
                             "[%d %s thrust=%s asm=%s hand=%s vec=%s,%s,%s]",
@@ -506,8 +603,13 @@ local function displayLoop()
     end
 end
 
+-- One sample before anything can be asked for one. Without it the first
+-- replies carry no thruster or prop fields at all, and the FCS would show a
+-- pod that is online with no hardware behind it for the first second.
+refreshSample()
+
 local ok, reason = pcall(function()
-    parallel.waitForAll(networkLoop, watchdogLoop, telemetryLoop, displayLoop)
+    parallel.waitForAll(networkLoop, watchdogLoop, samplerLoop, displayLoop)
 end)
 
 -- waitForAll returning without an error means a loop exited on its own, which

@@ -105,15 +105,35 @@ chase.
 **FR answered 20 of 20.** Across both runs it is 29/30 while RL is 27/30. FR is
 cleared; do not spend another session on it.
 
-Rate across both runs: **6 lost in 120, about 5%.** Mechanism unknown beyond
-"it did not arrive" -- separating a radio drop from a pod that was busy would
-need pod-side instrumentation, and it does not change what the sender must do.
+Rate across both runs: **6 lost in 120, about 5%.**
 
-**What that means for the damper is better than it sounds.** A control loop
-recomputes and re-sends every iteration, so the loop IS the retry: a lost
-command is corrected ~0.13 s later by the next one, and at 5% the chance of a
-corner missing two in a row is 1 in 400. The actuator is at most one iteration
-stale. No retry logic is needed -- *provided nothing blocks waiting for an ack.*
+**The mechanism is found, and it is a variant of bug 6.** `status_request` was
+answered INLINE IN `networkLoop` with a full `reply()`, which builds
+`thrusters.telemetry()` -- 160 peripheral getters inside a nested
+`parallel.waitForAll`. `parallel` pulls events **unfiltered** and hands each
+one only to its own children, all of which wait on `task_complete`. So every
+`rednet_message` landing in that ~250 ms window was pulled off the queue and
+**discarded** -- not queued, not redelivered.
+
+Four things agree:
+
+| evidence | says |
+|---|---|
+| `untrusted_msgs=0` on all four pods | the lost commands never reached `rednet.receive`; not a trust, corner or protocol rejection |
+| CC:Tweaked has no packet-loss model | ender modems, unlimited range, no probabilistic drop anywhere -- there is no wire to lose it on |
+| loss uncorrelated with corner | a duty cycle, not a pod fault |
+| **logger stopped: 80/80, zero lost** | the poll IS the cause |
+
+And the craft times its own window: with the poll stopped, telemetry arrives
+every **1250 ms** against a configured `telemetryPeriodSeconds = 1.00`. That
+250 ms of overhead is the payload build, measured. 250 ms per 2000 ms poll
+predicts 6-12% loss against the 2.5-5% observed.
+
+**THE RULE, and it is the useful part: a coroutine is deaf only to work it does
+ITSELF.** Run 3 proves the sibling case is safe -- the sampler was building a
+payload 20% of the time and `networkLoop` lost nothing. So the fix is not a
+cheaper read. It is moving the read off the coroutine that receives commands.
+See **THE POD SAMPLER**.
 
 **So: do not put a blocking ack-waiter in the damper loop.** At a few
 percent per command and four corners per iteration, roughly one iteration in
@@ -426,6 +446,63 @@ unevenly adds the roll on top. Above ~1.5 blocks, leave them running and level
 and land with `/fcs/bankctl.lua`.
 
 ---
+
+## THE POD SAMPLER: one central data loop
+
+Every pod reads its hardware in exactly ONE place -- `samplerLoop` in
+`pod/main.lua`. Replies, telemetry sends, the display and `/pod/heartbeat.txt`
+all read the published sample and touch no peripheral. That is not tidiness; it
+is the fix for a measured 2.5-5% command loss (see START HERE).
+
+    samplerLoop      the ONLY coroutine that reads a peripheral. Samples,
+                     publishes, sends to the FCS, answers pending requests.
+                     Listens for nothing, so being deaf costs nothing.
+    networkLoop      receives commands. Reads no peripheral, ever.
+    displayLoop      renders and writes the heartbeat FROM THE SAMPLE
+    watchdogLoop     unchanged; reads nothing
+
+Four things about it are load-bearing:
+
+- **`status_request` is queued, not answered inline.** It is a request for
+  DATA, so it is served from a FRESH sample -- `ionsweep` and `axisresponse`
+  command a power and read it back, and a cached `averagePower` would hand them
+  the value from before their own command. It costs no more than the old code:
+  the same ~250 ms read, on a coroutine that is not listening. `ping` is
+  different -- liveness, answered immediately from cache.
+- **The queue is the state; the event is only a wakeup.** A request landing
+  while the sampler is sampling has its `pod_sample_request` event dropped (that
+  work yields on `task_complete`). So the wait loop's condition reads
+  `#pendingStatus` rather than trusting the event. Without that, a request in
+  that window waits a whole telemetry period instead of ~250 ms.
+- **The sample is replaced wholesale, never updated in place**, so a reader
+  taking a local reference gets a consistent set of readings.
+- **A failed read keeps the previous half** rather than publishing nil.
+  `banks.acceptStatus` copies keys over stored pod state, so nil-ing a half
+  would silently freeze it with nothing to show why. `sampleAgeMs` is the tell,
+  and it is in every message.
+
+**The two rules `pod/payload.lua` exists to keep**, both pinned by
+`tools/test_pod_payload.lua` (41 assertions, and both were mutation-tested --
+each rule broken on purpose, each caught):
+
+1. **Never hand back the snapshot's own tables.** The old code appended
+   `state.faults` into the table `thrusters.telemetry()` returned. Harmless
+   while that table was built fresh and thrown away; against a CACHED table the
+   same line appends the fault list to itself on every message, forever. That
+   is the unbounded-fault-list bug that destroyed six runs of flight data,
+   reintroduced by changing nothing but the lifetime of a table.
+2. **Cheap scalars are always live, never sampled.** `armed` and `currentPower`
+   change on command boundaries, and `fcs/reboot.lua` decides whether rebooting
+   a pod will drop lift by reading exactly those. A one-second-old arm state is
+   a safety-relevant lie.
+
+Writes are still done inline in `networkLoop` (`props.setRpm`,
+`thrusters.applyCommand`), which is about one tick of deafness per command
+applied. That is self-limiting for a steady sender -- the pod applies, then
+listens, then the next command arrives -- so it is left alone until measured to
+matter. If it ever does, the same pattern extends: park the value in a
+last-write-wins slot and let an actuator loop apply it, which is what
+set-and-hold actuators want anyway.
 
 ## THE BEARING PAIR: mirrored translates, unmirrored does nothing
 
@@ -1900,6 +1977,7 @@ answers on this project; measurement has not.
     luajit tools/test_lateralhold.lua   the translation law and its sign guards
     luajit tools/test_vectoring.lua     bearing pair maths, ADDS vs CANCELS
     luajit tools/test_craftgeom.lua     hull box and authority ceilings
+    luajit tools/test_pod_payload.lua   the pod sampler's two cached-data rules
     luajit tools/run_podprobe_harness.lua all   the comms probe, in each
                                         failure mode it must tell apart
 

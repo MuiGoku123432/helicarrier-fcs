@@ -26,6 +26,10 @@ local FILES = {
     "fcs/flight.lua", "fcs/mixer.lua", "fcs/attitude.lua", "fcs/actuators.lua",
     "fcs/banks.lua", "fcs/sensors.lua", "fcs/tiltctl.lua",
     "fcs/podprobe.lua",
+    -- Pod code is deployed flight code too, and it is the half that runs
+    -- with nobody watching the screen.
+    "pod-template/pod/main.lua", "pod-template/pod/payload.lua",
+    "pod-template/pod/props.lua", "pod-template/pod/thrusters.lua",
 }
 
 -- Lua 5.1 / LuaJIT base library.
@@ -52,6 +56,13 @@ local ALLOWED = {
     -- fs and peripheral. Every use in this repo guards with `if not sublevel`
     -- first, because a computer not mounted on a Sable craft has neither.
     sublevel = true, aero = true,
+    -- _ENV is a Lua 5.2 upvalue and always exists on the computer (CC runs
+    -- Cobalt, 5.2 semantics). LuaJIT is 5.1 and has no such name, so its
+    -- bytecode records the read as a plain global and this lint would call a
+    -- correct file broken. It appears exactly once, in the pod bootstrap that
+    -- rebuilds require() when multishell.launch provides none -- which is how
+    -- pod/main.lua is actually started.
+    _ENV = true,
 }
 
 local failures, checked = 0, 0
