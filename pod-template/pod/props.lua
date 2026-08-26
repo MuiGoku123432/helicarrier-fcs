@@ -327,8 +327,21 @@ end
 local MAX_TILT_DEGREES = 15
 
 -- A tilt of `angle` degrees away from the bearing's own normal, rotated
--- `azimuth` degrees around it. Azimuth 0 is toward +X (bow), 90 toward +Z
--- (starboard), matching fcs/config.lua's body convention.
+-- `azimuth` degrees around it. Azimuth 0 produces +X and 90 produces +Z.
+--
+-- THIS COMMENT USED TO SAY "+X (bow), 90 toward +Z (starboard), matching
+-- fcs/config.lua's body convention". It does not match it. The axis correction
+-- established that the BOW IS +Z and PORT IS +X -- pinned by 133 assertions in
+-- tools/test_attitude.lua -- so azimuth 0 points at PORT, not the bow, and
+-- anyone following the old comment aimed 90 degrees wrong. Same transposition
+-- attitude.lua carried for weeks, in the one file that still had it.
+--
+-- The MATHS below is unchanged and self-consistent; only the label was wrong.
+-- It is deliberately NOT redefined so that azimuth 0 means "bow", because the
+-- resulting force direction has never been measured -- getThrust is signed by
+-- handedness and each bearing tilts about its OWN normal. Redefining a
+-- convention to match an assumption is how this project acquired six of these.
+-- /fcs/vectorprobe.lua measures the real mapping and prints it.
 local function tiltTarget(bearing, angle, azimuth)
     local normal = { 0, 1, 0 }
     local getBlockNormal = optional(bearing, "getBlockNormal")

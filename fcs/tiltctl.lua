@@ -1,7 +1,8 @@
 -- Manual thrust-vectoring control, and the roll-trim preset.
 --
 --     /fcs/tiltctl.lua status
---     /fcs/tiltctl.lua FL 4.29 0          tilt FL 4.29 deg toward the bow
+--     /fcs/tiltctl.lua FL 4.29 0          tilt FL 4.29 deg toward PORT (+X)
+--                                         NOT the bow -- see props.lua
 --     /fcs/tiltctl.lua all 0              level everything
 --     /fcs/tiltctl.lua clear              clear every manual target
 --     /fcs/tiltctl.lua rolltrim [angle]   REFUSED -- the RR deficit was repaired
