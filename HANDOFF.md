@@ -309,13 +309,21 @@ ratio check is two-sided, and there is a per-axis absolute ceiling.
 
 ### After that
 
-1. **Write the roll damper.** `fcs/rolldamp.lua` already has the law, the clamp
-   and the integer rounding; only the flight loop is missing. Against
-   **0.0941 deg/s^2 per rpm**, critical damping is 3.2 rpm against a clamp of 4.
+1. **FLY `/fcs/rolldampflight.lua`.** Written, harness-flown, deployed; never
+   flown on the craft. Ground check first:
 
-   Send RPM **fire-and-forget and confirm from telemetry** -- see START HERE.
-   The link drops a few percent of commands, and a blocking ack-waiter turns
-   each of those into a full second of silence inside the loop.
+       /fcs/rolldampflight.lua --ground-only     prints the law, the sign, live rate
+       /fcs/rolldampflight.lua                   the A/B
+
+   It pulses +3 rpm differential for 3 s, releases, and logs 40 s -- once with
+   the damper OFF, once ON -- then compares decay time and zero crossings from
+   the same disturbance. Result to `/fcs/rolldampflight_result.txt`.
+
+   **Read the verdict before believing the numbers.** It reports NO DISTURBANCE
+   if the pulse did not move the craft (a different and larger problem than a
+   weak damper), refuses the comparison if the two halves started more than 25%
+   apart, and aborts with a SIGN diagnosis if the damper drives the oscillation.
+   All three are reproduced offline.
 
    *Do NOT put the damper on the bearings.* That was this document's
    long-standing advice and the measurements retired it -- see the actuator
@@ -1901,6 +1909,7 @@ each bearing's own axis. Measure it before closing any loop.
 | `/fcs/reboot.lua` | reboot pods from FCS-DEV | refuses while banks carry thrust |
 | `/fcs/propctl.lua`, `/fcs/bankctl.lua` | manual single commands | commands hardware |
 | `/fcs/podprobe.lua` | why a pod stops answering: ghost host vs slow pod vs packet loss | grounded; echoes each corner its OWN rpm |
+| `/fcs/rolldampflight.lua` | does differential-RPM damping actually damp? A/B on an injected pulse | **FLIES**; `--ground-only` safe |
 | probes | `/pod/yawprobe.lua`, `obstructionprobe.lua`, `thrustprobe.lua`, `stabprobe.lua`, `/fcs/pressureprobe.lua` | read-only diagnostics |
 | `tools/test_mixer.lua` | 102 assertions | offline |
 | `tools/test_atmosphere.lua` | 37 assertions, pinned to in-game measurements | offline |
@@ -2017,6 +2026,8 @@ answers on this project; measurement has not.
     luajit tools/test_craftgeom.lua     hull box and authority ceilings
     luajit tools/test_pod_payload.lua   the pod sampler's two cached-data rules
     luajit tools/test_banks_poll.lua    poll only what has gone quiet
+    luajit tools/run_rolldampflight_harness.lua damped|undamped|wrongsign
+                                        the damper A/B, and its two negative controls
     luajit tools/run_podprobe_harness.lua all   the comms probe, in each
                                         failure mode it must tell apart
 

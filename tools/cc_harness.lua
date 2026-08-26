@@ -159,6 +159,20 @@ harness.model = {
     -- opposite world, so the diagnostic can be shown to reach BOTH verdicts.
     rollRestoring = 0.0,        -- deg/s^2 per degree of tilt
     rollDamping = 0.0,          -- 1/s on angular rate
+
+    -- Scales ONLY the propeller contribution to roll torque, leaving lift and
+    -- the ion torque alone.
+    --
+    --   1.0    the thrust model's own answer: 0.2712 deg/s^2 per rpm
+    --   0.347  the MEASURED answer: 0.0941 -- see rolldamp.MEASURED
+    --   0.0    props make no roll torque at all (a negative control: proves a
+    --          verdict does not report success when nothing happened)
+    --  -1.0    inverted, for testing that a SIGN error is CAUGHT rather than
+    --          reported as a decay number
+    --
+    -- Set explicitly by tools/run_rolldampflight_harness.lua. Left at 1.0 here
+    -- so no existing runner changes behaviour.
+    propRollScale = 1.0,
 }
 
 local commandCount = 0
@@ -310,6 +324,8 @@ local function stepRotation(dt)
     -- it is now OFF by default: modelling a torque the craft does not have
     -- would corrupt exactly the axis-response calibration this harness is next
     -- needed for. Set harness.model.rrDeficit = true to restore it.
+    -- Returned SEPARATELY, because the propeller half of the roll torque has a
+    -- scale factor on it that the ion half does not. See propRollScale.
     local function cornerForce(corner)
         local pod = pods[corner]
         local power = snapPower((pod and pod.currentPower) or 0)
@@ -322,16 +338,30 @@ local function stepRotation(dt)
             prop = prop * pressureAt(harness.craft.y)
         end
 
-        return ion + prop
+        return ion, prop
     end
 
-    local fl, fr = cornerForce("FL"), cornerForce("FR")
-    local rl, rr = cornerForce("RL"), cornerForce("RR")
+    local ionFL, propFL = cornerForce("FL")
+    local ionFR, propFR = cornerForce("FR")
+    local ionRL, propRL = cornerForce("RL")
+    local ionRR, propRR = cornerForce("RR")
+
+    local fl, fr = ionFL + propFL, ionFR + propFR
+    local rl, rr = ionRL + propRL, ionRR + propRR
 
     local arm = harness.model.cornerArmBlocks
+    local propScale = harness.model.propRollScale or 1.0
     -- roll: port (FL, RL) minus starboard (FR, RR). Port pushing harder raises
     -- port, drops starboard, and positive roll is starboard-low. Correct.
-    local rollTorque = arm * ((fl + rl) - (fr + rr))
+    --
+    -- The propeller half is scaled independently so the harness can reproduce
+    -- the MEASURED roll authority rather than the one its own thrust model
+    -- implies -- they differ by 2.9x and nobody knows why (HANDOFF open
+    -- question 4). Scaling here rather than in bearingThrust keeps LIFT
+    -- correct: the discrepancy is in roll response, and the props' vertical
+    -- force is separately validated at 0.0% residual.
+    local rollTorque = arm * (((ionFL + ionRL) - (ionFR + ionRR))
+        + propScale * ((propFL + propRL) - (propFR + propRR)))
 
     -- pitch: FORWARD minus aft. This was (aft - forward), which had the
     -- harness believing that pushing the stern up raises the bow. It matched

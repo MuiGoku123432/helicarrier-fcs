@@ -265,6 +265,54 @@ function Session:setAllProps(rpm)
     return true
 end
 
+-- FIRE AND FORGET, for inner loops. Session:setProps above blocks up to 1000 ms
+-- per corner waiting for an ack, retries three times, and sleeps 0.3 s between
+-- -- correct for setting a base RPM once, ruinous inside a control loop.
+--
+-- MEASURED 2026-08-26 (flight-logs/podprobe_result*.txt): commands are lost at
+-- a few percent when anything is polling the pods, and vectorprobe's first
+-- hover run showed what a blocking waiter costs when one goes missing -- "no
+-- reply from the FR pod within 1000 ms" four times, each a full second in which
+-- no command of ANY kind went out, in a loop that runs at 0.13 s.
+--
+-- set_rpm is set-and-hold with no pod-side watchdog and it is IDEMPOTENT, so a
+-- control loop re-sending its current answer every iteration IS the retry: a
+-- dropped command is corrected ~0.13 s later, and the actuator is at most one
+-- iteration stale. Confirmation comes from telemetry (prop.controllerRpm),
+-- never from the ack.
+--
+-- Takes ALL FOUR at once by design. Leaving the props asymmetric is the outcome
+-- to avoid at almost any cost -- see setAllProps above -- so there is no
+-- single-corner version of this to reach for by mistake.
+function Session:sendProps(rpms)
+    local sent = 0
+    for _, corner in ipairs(flight.CORNERS) do
+        local rpm = rpms[corner]
+        if rpm then
+            local ok = banks.send(corner, "set_rpm", { rpm = math.floor(rpm + 0.5) })
+            if ok then sent = sent + 1 end
+        end
+    end
+    self.lastPropCommand = rpms
+    return sent
+end
+
+-- What the props are ACTUALLY turning at, per corner, from telemetry.
+--
+-- controllerRpm, not targetRpm: HANDOFF records that bearingRpm and
+-- bearingAngularSpeed read 0 always and that controllerRpm is the one that
+-- tracks. Returns nil for a corner that has not reported, so a caller can tell
+-- "not yet heard" from "zero".
+function Session:propRpms()
+    local result = {}
+    for _, corner in ipairs(flight.CORNERS) do
+        local pod = banks.getState()[corner]
+        local prop = pod and pod.prop
+        result[corner] = prop and prop.controllerRpm or nil
+    end
+    return result
+end
+
 -- ---------------------------------------------------------------------------
 -- Limits
 -- ---------------------------------------------------------------------------

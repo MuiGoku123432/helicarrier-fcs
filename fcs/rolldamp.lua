@@ -22,14 +22,21 @@
 --     +/-1 RPM differential -> torque 410785 -> 0.2712 deg/s^2
 --     critical damping wants                    0.2987 deg/s^2   (91%)
 --
--- ONE RPM of differential is 91% of critical damping. The coarsest step this
--- actuator has lands almost exactly on the number needed.
+-- THEN IT WAS MEASURED, and came in at 0.0941 -- 35% of that prediction, for
+-- reasons nobody has found (HANDOFF open question 4). The block above is left
+-- because it is how the actuator was CHOSEN, and because the discrepancy is
+-- itself a live problem; but every number the damper commands comes from
+-- MEASURED.flightAuthorityPerRpm below, never from authorityPerRpm().
 --
--- WHICH IS ALSO THE CATCH, stated plainly so nobody designs past it: RPM is an
--- integer (props.setRpm rounds), so at the damping scale this is roughly a
--- ONE-BIT actuator. It can kill an oscillation bang-bang or by duty cycle. It
--- cannot trim. Fine trim, if it is ever wanted, is a different problem and
--- probably belongs on the bearings, which resolve continuously.
+-- Coming in low is the good direction. At the predicted value one rpm would be
+-- 91% of critical damping -- a near one-bit actuator. At the measured value
+-- critical damping is 3.2 rpm against a clamp of 4, so there are three or four
+-- usable steps instead of one.
+--
+-- It still cannot TRIM: RPM is an integer (props.setRpm rounds), and one rpm
+-- held constantly shifts the equilibrium 4.14 degrees against a standing
+-- offset of 0.31. Damping and trimming want opposite resolutions. Trim belongs
+-- on the bearings, which resolve continuously.
 
 local rolldamp = {}
 
@@ -48,6 +55,28 @@ rolldamp.MEASURED = {
     rollInertia = 86772714.93,
     -- Self-levelling spring, from the 42 s oscillation period.
     springPerDegree = 0.0223,
+
+    -- THE NUMBER THE DAMPER ACTUALLY USES, measured in flight 2026-08-26:
+    -- three paired reverse steps, two flights, two rpm levels, spread 7.7%.
+    --
+    --     2 rpm pair               0.0910   -3.3%
+    --     3 rpm pair               0.0931   -1.1%
+    --     3 rpm pair, next flight  0.0983   +4.4%
+    --
+    -- (An earlier two-measurement figure of 0.0924 appears in
+    -- tools/test_rolldamp.lua's staircase check. 1.8% apart; this is the one
+    -- with three measurements behind it.)
+    --
+    -- It is 35% of what authorityPerRpm() predicts from the thrust model, and
+    -- NOBODY KNOWS WHY -- see HANDOFF's open question 4. It is not the moment
+    -- arm: ion authority validated against the same craftgeom arm at 97% and
+    -- 102%. Something in the propeller force-per-RPM chain is off by ~3x.
+    --
+    -- Which way that error runs matters enormously here, so the measured value
+    -- is what commands the craft and the model is kept only for comparison. A
+    -- damper defaulting to the prediction asks for ONE rpm where three are
+    -- needed -- under-damping by 2.9x, silently, with a plausible number.
+    flightAuthorityPerRpm = 0.0941,
 }
 
 function rolldamp.criticalDamping(options)
@@ -96,7 +125,10 @@ function rolldamp.differentialFor(rollRate, options)
     options = options or {}
     local maxRpm = options.maxDifferentialRpm or rolldamp.DEFAULTS.maxDifferentialRpm
     local deadband = options.deadbandRate or rolldamp.DEFAULTS.deadbandRate
-    local perRpm = options.authorityPerRpm or rolldamp.authorityPerRpm(options)
+    -- MEASURED by default, never the model. See MEASURED.flightAuthorityPerRpm:
+    -- the model reads 2.9x high and would under-damp by the same factor. A
+    -- caller that genuinely wants the prediction passes it explicitly.
+    local perRpm = options.authorityPerRpm or rolldamp.MEASURED.flightAuthorityPerRpm
     if not perRpm or perRpm <= 0 then return 0 end
 
     rollRate = rollRate or 0
@@ -110,6 +142,74 @@ function rolldamp.differentialFor(rollRate, options)
     if rounded > maxRpm then rounded = maxRpm end
     if rounded < -maxRpm then rounded = -maxRpm end
     return rounded
+end
+
+-- ---------------------------------------------------------------------------
+-- Roll RATE, from angles.
+--
+-- The damper needs a rate and the craft will not give it one. Session:rates
+-- reads angularVelocityBody, which "read exactly 0.0000 in a third of samples"
+-- (flight.lua), and Session:readCheap -- the only read fast enough for a
+-- control loop at 0.15 s -- deliberately omits it altogether. That is why the
+-- axis-response pulse fits ANGLES rather than trusting reported rates.
+--
+-- So: least-squares slope over a short window of angle samples. A single first
+-- difference would be a rate estimate built on two quantised angles a tenth of
+-- a second apart, which is mostly noise; a heavy filter would add phase lag,
+-- and phase lag in a damper is how a damper becomes a driver. A ~0.6 s window
+-- against a 42 s oscillation is 1.4% of a cycle -- lag small enough to ignore,
+-- averaging long enough to matter.
+-- ---------------------------------------------------------------------------
+
+function rolldamp.newRateEstimator(options)
+    options = options or {}
+    local estimator = {
+        windowSeconds = options.windowSeconds or 0.6,
+        minimumSamples = options.minimumSamples or 3,
+        samples = {},
+    }
+
+    function estimator:push(t, angle)
+        if not t or not angle then return end
+        self.samples[#self.samples + 1] = { t = t, angle = angle }
+        -- Drop anything older than the window. Keeps the estimate local in
+        -- time, which is what makes it a RATE rather than an average slope
+        -- across the whole run.
+        while #self.samples > 1
+            and (t - self.samples[1].t) > self.windowSeconds do
+            table.remove(self.samples, 1)
+        end
+    end
+
+    function estimator:rate()
+        local n = #self.samples
+        if n < self.minimumSamples then return nil end
+
+        local sumT, sumA, sumTT, sumTA = 0, 0, 0, 0
+        for _, sample in ipairs(self.samples) do
+            sumT = sumT + sample.t
+            sumA = sumA + sample.angle
+            sumTT = sumTT + sample.t * sample.t
+            sumTA = sumTA + sample.t * sample.angle
+        end
+
+        local denominator = n * sumTT - sumT * sumT
+        -- Every sample at the same instant. Possible if a loop stalls and the
+        -- clock does not advance between reads; a slope there is meaningless
+        -- rather than infinite.
+        if math.abs(denominator) < 1e-9 then return nil end
+        return (n * sumTA - sumT * sumA) / denominator
+    end
+
+    function estimator:count()
+        return #self.samples
+    end
+
+    function estimator:reset()
+        self.samples = {}
+    end
+
+    return estimator
 end
 
 -- Per-corner RPM for a base setting and a differential.

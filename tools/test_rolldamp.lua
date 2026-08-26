@@ -80,10 +80,27 @@ checkTrue("rolling the other way commands the other differential",
 check("a still craft commands nothing", rolldamp.differentialFor(0), 0)
 check("inside the deadband commands nothing", rolldamp.differentialFor(0.01), 0)
 
--- The strafe's peak rate is 0.90 deg/s. Critical damping there wants 0.268
--- deg/s^2, which is one RPM -- so the damper should ask for exactly that.
-check("the strafe's 0.90 deg/s peak asks for 1 RPM",
-    math.abs(rolldamp.differentialFor(0.90)), 1)
+-- THE DEFAULT IS THE MEASURED AUTHORITY, NOT THE MODEL.
+--
+-- This assertion used to read "the 0.90 deg/s peak asks for 1 RPM", which was
+-- the answer the thrust-model prediction gives. The model reads 2.9x high, so
+-- a damper defaulting to it asks for ONE rpm where THREE are needed and
+-- under-damps by that factor -- silently, with a number that looks reasonable.
+-- The measured authority is now what differentialFor uses when no option is
+-- passed, and these pin that so it cannot quietly revert.
+check("the strafe's 0.90 deg/s peak asks for 3 RPM by DEFAULT",
+    math.abs(rolldamp.differentialFor(0.90)), 3)
+check("the default equals the flight-measured authority, explicitly passed",
+    rolldamp.differentialFor(0.90),
+    rolldamp.differentialFor(0.90,
+        { authorityPerRpm = rolldamp.MEASURED.flightAuthorityPerRpm }))
+checkTrue("...and is NOT the model's answer",
+    rolldamp.differentialFor(0.90)
+        ~= rolldamp.differentialFor(0.90, { authorityPerRpm = perRpm }))
+check("the model would have asked for 1", 
+    math.abs(rolldamp.differentialFor(0.90, { authorityPerRpm = perRpm })), 1)
+check("the measured authority is the three-flight figure",
+    rolldamp.MEASURED.flightAuthorityPerRpm, 0.0941, 1e-9)
 
 -- Clamped, symmetrically.
 check("a violent rate clamps", rolldamp.differentialFor(-99),
@@ -147,6 +164,66 @@ local asked = math.abs(rolldamp.differentialFor(0.90,
 checkTrue("at the 0.90 deg/s peak it asks for a differential inside the clamp",
     asked <= rolldamp.DEFAULTS.maxDifferentialRpm)
 check("...specifically 3 rpm", asked, 3)
+
+-- --------------------------------------------------------------------------
+-- The rate estimator.
+--
+-- The damper needs a roll RATE and the craft will not give it one: Session:rates
+-- reads 0.0000 in a third of samples and readCheap omits angular velocity
+-- entirely. So the rate is a least-squares slope over angles, and it has to be
+-- right -- a rate estimate with the wrong SIGN turns the damper into a driver,
+-- and one with too much lag does the same at the frequencies that matter.
+-- --------------------------------------------------------------------------
+
+local estimator = rolldamp.newRateEstimator({ windowSeconds = 0.6 })
+checkTrue("a fresh estimator has no rate", estimator:rate() == nil)
+estimator:push(0.0, 0.0)
+checkTrue("one sample is not a rate", estimator:rate() == nil)
+estimator:push(0.15, 0.15)
+checkTrue("two samples is still not a rate", estimator:rate() == nil)
+estimator:push(0.30, 0.30)
+check("a clean 1.0 deg/s ramp reads 1.0", estimator:rate(), 1.0, 1e-6)
+
+-- Sign, which is the one that turns a damper into a driver.
+local falling = rolldamp.newRateEstimator()
+for index = 0, 5 do falling:push(index * 0.15, -0.5 * index * 0.15) end
+checkTrue("a falling angle gives a NEGATIVE rate", falling:rate() < 0)
+check("...of the right size", falling:rate(), -0.5, 1e-6)
+
+-- The window really does slide, or the estimate becomes an average over the
+-- whole run and the damper responds to history rather than to now.
+local sliding = rolldamp.newRateEstimator({ windowSeconds = 0.6 })
+for index = 0, 20 do sliding:push(index * 0.15, 0) end          -- flat, then
+for index = 21, 30 do sliding:push(index * 0.15, (index - 20) * 0.15 * 2) end
+checkTrue("the window slides: an old flat stretch is forgotten",
+    math.abs(sliding:rate() - 2.0) < 0.2)
+checkTrue("...and the window is bounded", sliding:count() <= 6)
+
+-- Quantised angles: the craft reports to limited precision, and a first
+-- difference of two quantised samples is mostly noise. The slope over a window
+-- should still find the trend.
+local noisy = rolldamp.newRateEstimator({ windowSeconds = 0.6 })
+local quantum = 0.01
+for index = 0, 5 do
+    local trueAngle = 0.9 * index * 0.15
+    noisy:push(index * 0.15, math.floor(trueAngle / quantum + 0.5) * quantum)
+end
+checkTrue("a quantised 0.9 deg/s ramp still reads about 0.9",
+    math.abs(noisy:rate() - 0.9) < 0.15)
+
+-- A stalled clock is meaningless, not infinite.
+local stalled = rolldamp.newRateEstimator()
+for _ = 1, 5 do stalled:push(1.0, 0.5) end
+checkTrue("every sample at one instant has no rate", stalled:rate() == nil)
+
+-- And the whole chain end to end: a craft rolling positive must be answered
+-- with a negative differential, computed from angles alone.
+local chain = rolldamp.newRateEstimator()
+for index = 0, 5 do chain:push(index * 0.15, 0.9 * index * 0.15) end
+checkTrue("angles -> rate -> differential opposes the motion",
+    rolldamp.differentialFor(chain:rate()) < 0)
+check("...and asks for the full 3 rpm at the strafe's peak rate",
+    math.abs(rolldamp.differentialFor(chain:rate())), 3)
 
 print("")
 print(string.format("one RPM differential = %.4f deg/s^2 = %.0f%% of critical damping",
