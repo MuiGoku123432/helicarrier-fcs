@@ -410,7 +410,6 @@ local function runGround()
     end
 
     results.ground.verdict = agreed
-    results.ground.samples = samples
 
     if agreed == vectoring.CANCELS then
         note("  *** THE PAIR CANCELS EVEN MIRRORED. No lateral force. ***")
@@ -1074,6 +1073,34 @@ local function mainLoop()
         if stableFor >= 3 then return "thrust settled" end
         return nil
     end)
+
+    -- Collect the per-corner verdict from the SETTLED readings.
+    local thrusts, dead = {}, {}
+    for _, corner in ipairs(flight.CORNERS) do
+        local pod = banks.getState()[corner]
+        local prop = pod and pod.prop
+        if not prop then
+            dead[#dead + 1] = corner .. " (no telemetry)"
+        else
+            if prop.hasSource == false then
+                dead[#dead + 1] = corner .. " (no kinetic source)"
+            end
+            if not reached[corner] then
+                dead[#dead + 1] = string.format("%s (rpm %s, wanted %d)", corner,
+                    tostring(prop.controllerRpm), plan.groundRpm)
+            end
+            if prop.active == false then
+                dead[#dead + 1] = corner .. " (bearings inactive)"
+            end
+            if prop.bearingOverstressed then
+                dead[#dead + 1] = corner .. " (OVERSTRESSED)"
+            end
+            local settledThrust = previous[corner] or prop.thrust
+            if type(settledThrust) == "number" then
+                thrusts[corner] = settledThrust
+            end
+        end
+    end
 
     note("  drivetrain, props at " .. plan.groundRpm .. " rpm:")
     local highest = 0
