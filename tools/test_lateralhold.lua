@@ -142,6 +142,50 @@ checkTrue("the 12 deg clamp beats the 1.67 blocks/s mean strafe",
     terminal12 > 1.67)
 checkTrue("...and the 2.27 blocks/s peak", terminal12 > 2.27)
 
+-- --------------------------------------------------------------------------
+-- ATTITUDE FEEDBACK -- the layer added after the hover runaway.
+-- --------------------------------------------------------------------------
+-- The roll target must OPPOSE the wanted acceleration direction sensibly and
+-- stay tiny. 2 degrees already holds against 4.2 blocks/s.
+check("0.19 blocks/s^2 wants 1 degree of roll",
+    lateralhold.rollForLateral(0.19), 1.0, 1e-9)
+check("a huge demand clamps to the roll limit",
+    lateralhold.rollForLateral(99), lateralhold.DEFAULTS.rollLimitDegrees, 1e-9)
+check("...and clamps symmetrically the other way",
+    lateralhold.rollForLateral(-99), -lateralhold.DEFAULTS.rollLimitDegrees, 1e-9)
+checkTrue("the roll limit holds against more than the 2.27 blocks/s peak strafe",
+    lateralhold.DEFAULTS.rollLimitDegrees * lateralhold.LATERAL_PER_ROLL_DEGREE
+        / 0.09 > 2.27)
+checkTrue("the roll limit is far below the abort",
+    lateralhold.DEFAULTS.rollLimitDegrees * 2 < lateralhold.DEFAULTS.rollAbortDegrees)
+
+-- The inner loop. Rolled the wrong way -> tilt back. This is the sign that,
+-- inverted, is the runaway.
+local correcting = lateralhold.rollTilt(2.0, 0, 0)
+checkTrue("rolled starboard with target 0 -> negative tilt", correcting < 0)
+local other = lateralhold.rollTilt(-2.0, 0, 0)
+checkTrue("rolled port with target 0 -> positive tilt", other > 0)
+check("on target and still -> no tilt", lateralhold.rollTilt(0, 0, 0), 0, 1e-9)
+
+-- The rate term opposes motion even when the angle is already correct. This is
+-- the damping the hull has never had.
+local damping = lateralhold.rollTilt(0, 0.5, 0)
+checkTrue("rolling while on target still commands opposing tilt", damping < 0)
+check("...proportional to the rate", damping,
+    -lateralhold.DEFAULTS.rollRateGainTiltPerRate * 0.5, 1e-9)
+
+-- Clamped, and below props.lua's 15 degree limit.
+local saturated = lateralhold.rollTilt(-90, 0, 0)
+check("a huge error clamps to max tilt", saturated,
+    lateralhold.DEFAULTS.maxTiltDegrees, 1e-9)
+
+checkTrue("7 degrees of roll trips the abort", lateralhold.rollAbort(7))
+checkTrue("-7 degrees trips it too", lateralhold.rollAbort(-7))
+checkTrue("1 degree does not", not lateralhold.rollAbort(1))
+-- The runaway reached 28 degrees; the abort must fire long before that.
+checkTrue("the abort fires far below the 28 deg the runaway reached",
+    lateralhold.DEFAULTS.rollAbortDegrees < 10)
+
 print("")
 print(string.format("clamp %.0f deg -> holds against %.2f blocks/s (strafe: 1.67 mean, 2.27 peak)",
     lateralhold.DEFAULTS.maxTiltDegrees, terminal12))

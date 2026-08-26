@@ -75,9 +75,17 @@ local plan = {
     -- the force actually goes and prints the mapping.
     groundAzimuth = 0,
 
-    -- Which corner phase A tilts. One at a time keeps the ground force small
-    -- and isolates the reading.
-    groundCorner = "FL",
+    -- ALL FOUR CORNERS, one at a time.
+    --
+    -- The first two ground runs measured FL only and the code then commanded
+    -- all four identically. That extrapolation is what the hover run cashed in:
+    -- the loop pushed to oppose the drift and the craft accelerated instead,
+    -- rolling POSITIVE where opposing the drift required NEGATIVE. FL's own
+    -- reading is solid (-13958.80 x +0.1392 = -1943 in X, and -X is starboard),
+    -- so the corners must not agree with each other.
+    --
+    -- One corner at a time also keeps the ground force to ~1% of weight.
+    groundCorners = { "FL", "FR", "RL", "RR" },
 
     -- How long to let a commanded tilt settle before believing the telemetry.
     -- Confirmed from reportedTilt, never from the ack -- an ack says only that
@@ -98,6 +106,11 @@ local plan = {
     -- far again -- call it 2.4 blocks. The abort sits at 25.
     arrestSeconds = 20.0,
     restThreshold = 0.25,
+    -- Outer-loop gain: how hard to decelerate, in blocks/s^2 per blocks/s.
+    -- 0.15 asks for 0.25 blocks/s^2 against the 1.67 blocks/s drift, which
+    -- rollForLateral turns into 1.3 degrees -- inside the 2 degree limit, so
+    -- the loop is not fighting its own clamp at the speeds it will actually see.
+    velocityGain = 0.15,
     stepTilt = 8.0,
     stepSeconds = 2.0,
     holdStationSeconds = 30.0,
@@ -214,7 +227,6 @@ local function runGround()
     note("  props at " .. plan.groundRpm .. " rpm -- 13% of weight, cannot lift.")
     note("  ions stay disarmed; one corner tilted at a time.")
 
-    local corner = plan.groundCorner
     local set, err = session:setAllProps(plan.groundRpm)
     if not set then
         note("  FAILED to start props: " .. tostring(err))
@@ -222,93 +234,141 @@ local function runGround()
     end
     waitSeconds(plan.tiltSettleSeconds)
 
-    local baseline, reason = readCorner(corner)
-    if not baseline then
-        note("  cannot read " .. corner .. ": " .. tostring(reason))
-        note("  Without an ACTIVE bearing every reading below would be a")
-        note("  stored target the hardware is ignoring. Stopping.")
-        return false
-    end
-
-    note("")
-    note(string.format("  %s neutral: %d bearings, lift %.1f, lateral %.1f",
-        corner, baseline.force.bearings, baseline.force.vertical,
-        baseline.force.lateralOfSum))
-    for _, bearing in ipairs(baseline.bearings) do
-        note(string.format("    %-28s thrust %12.2f  vec {%.3f, %.3f, %.3f}",
-            bearing.name, bearing.thrust, bearing.thrustVector[1],
-            bearing.thrustVector[2], bearing.thrustVector[3]))
-    end
-
-    -- BOTH MODES, same corner, same angles, back to back.
-    --
-    -- The first ground run measured coherence 0.000 with every bearing sent the
-    -- same azimuth, and the mirrored command is predicted to fix it. Measuring
-    -- them in ONE run is what makes that a comparison rather than two readings
-    -- taken minutes apart under conditions nobody wrote down -- and if mirroring
-    -- does nothing, the unmirrored rows prove the rig still reproduces the
-    -- original result rather than having quietly broken.
-    local function sweep(mirror, label)
+    -- One sweep of one corner, at the mirrored setting only. The unmirrored
+    -- comparison is kept for FL alone -- it is the control that proves the rig
+    -- still reproduces the original CANCELS, and repeating it on four corners
+    -- costs four times the airtime for the same one bit of information.
+    local function sweepCorner(corner, mirror, label)
         note("")
-        note("  --- " .. label .. " ---")
-        note(string.format("  %6s %10s %12s %12s %11s %s",
-            "tilt", "reported", "lift", "lateral", "coherence", "verdict"))
+        note("  --- " .. corner .. " " .. label .. " ---")
+        local baseline, reason = readCorner(corner)
+        if not baseline then
+            note("    cannot read " .. corner .. ": " .. tostring(reason))
+            return nil
+        end
 
-        local verdicts, samples = {}, {}
+        local verdicts, headings = {}, {}
         for _, angle in ipairs(plan.groundTilts) do
-            local applied, tiltErr = pcall(actuators.setTilt, corner, angle,
+            local ok, tiltErr = pcall(actuators.setTilt, corner, angle,
                 plan.groundAzimuth, nil, mirror)
-            if not applied then
+            if not ok then
                 note("    tilt " .. angle .. " failed: " .. tostring(tiltErr))
             else
                 waitSeconds(plan.tiltSettleSeconds)
                 local reading = readCorner(corner)
                 if reading and reading.force then
                     local verdict = vectoring.verdict(reading.force)
+                    local heading = vectoring.headingFromBow(reading.force.force,
+                        config.axes)
                     verdicts[#verdicts + 1] = verdict
-                    note(string.format("  %6.1f %10s %12.1f %12.1f %11s %s",
+                    if heading then headings[#headings + 1] = heading end
+                    note(string.format("    %4.1f deg  rep %5s  lift %10.1f  lateral %9.1f  coh %5s  %-8s %s",
                         angle,
-                        reading.tiltAngle and string.format("%.2f", reading.tiltAngle)
-                            or "--",
+                        reading.tiltAngle and string.format("%.2f", reading.tiltAngle) or "--",
                         reading.force.vertical, reading.force.lateralOfSum,
                         reading.force.coherence
                             and string.format("%.3f", reading.force.coherence) or "--",
-                        verdict))
-
-                    -- THE PER-BEARING VECTORS ARE THE EVIDENCE for the headline
-                    -- claim, and the first run printed them only for the neutral
-                    -- baseline -- so "the laterals cancel" had to be taken on
-                    -- trust. Printed at every step now.
+                        verdict,
+                        heading and string.format("-> %3.0f deg %s", heading,
+                            vectoring.describeHeading(heading)) or ""))
                     for _, bearing in ipairs(reading.bearings) do
-                        note(string.format("           %-30s t %11.2f  vec {%+.4f, %+.4f, %+.4f}",
+                        note(string.format("             %-30s t %11.2f  vec {%+.4f, %+.4f, %+.4f}",
                             bearing.name, bearing.thrust,
                             bearing.thrustVector[1], bearing.thrustVector[2],
                             bearing.thrustVector[3]))
                     end
-
-                    local heading = vectoring.headingFromBow(reading.force.force,
-                        config.axes)
-                    samples[#samples + 1] = {
-                        angle = angle, heading = heading,
-                        lateral = reading.force.lateralOfSum,
-                        reported = reading.tiltAngle,
-                    }
                 else
-                    note(string.format("  %6.1f   -- no usable reading --", angle))
+                    note(string.format("    %4.1f deg   -- no usable reading --", angle))
                 end
             end
         end
         pcall(actuators.setTilt, corner, 0, 0)
         waitSeconds(1.0)
-        return verdicts, samples
+
+        local agreed = verdicts[1]
+        for _, verdict in ipairs(verdicts) do
+            if verdict ~= agreed then agreed = nil end
+        end
+        -- Mean heading, taken on the unit circle so 359 and 1 average to 0
+        -- rather than to 180.
+        local sumSin, sumCos = 0, 0
+        for _, heading in ipairs(headings) do
+            sumSin = sumSin + math.sin(math.rad(heading))
+            sumCos = sumCos + math.cos(math.rad(heading))
+        end
+        local meanHeading = #headings > 0
+            and (math.deg(math.atan2(sumSin, sumCos)) % 360) or nil
+        return { verdict = agreed, heading = meanHeading, steps = #verdicts }
     end
 
-    local plainVerdicts = sweep(false, "UNMIRRORED (both bearings same azimuth)")
-    local verdicts, samples = sweep(true, "MIRRORED (down-facing bearing flipped 180)")
+    -- The FL control: unmirrored must still CANCEL.
+    local control = sweepCorner("FL", false, "UNMIRRORED (control)")
+    if control and control.verdict ~= vectoring.CANCELS then
+        note("")
+        note("  WARNING: the unmirrored control did NOT cancel (" ..
+            tostring(control.verdict) .. ").")
+        note("  That reading has been reproducible across three runs, so the rig")
+        note("  has changed. Treat everything below as suspect.")
+    end
+    results.ground.unmirrored = control and control.verdict
 
-    results.ground.unmirrored = plainVerdicts[1]
-
+    local perCorner = {}
+    for _, corner in ipairs(plan.groundCorners) do
+        perCorner[corner] = sweepCorner(corner, true, "MIRRORED")
+    end
     pcall(session.setAllProps, session, 0)
+
+    -- THE TABLE THIS RUN EXISTS FOR.
+    note("")
+    note("  === PER-CORNER RESPONSE TO AZIMUTH " .. plan.groundAzimuth .. " ===")
+    note(string.format("  %-6s %-10s %-8s %s", "corner", "verdict", "heading", "pushes toward"))
+    local verdicts, headings = {}, {}
+    for _, corner in ipairs(plan.groundCorners) do
+        local entry = perCorner[corner]
+        if entry and entry.verdict and entry.heading then
+            verdicts[#verdicts + 1] = entry.verdict
+            headings[corner] = entry.heading
+            note(string.format("  %-6s %-10s %6.0f   %s", corner, entry.verdict,
+                entry.heading, vectoring.describeHeading(entry.heading)))
+        else
+            note(string.format("  %-6s %-10s %8s", corner,
+                entry and tostring(entry.verdict) or "NO DATA", "--"))
+        end
+    end
+    results.ground.headings = headings
+
+    -- Do the corners agree? This is the question the hover runaway asked.
+    local reference, spread = nil, 0
+    for _, corner in ipairs(plan.groundCorners) do
+        local heading = headings[corner]
+        if heading then
+            if not reference then reference = heading end
+            local difference = math.abs((heading - reference + 540) % 360 - 180)
+            if difference > spread then spread = difference end
+        end
+    end
+
+    note("")
+    if not reference then
+        note("  NO CORNER PRODUCED A USABLE HEADING. Nothing is known.")
+        return false
+    elseif spread > 30 then
+        note(string.format("  *** THE CORNERS DISAGREE BY UP TO %.0f DEGREES ***", spread))
+        note("  Commanding one azimuth to all four does NOT produce one force.")
+        note("  This is the hover runaway explained: the loop pushed to oppose")
+        note("  the drift, the corners fought, and the net force landed on the")
+        note("  wrong side -- roll went POSITIVE where opposing required")
+        note("  NEGATIVE, and the craft accelerated from 1.76 to 11.5 blocks/s.")
+        note("")
+        note("  Each corner needs its own azimuth offset, listed above. Wire")
+        note("  those into the controller before any further hover attempt.")
+        results.ground.headingSpread = spread
+        return false
+    end
+
+    note(string.format("  All four corners agree within %.0f degrees.", spread))
+    results.ground.headingSpread = spread
+    results.ground.meanHeading = reference
 
     -- The verdict has to be unanimous. A tool that averages ADDS and CANCELS
     -- into a recommendation is worse than one that refuses to answer.
@@ -352,16 +412,9 @@ local function runGround()
 
     note("  THE PAIR ADDS. Common-mode tilt produces real lateral force.")
 
-    -- The azimuth mapping, measured rather than assumed.
-    local heading = samples[#samples] and samples[#samples].heading
-    if heading then
-        note("")
-        note(string.format("  AZIMUTH %d DEGREES PUSHES TOWARD %.0f deg = %s",
-            plan.groundAzimuth, heading, vectoring.describeHeading(heading)))
-        note("  props.lua's tiltTarget comment says azimuth 0 is toward the")
-        note("  BOW. It predates the axis correction: +X is PORT, not the bow.")
-        note("  Believe this line, not that comment.")
-    end
+    note("")
+    note(string.format("  AZIMUTH %d DEGREES PUSHES TOWARD %.0f deg = %s",
+        plan.groundAzimuth, reference, vectoring.describeHeading(reference)))
     return true
 end
 
@@ -421,6 +474,56 @@ end
 -- Returns a stop reason when the craft has gone too far, for use inside any
 -- hold() callback. Clears the tilts itself: whatever is being measured matters
 -- less than removing the force that is carrying the craft away.
+-- ROLL RATE by differencing the angle, not from Session:rates.
+--
+-- rates() needs angular velocity, which the cheap read omits, and the Sable
+-- angular channel reads exactly 0.0000 in about a third of samples at this
+-- loop period. A damping term steered by a channel that reports "stopped"
+-- when it is not would inject the oscillation it exists to remove.
+local lastRoll, lastRollAt = nil, nil
+
+local function rollRateOf(state, now)
+    if not state or not state.roll then return 0 end
+    local rate = 0
+    if lastRoll and now and lastRollAt and now > lastRollAt then
+        rate = (state.roll - lastRoll) / ((now - lastRollAt) / 1000)
+    end
+    lastRoll, lastRollAt = state.roll, now
+    return rate
+end
+
+-- THE CASCADE. Outer loop picks a small roll target from the velocity error;
+-- inner loop uses tilt to hold that roll and damp its rate.
+--
+-- The previous version commanded tilt straight from velocity, which is
+-- positive feedback through the 8.6 block moment arm: tilt rolls the craft,
+-- roll accelerates it, the loop asks for more tilt. Roll is the controlled
+-- variable now, and it is limited to 2 degrees -- which already holds against
+-- 4.2 blocks/s, twice the strafe's peak.
+local function cascadeCommand(state, now)
+    local body = lateralhold.bodyVelocity(state)
+    local heading, speed = lateralhold.headingOf(body, config.axes)
+    local rollRate = rollRateOf(state, now)
+
+    local targetRoll = 0
+    if heading and speed and speed >= lateralhold.DEFAULTS.deadbandSpeed then
+        -- Decelerate at up to what the roll limit allows. Sign: a POSITIVE roll
+        -- (starboard low) accelerates the craft to STARBOARD, so to oppose a
+        -- drift running to starboard we want NEGATIVE roll.
+        local wanted = -speed * plan.velocityGain
+        local towardStarboard = math.sin(math.rad(heading))
+        targetRoll = lateralhold.rollForLateral(wanted * towardStarboard)
+    end
+
+    local tilt = lateralhold.rollTilt(state and state.roll or 0, rollRate, targetRoll)
+    -- rollTilt is signed; the actuator takes a magnitude and a direction.
+    local azimuth = lateralhold.azimuthForHeading(tilt >= 0 and 90 or 270)
+    return {
+        tilt = math.abs(tilt), azimuth = azimuth, targetRoll = targetRoll,
+        rollRate = rollRate, speed = speed, heading = heading,
+    }
+end
+
 local function driftAbort(state)
     local drift = horizontalDrift(state)
     if not drift or drift <= plan.maxHorizontalDrift then return nil end
@@ -442,8 +545,9 @@ local function driftAbort(state)
         local now = session:readCheap()
         local speed = horizontalSpeed(now)
         if not speed or speed < plan.restThreshold then break end
-        local command = lateralhold.command(now, config.axes,
-            { gainDegreesPerSpeed = 99 })   -- saturate: this is not the moment to be gentle
+        -- Saturated cascade: still through the roll loop, because the runaway
+        -- proved that commanding raw tilt is how the craft gets INTO this.
+        local command = cascadeCommand(now, os.epoch("utc"))
         commandAllTilts(command.tilt, command.azimuth)
         session:trim(plan.climbGain, flight.MAX_CLIMB_RATE, 0, now)
         session:send()
@@ -473,8 +577,15 @@ local function holdLateral(seconds, label)
         session:trim(plan.climbGain, flight.MAX_CLIMB_RATE, 0, state)
         local stop = driftAbort(state)
         if stop then return stop end
+        if lateralhold.rollAbort(state and state.roll) then
+            clearAllTilts()
+            session.aborted = string.format("roll %.1f deg", state.roll)
+            note(string.format("  *** ABORT: roll %.1f deg exceeds %.0f ***",
+                state.roll, lateralhold.DEFAULTS.rollAbortDegrees))
+            return "roll abort"
+        end
 
-        local command = lateralhold.command(state, config.axes)
+        local command = cascadeCommand(state, now)
         if command.speed then
             samples = samples + 1
             finalSpeed = command.speed
@@ -605,7 +716,14 @@ local function runHold()
         local stop = driftAbort(state)
         if stop then return stop end
 
-        local command = lateralhold.command(state, config.axes)
+        if lateralhold.rollAbort(state and state.roll) then
+            clearAllTilts()
+            session.aborted = string.format("roll %.1f deg", state.roll)
+            note(string.format("  *** ABORT: roll %.1f deg exceeds %.0f ***",
+                state.roll, lateralhold.DEFAULTS.rollAbortDegrees))
+            return "roll abort"
+        end
+        local command = cascadeCommand(state, now)
         commandAllTilts(command.tilt, command.azimuth)
 
         local position = state and state.position
@@ -710,6 +828,12 @@ local function mainLoop()
     hoverOrigin = anchor and anchor.position
     if not hoverOrigin then
         note("  no position fix at hover; cannot enforce the drift abort")
+        session:descend()
+        return
+    end
+
+    if (results.ground.headingSpread or 0) > 30 then
+        note("  NOT FLYING: the corners disagree (see phase A).")
         session:descend()
         return
     end
