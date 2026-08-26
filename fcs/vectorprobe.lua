@@ -1151,6 +1151,33 @@ local function mainLoop()
     if #dead > 0 then
         note("")
         note("  *** DRIVETRAIN FAULT: " .. table.concat(dead, ", ") .. " ***")
+
+        -- PER-BEARING DETAIL, so the fault names something repairable rather
+        -- than just a corner. A pair that splits unevenly is one bearing's
+        -- drivetrain; a pair that is evenly low is the corner's RSC or its
+        -- supply. Printed here because preflight aborts before phase A, which
+        -- is otherwise the only place these numbers appear.
+        note("")
+        note("  per-bearing, at " .. plan.groundRpm .. " rpm:")
+        for _, corner in ipairs(flight.CORNERS) do
+            local pod = banks.getState()[corner]
+            local prop = pod and pod.prop
+            local perBearing = prop and prop.perBearing
+            if type(perBearing) == "table" then
+                for index, bearing in ipairs(perBearing) do
+                    note(string.format("    %-4s %-30s thrust %14s  rot %s",
+                        corner, tostring(bearing.name or index),
+                        type(bearing.thrust) == "number"
+                            and string.format("%.2f", bearing.thrust) or "--",
+                        tostring(prop.bearingAngularSpeed)))
+                end
+            end
+        end
+        note("")
+        note("  A pair that splits UNEVENLY is one bearing's drivetrain.")
+        note("  A pair that is evenly low is the corner's controller or its")
+        note("  rotational supply -- in Create, not enough stress capacity to")
+        note("  hold the commanded speed under load.")
         note("  A corner that makes no thrust is a standing torque, and every")
         note("  number measured afterwards is of that rather than of whatever")
         note("  was commanded. Repair it in-world before flying this again.")
