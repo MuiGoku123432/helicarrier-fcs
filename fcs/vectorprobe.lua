@@ -369,6 +369,33 @@ end
 -- Phase B: hover
 -- ---------------------------------------------------------------------------
 
+-- FIRE AND FORGET. actuators.setTilt blocks up to 1000 ms waiting for a reply,
+-- and the first hover run showed exactly what that costs inside a control
+-- loop: "no reply from the FR pod within 1000 ms" four times, each one a
+-- second in which no command of any kind went out.
+--
+-- set_tilt has no arm gate and no watchdog pod-side -- it is set-and-hold, by
+-- design -- so a dropped tilt is re-sent on the next iteration a fifth of a
+-- second later, which is a far better failure mode than stalling the loop.
+-- Confirmation still comes from telemetry (prop.tiltAngle), never the ack.
+local function sendTilt(corner, angle, azimuth)
+    return banks.send(corner, "set_tilt", {
+        angle = angle, azimuth = azimuth, bearing = nil, mirror = true,
+    })
+end
+
+local function commandAllTilts(angle, azimuth)
+    for _, corner in ipairs(flight.CORNERS) do
+        sendTilt(corner, angle, azimuth)
+    end
+end
+
+local function clearAllTilts()
+    for _, corner in ipairs(flight.CORNERS) do
+        sendTilt(corner, 0, 0)
+    end
+end
+
 local function horizontalSpeed(state)
     local velocity = state and state.linearVelocityWorld
     if not velocity then return nil end
@@ -427,32 +454,6 @@ local function driftAbort(state)
     return "drift abort"
 end
 
--- FIRE AND FORGET. actuators.setTilt blocks up to 1000 ms waiting for a reply,
--- and the first hover run showed exactly what that costs inside a control
--- loop: "no reply from the FR pod within 1000 ms" four times, each one a
--- second in which no command of any kind went out.
---
--- set_tilt has no arm gate and no watchdog pod-side -- it is set-and-hold, by
--- design -- so a dropped tilt is re-sent on the next iteration a fifth of a
--- second later, which is a far better failure mode than stalling the loop.
--- Confirmation still comes from telemetry (prop.tiltAngle), never the ack.
-local function sendTilt(corner, angle, azimuth)
-    return banks.send(corner, "set_tilt", {
-        angle = angle, azimuth = azimuth, bearing = nil, mirror = true,
-    })
-end
-
-local function commandAllTilts(angle, azimuth)
-    for _, corner in ipairs(flight.CORNERS) do
-        sendTilt(corner, angle, azimuth)
-    end
-end
-
-local function clearAllTilts()
-    for _, corner in ipairs(flight.CORNERS) do
-        sendTilt(corner, 0, 0)
-    end
-end
 
 -- Drive the lateral-hold loop for a while, reporting what it achieved.
 --
