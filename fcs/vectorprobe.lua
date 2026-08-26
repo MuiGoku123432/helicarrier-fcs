@@ -997,17 +997,44 @@ local function mainLoop()
     end
     note(string.format("preflight: 4/4 pods online, ground y = %.4f", session.groundY))
 
-    -- DRIVETRAIN CHECK. FR flew this run with its Rotation Speed Controller
-    -- reporting hasSource = FALSE: no kinetic input, no rotation, no thrust,
-    -- while sail_power stayed 534 and both bearings reported assembled. It was
-    -- HEALTHY in phase A on the ground and dead by the staircase, so the craft
-    -- flew a whole measurement with one corner contributing nothing and a
-    -- standing torque nobody had accounted for. All three steps measured that
-    -- instead of the differential.
+    -- DRIVETRAIN CHECK, WITH THE PROPS TURNING.
     --
-    -- Every field needed to catch it was already in the heartbeat. This is the
-    -- same shape as the bearing_5 deficit: a per-corner asymmetry, visible at
-    -- rest, that silently contaminates everything measured afterwards.
+    -- FR flew a whole staircase with its Rotation Speed Controller reporting
+    -- hasSource = FALSE. It was healthy in phase A on the ground and dead by
+    -- the measurement, and the craft flew with one corner contributing nothing
+    -- and a standing torque nobody had accounted for.
+    --
+    -- Checking it at rest is not enough. hasSource and getThrust are STATIC
+    -- getters -- they read the same whether or not the shaft is turning, which
+    -- is exactly why the archived probes could compare structural values at
+    -- rest. So a drivetrain with a source that STALLS or SLIPS under load
+    -- passes a stationary check and fails in the air.
+    --
+    -- So spin them up first, and require every corner to actually REACH the
+    -- commanded RPM and report active. That is a load test, not an inventory.
+    -- 16 rpm is 13% of craft weight, nowhere near lift.
+    local spun, spinError = session:setAllProps(plan.groundRpm)
+    if not spun then
+        note("  PREFLIGHT FAILED to start props: " .. tostring(spinError))
+        return
+    end
+
+    local reached = {}
+    session:hold(plan.rpmReachSeconds, function(state, now)
+        local settled = true
+        for _, corner in ipairs(flight.CORNERS) do
+            local pod = banks.getState()[corner]
+            local actual = pod and pod.prop and pod.prop.controllerRpm
+            if actual and math.abs(actual - plan.groundRpm) <= plan.rpmTolerance then
+                reached[corner] = actual
+            else
+                settled = false
+            end
+        end
+        if settled then return "spun up" end
+        return nil
+    end)
+
     local thrusts, dead = {}, {}
     for _, corner in ipairs(flight.CORNERS) do
         local pod = banks.getState()[corner]
@@ -1018,11 +1045,22 @@ local function mainLoop()
             if prop.hasSource == false then
                 dead[#dead + 1] = corner .. " (no kinetic source)"
             end
+            -- Reaching the commanded RPM is the part a static check misses.
+            if not reached[corner] then
+                dead[#dead + 1] = string.format("%s (rpm %s, wanted %d)", corner,
+                    tostring(prop.controllerRpm), plan.groundRpm)
+            end
+            if prop.active == false then
+                dead[#dead + 1] = corner .. " (bearings inactive)"
+            end
+            if prop.bearingOverstressed then
+                dead[#dead + 1] = corner .. " (OVERSTRESSED)"
+            end
             if type(prop.thrust) == "number" then thrusts[corner] = prop.thrust end
         end
     end
 
-    note("  drivetrain:")
+    note("  drivetrain, props at " .. plan.groundRpm .. " rpm:")
     local highest = 0
     for _, corner in ipairs(flight.CORNERS) do
         local thrust = thrusts[corner]
@@ -1033,15 +1071,22 @@ local function mainLoop()
         local prop = pod and pod.prop
         local thrust = thrusts[corner]
         local share = (highest > 0 and thrust) and (thrust / highest * 100) or nil
-        note(string.format("    %-4s source %-5s thrust %16.2f %s", corner,
-            tostring(prop and prop.hasSource), thrust or 0,
-            share and string.format("(%3.0f%% of the strongest)", share) or ""))
-        -- A corner at less than 90% of the best is the bearing_5 defect again.
+        note(string.format("    %-4s source %-5s rpm %5s active %-5s thrust %14.2f %s",
+            corner, tostring(prop and prop.hasSource),
+            reached[corner] and string.format("%.0f", reached[corner]) or "--",
+            tostring(prop and prop.active), thrust or 0,
+            share and string.format("(%3.0f%%)", share) or ""))
+        -- Below 90% of the best is the bearing_5 defect again.
         if share and share < 90 then
             dead[#dead + 1] = string.format("%s (thrust %.0f%% of the strongest)",
                 corner, share)
         end
     end
+
+    -- Leave them as they were found. runGround starts them again itself, and a
+    -- craft left with its props turning after a preflight abort is a craft
+    -- nobody is watching that is still burning stress.
+    pcall(session.setAllProps, session, 0)
 
     if #dead > 0 then
         note("")
