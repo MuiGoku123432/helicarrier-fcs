@@ -57,6 +57,7 @@ local flight = require("fcs.flight")
 local actuators = require("fcs.actuators")
 local vectoring = require("fcs.vectoring")
 local lateralhold = require("fcs.lateralhold")
+local rolldamp = require("fcs.rolldamp")
 
 local plan = {
     -- Enough for isActive without approaching lift. 16 RPM measures 13.0% of
@@ -114,12 +115,18 @@ local plan = {
     -- B0, the couple. 6 degrees is well inside the clamp, and the roll budget
     -- is 3 degrees -- half the 6 degree abort, and a ninth of the 28 the
     -- runaway reached.
-    coupleTilt = 6.0,
-    coupleHeading = 90,
-    coupleSeconds = 3.0,
-    coupleMaxAngle = 3.0,
-    coupleSampleSeconds = 0.12,
-    coupleMinAlpha = 0.02,
+    -- B0, the differential-RPM staircase. Predicted 0.2712 deg/s^2 per RPM,
+    -- so 3 RPM sweeps the 3 degree budget in about 2.7 s -- long enough for
+    -- ~20 samples at 0.12 s, which is what the ion pulse could never buy.
+    rpmSteps = { 1, 2, 3 },
+    rpmStepSeconds = 4.0,
+    rpmMaxAngle = 3.0,
+    rpmSampleSeconds = 0.12,
+    rpmReachSeconds = 4.0,
+    rpmTolerance = 1.5,
+    rpmSettleSeconds = 6.0,
+    -- Below this the step measured nothing and the fit is reading noise.
+    rpmMinSweep = 0.25,
     stepTilt = 8.0,
     stepSeconds = 2.0,
     holdStationSeconds = 30.0,
@@ -644,40 +651,68 @@ local function holdLateral(seconds, label)
     return finalSpeed, peakSpeed
 end
 
--- B0: THE COUPLE, AND THE SIGN CHECK THAT GATES EVERYTHING AFTER IT.
+-- B0: ROLL AUTHORITY FROM DIFFERENTIAL PROPELLER RPM, and the sign gate.
 --
--- Commands a pure attitude demand -- bearings opposite, net lateral zero,
--- measured at exactly 0.0 on the ground across three tilts and four corners --
--- and watches which way the craft rolls and how fast.
+-- The bearing couple is retired. It was predicted strong and measured
+-- 0.07 degrees of roll in 3 seconds, because its torque needs a VERTICAL
+-- moment arm nobody had measured -- the same unknown that inverted the sign
+-- and ran the craft to 11.5 blocks/s the run before.
 --
--- It yields (ha + hb) as a roll authority in deg/s^2 per degree of tilt, which
--- is the damper's gain. And it answers the question that caused the runaway:
--- WHICH WAY. That sign is a difference of two similar numbers in the other
--- channel and could not be derived; here it is read straight off a 2 second
--- step at a couple of degrees of roll, instead of discovered at 28.
-local function runCouple()
-    note("")
-    note("== PHASE B0: pure couple -- roll authority and SIGN ==")
-    note("  bearings opposed: net lateral force is zero by construction")
-    note(string.format("  commanding attitude tilt %.0f deg toward heading %d",
-        plan.coupleTilt, plan.coupleHeading))
-
+-- Differential RPM makes a VERTICAL force at a LATERAL arm: the geometry
+-- craftgeom solves from the inertia tensor, validated by runs 9 and 10 at 97%
+-- and 102% of its ceiling. Predicted 0.2712 deg/s^2 per RPM, 91% of critical
+-- damping. This phase is the check on that prediction.
+--
+-- A STAIRCASE, and a fit that must AGREE WITH THE SWEEP. The couple phase
+-- reported alpha = +0.0884 from a quadratic fit while the craft rolled 0.07
+-- degrees -- that alpha implies 0.38 degrees, five times what happened. The
+-- fit was reading noise, the sign gate believed it, and B1 was allowed to fly.
+-- Every step here is cross-checked against the angle actually swept.
+local function runRpmStep(differential)
     local before = session:readCheap()
     local startRoll = before and before.roll or 0
-    local startSpeed = horizontalSpeed(session:read()) or 0
 
-    commandSuperposed(nil, { heading = plan.coupleHeading, tilt = plan.coupleTilt })
+    local target = rolldamp.cornerRpm(plan.propRpm, differential)
+    for corner, rpm in pairs(target) do
+        local ok, err = session:setProps(corner, rpm, 2)
+        if not ok then note("    " .. corner .. " rpm failed: " .. tostring(err)) end
+    end
+
+    -- WAIT FOR THE PROPS TO REACH IT. Propellers spin up over a second or
+    -- more, and timing a torque across the ramp is distortion #4 from the
+    -- axis-response campaign -- the one that made nominally identical runs
+    -- scatter 2x. Confirmed from bearing RPM telemetry, never from the ack.
+    local reached = false
+    session:hold(plan.rpmReachSeconds, function(state, now)
+        session:trim(plan.climbGain, flight.MAX_CLIMB_RATE, 0, state)
+        local settled = true
+        for corner, rpm in pairs(target) do
+            local pod = banks.getState()[corner]
+            local actual = pod and pod.prop and pod.prop.bearingRpm
+            if not actual or math.abs(actual - rpm) > plan.rpmTolerance then
+                settled = false
+            end
+        end
+        if settled then reached = true; return "reached" end
+        return nil
+    end)
 
     local samples = {}
     local startAt = os.epoch("utc")
     local restore = session.sampleSeconds
-    session.sampleSeconds = plan.coupleSampleSeconds
-    session:hold(plan.coupleSeconds, function(state, now)
+    session.sampleSeconds = plan.rpmSampleSeconds
+    local marker = session:readCheap()
+    startRoll = marker and marker.roll or startRoll
+
+    session:hold(plan.rpmStepSeconds, function(state, now)
         session:trim(plan.climbGain, flight.MAX_CLIMB_RATE, 0, state)
+        if lateralhold.rollAbort(state and state.roll) then
+            return "roll abort"
+        end
         if state and state.roll then
             samples[#samples + 1] =
                 { t = (now - startAt) / 1000, angle = state.roll - startRoll }
-            if math.abs(state.roll - startRoll) >= plan.coupleMaxAngle
+            if math.abs(state.roll - startRoll) >= plan.rpmMaxAngle
                 and #samples >= 5 then
                 return "angle reached"
             end
@@ -685,14 +720,14 @@ local function runCouple()
         return nil
     end)
     session.sampleSeconds = restore
-    clearAllTilts()
 
-    if #samples < 3 then
-        note("  NOT ENOUGH SAMPLES. Nothing measured; not closing the loop.")
-        return false
+    -- Back to level RPM, and let the rate settle before the next step.
+    for corner in pairs(target) do
+        session:setProps(corner, plan.propRpm, 2)
     end
 
-    -- alpha from angle = 0.5*alpha*t^2 + w0*t, the same fit axisresponse uses.
+    if #samples < 3 then return nil, "too few samples", reached end
+
     local s11, s12, s22, y1, y2 = 0, 0, 0, 0, 0
     for _, sample in ipairs(samples) do
         local a, b = 0.5 * sample.t ^ 2, sample.t
@@ -700,59 +735,90 @@ local function runCouple()
         y1 = y1 + a * sample.angle; y2 = y2 + b * sample.angle
     end
     local determinant = s11 * s22 - s12 * s12
-    if math.abs(determinant) < 1e-12 then
-        note("  fit is degenerate; not closing the loop.")
-        return false
-    end
+    if math.abs(determinant) < 1e-12 then return nil, "degenerate fit", reached end
     local alpha = (y1 * s22 - y2 * s12) / determinant
+
+    -- THE CROSS-CHECK. What the fitted alpha says the craft should have swept,
+    -- against what it actually swept. A fit reading noise fails here.
+    local elapsed = samples[#samples].t
     local swept = samples[#samples].angle
+    local implied = 0.5 * alpha * elapsed ^ 2
+    return {
+        alpha = alpha, swept = swept, implied = implied, samples = #samples,
+        elapsed = elapsed, reached = reached,
+        consistent = math.abs(swept) > plan.rpmMinSweep
+            and math.abs(implied - swept) <= math.abs(swept) * 0.6 + 0.15,
+    }
+end
 
-    note(string.format("  rolled %+.2f deg over %.2f s (%d samples)",
-        swept, samples[#samples].t, #samples))
-    note(string.format("  roll authority = %+.4f deg/s^2 = %+.4f per degree of tilt",
-        alpha, alpha / plan.coupleTilt))
-
-    -- Did it stay put? The ground says this command makes no lateral force;
-    -- this is the in-flight check on that, and it is the claim the whole
-    -- two-channel design rests on.
-    local endSpeed = horizontalSpeed(session:read()) or 0
-    note(string.format("  horizontal speed %.3f -> %.3f blocks/s (should barely move)",
-        startSpeed, endSpeed))
-
-    results.hover.rollPerTiltDegree = alpha / plan.coupleTilt
-    results.hover.coupleSign = alpha >= 0 and 1 or -1
-
-    -- THE SIGN. A positive attitude demand toward starboard should roll
-    -- starboard-low, which attitude.lua reports as POSITIVE roll.
+local function runRollAuthority()
     note("")
-    if math.abs(alpha) < plan.coupleMinAlpha then
-        note(string.format("  *** COUPLE TOO WEAK: |%.4f| < %.4f deg/s^2 ***",
-            alpha, plan.coupleMinAlpha))
-        note("  The bearings straddle the COM too evenly to make a couple, or")
-        note("  the command did not take. Not closing the loop.")
+    note("== PHASE B0: roll authority from DIFFERENTIAL RPM ==")
+    local predicted = rolldamp.authorityPerRpm()
+    note(string.format("  predicted %.4f deg/s^2 per RPM (%.0f%% of critical damping)",
+        predicted, predicted / rolldamp.criticalDamping() * 100))
+    note(string.format("  %6s %8s %9s %9s %9s %s",
+        "rpm", "samples", "swept", "implied", "alpha", "verdict"))
+
+    local points = {}
+    for _, differential in ipairs(plan.rpmSteps) do
+        local result, reason = runRpmStep(differential)
+        if not result then
+            note(string.format("  %6d %8s   %s", differential, "-", tostring(reason)))
+        else
+            note(string.format("  %6d %8d %9.2f %9.2f %9.4f %s",
+                differential, result.samples, result.swept, result.implied,
+                result.alpha,
+                result.consistent and "ok"
+                    or "FIT DISAGREES WITH SWEEP -- discarded"))
+            if not result.reached then
+                note("         (props never reached the commanded rpm)")
+            end
+            if result.consistent and result.reached then
+                points[#points + 1] = { x = differential, y = result.alpha }
+            end
+        end
+        session:hold(plan.rpmSettleSeconds, function(state)
+            session:trim(plan.climbGain, flight.MAX_CLIMB_RATE, 0, state)
+            return nil
+        end)
+    end
+
+    if #points < 2 then
+        note("")
+        note("  NOT ENOUGH USABLE STEPS. No authority measured, and nothing")
+        note("  will be closed on a guess. Landing.")
         return false
     end
 
-    local expected = 1
-    if results.hover.coupleSign ~= expected then
-        note("  *** THE COUPLE IS INVERTED relative to the assumed sign. ***")
-        note("  Not a fault -- this is the measurement this phase exists for,")
-        note("  and it is the sign that ran the craft away last time. The")
-        note("  controller sign flips to match; NOT closing the loop this run.")
-        note("  Re-run to fly it with the measured sign.")
+    local slope, worst = vectoring.fitThroughOrigin(points)
+    if not slope then
+        note("  staircase would not fit. Landing.")
         return false
     end
 
-    local critical = 2 * math.sqrt(0.0223)
-    note(string.format("  critical damping needs %.4f deg/s^2 per deg/s;", critical))
-    note(string.format("  at the %.0f deg clamp this couple delivers %.4f deg/s^2,",
-        lateralhold.DEFAULTS.maxTiltDegrees,
-        math.abs(results.hover.rollPerTiltDegree) * lateralhold.DEFAULTS.maxTiltDegrees))
-    note("  so full critical damping is " ..
-        (math.abs(results.hover.rollPerTiltDegree)
-            * lateralhold.DEFAULTS.maxTiltDegrees >= critical * 0.9
-            and "REACHABLE." or "NOT reachable; expect underdamped."))
-    return true
+    note("")
+    note(string.format("  MEASURED %.4f deg/s^2 per RPM  (predicted %.4f = %.0f%%)",
+        slope, predicted, slope / predicted * 100))
+    note(string.format("  worst residual %.0f%%", worst * 100))
+    results.hover.rollPerRpm = slope
+    results.hover.rollPerRpmPredicted = predicted
+
+    -- THE SIGN. A positive differential raises the PORT corners, which is a
+    -- positive roll demand, so alpha must be positive. Inverted here means the
+    -- damper would drive the oscillation instead of killing it.
+    if slope < 0 then
+        note("")
+        note("  *** THE SIGN IS INVERTED. A positive differential rolls the")
+        note("  craft the wrong way. Flip the corner map in rolldamp.cornerRpm")
+        note("  and re-run. NOT closing the loop.")
+        return false
+    end
+    note(string.format("  one RPM is %.0f%% of critical damping -- the damper is %s.",
+        slope / rolldamp.criticalDamping() * 100,
+        slope >= rolldamp.criticalDamping() * 0.5 and "WRITABLE"
+            or "too weak to be useful"))
+    return slope >= rolldamp.criticalDamping() * 0.5
 end
 
 -- B1: can the loop bring a drifting craft to rest?
@@ -977,7 +1043,7 @@ local function mainLoop()
         return
     end
 
-    if not runCouple() then
+    if not runRollAuthority() then
         note("")
         note("  Phase B0 did not clear. Landing without closing any loop.")
         session:descend()
@@ -1009,9 +1075,12 @@ note("")
 note("=== SUMMARY ===")
 note("pair coherence      : " .. tostring(results.ground.verdict or "not measured")
     .. "   (unmirrored: " .. tostring(results.ground.unmirrored or "--") .. ")")
-if results.hover.rollPerTiltDegree then
-    note(string.format("roll authority      : %+.4f deg/s^2 per degree of tilt (couple)",
-        results.hover.rollPerTiltDegree))
+if results.hover.rollPerRpm then
+    note(string.format("roll authority      : %.4f deg/s^2 per RPM differential",
+        results.hover.rollPerRpm))
+    note(string.format("  predicted %.4f, so %.0f%% of prediction",
+        results.hover.rollPerRpmPredicted,
+        results.hover.rollPerRpm / results.hover.rollPerRpmPredicted * 100))
 end
 if results.hover.arriveSpeed then
     note(string.format("arrived drifting    : %.3f blocks/s", results.hover.arriveSpeed))
