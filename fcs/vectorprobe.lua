@@ -122,6 +122,10 @@ local plan = {
     -- Within this of ground counts as down, for deciding whether it is safe to
     -- cut the propellers.
     groundedGain = 1.5,
+    -- Begin a step within this of level, so a 3 degree sweep cannot reach the
+    -- 6 degree roll abort. 2.5 + 3.0 = 5.5, half a degree of margin.
+    rollLevelMax = 2.5,
+    rollLevelTimeoutSeconds = 25.0,
     rpmStepSeconds = 4.0,
     rpmMaxAngle = 3.0,
     rpmSampleSeconds = 0.12,
@@ -675,6 +679,26 @@ end
 -- fit was reading noise, the sign gate believed it, and B1 was allowed to fly.
 -- Every step here is cross-checked against the angle actually swept.
 local function runRpmStep(differential)
+    -- START NEAR LEVEL, or there is no room to sweep.
+    --
+    -- The step ends when it has swept rpmMaxAngle (3 deg) and the roll abort
+    -- fires at 6. So a step begun at 4 degrees of roll -- entirely normal for a
+    -- hull oscillating with several degrees of amplitude -- aborts before it
+    -- finishes. That is why the 3 rpm pair failed twice running while 2 rpm
+    -- passed: the bigger step needs the same 3 degrees but travels it faster,
+    -- from wherever the oscillation happens to have left the craft.
+    --
+    -- So wait for the hull to swing back through level. It is a 42 s period, so
+    -- a crossing is never far away, and this costs far less than a lost step.
+    session:hold(plan.rollLevelTimeoutSeconds, function(state, now)
+        session:trim(plan.climbGain, flight.MAX_CLIMB_RATE, 0, state)
+        if state and state.roll
+            and math.abs(state.roll) <= plan.rollLevelMax then
+            return "near level"
+        end
+        return nil
+    end)
+
     local before = session:readCheap()
     local startRoll = before and before.roll or 0
 
@@ -709,6 +733,7 @@ local function runRpmStep(differential)
     end)
 
     local samples = {}
+    local aborted, abortedAt = false, 0
     local startAt = os.epoch("utc")
     local restore = session.sampleSeconds
     session.sampleSeconds = plan.rpmSampleSeconds
@@ -718,6 +743,7 @@ local function runRpmStep(differential)
     session:hold(plan.rpmStepSeconds, function(state, now)
         session:trim(plan.climbGain, flight.MAX_CLIMB_RATE, 0, state)
         if lateralhold.rollAbort(state and state.roll) then
+            aborted, abortedAt = true, state.roll
             return "roll abort"
         end
         if state and state.roll then
@@ -737,7 +763,10 @@ local function runRpmStep(differential)
         session:setProps(corner, plan.propRpm, 2)
     end
 
-    if #samples < 3 then return nil, "too few samples", reached end
+    if aborted then return nil, "roll abort at " .. string.format("%.1f deg", abortedAt) end
+    if #samples < 3 then
+        return nil, string.format("only %d samples", #samples)
+    end
 
     local s11, s12, s22, y1, y2 = 0, 0, 0, 0, 0
     for _, sample in ipairs(samples) do
@@ -790,16 +819,20 @@ local function runRollAuthority()
     -- would not: the contamination is not zero-mean over a few samples.
     local points = {}
     for _, differential in ipairs(plan.rpmSteps) do
-        local forward = runRpmStep(differential)
+        local forward, forwardWhy = runRpmStep(differential)
         session:hold(plan.rpmSettleSeconds, function(state)
             session:trim(plan.climbGain, flight.MAX_CLIMB_RATE, 0, state)
             return nil
         end)
-        local reverse = runRpmStep(-differential)
+        local reverse, reverseWhy = runRpmStep(-differential)
 
         if not forward or not reverse then
-            note(string.format("  %6d %8s   one half of the pair did not fit",
-                differential, "-"))
+            -- NAME THE REASON. The 3 rpm pair failed twice in a row reporting
+            -- only "did not fit", which is not something anyone can act on.
+            note(string.format("  %6d %8s   +%d: %s   -%d: %s",
+                differential, "-",
+                differential, forward and "ok" or tostring(forwardWhy),
+                differential, reverse and "ok" or tostring(reverseWhy)))
         else
             local alpha = (forward.alpha - reverse.alpha) / 2
             -- Both halves must have reached their commanded RPM, and the pair
