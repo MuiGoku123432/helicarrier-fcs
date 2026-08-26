@@ -1099,27 +1099,42 @@ local function mainLoop()
         end
     end
 
-    note("  drivetrain (thrust at rest, rpm/active under load):")
-    local highest = 0
-    for _, corner in ipairs(flight.CORNERS) do
-        local thrust = thrusts[corner]
-        if thrust and thrust > highest then highest = thrust end
-    end
+    -- WHAT GATES THE FLIGHT, AND WHY IT IS NOT THRUST.
+    --
+    -- TOPOLOGY: each corner has ONE Rotation Speed Controller driving BOTH of
+    -- its bearings. The pair always turns together at whatever the RSC
+    -- delivers -- RPM is a per-corner control, never per-bearing. So the RSC's
+    -- own reported speed is the authoritative health signal for that corner,
+    -- and the per-bearing thrust readings are downstream of it.
+    --
+    -- getThrust is not comparable across corners in any state, and four runs
+    -- were spent proving it:
+    --
+    --   spinning   oscillates; three runs named three different corners
+    --              (FR 66%, then RL 19% and RR 0%, nothing touched between)
+    --   at rest    denormal noise ~1e-20, so the percentages are ratios of
+    --              nothing -- the last run printed "thrust 0.00 (43%)"
+    --
+    -- The one reading that ever discriminated -- 7.6e-32 against 111688 on the
+    -- genuinely dead FR -- caught a state where three corners happened to
+    -- retain a value from recent rotation and the dead one could not. That was
+    -- luck, not a measurement, and it is not a check.
+    --
+    -- The discrete signals ARE reliable and are what gate the flight: a
+    -- missing kinetic source is what FR's real failure actually looked like,
+    -- and a stalled or stress-starved drivetrain cannot reach its commanded
+    -- RPM on the RSC. Thrust is printed for information only.
+    note("  drivetrain (source/rpm/active gate the flight; thrust is FYI):")
     for _, corner in ipairs(flight.CORNERS) do
         local pod = banks.getState()[corner]
         local prop = pod and pod.prop
         local thrust = thrusts[corner]
-        local share = (highest > 0 and thrust) and (thrust / highest * 100) or nil
-        note(string.format("    %-4s source %-5s rpm %5s active %-5s thrust %14.2f %s",
+        note(string.format("    %-4s source %-5s rpm %5s active %-5s thrust %12s",
             corner, tostring(prop and prop.hasSource),
             reached[corner] and string.format("%.0f", reached[corner]) or "--",
-            tostring(prop and prop.active), thrust or 0,
-            share and string.format("(%3.0f%%)", share) or ""))
-        -- Below 90% of the best is the bearing_5 defect again.
-        if share and share < 90 then
-            dead[#dead + 1] = string.format("%s (thrust %.0f%% of the strongest)",
-                corner, share)
-        end
+            tostring(prop and prop.active),
+            (thrust and math.abs(thrust) > 1)
+                and string.format("%.0f", thrust) or "~0"))
     end
 
     -- Leave them as they were found. runGround starts them again itself, and a
