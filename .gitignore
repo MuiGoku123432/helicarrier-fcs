@@ -1,0 +1,19 @@
+# Flight data: 16 MB of CSV and probe output. Kept locally, never committed --
+# it is experiment output, not source, and it would dominate every clone.
+flight-logs/
+
+# Build-process scratch from the monitor-hub work (ledger, review packages).
+# Useful history, but not source.
+.superpowers/
+
+# Runtime artifacts written by the programs on the ComputerCraft computers.
+fcs/logs/
+fcs/snapshot.dat
+fcs/snapshot.dat.tmp
+fcs/heartbeat.txt
+fcs/last_error.txt
+pod/heartbeat.txt
+pod/last_error.txt
+pod/thruster_manifest.lua
+
+.DS_Store
