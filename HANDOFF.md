@@ -16,8 +16,16 @@ It logs flight data, commands propeller RPM, ion thruster power and bearing
 tilt, and can fly short scripted profiles (climb, hold, land). It does **not**
 have a pilot-facing controller yet.
 
-Source repo: `~/repos/fcs-wireless-pods-v2` (**not** a git repo — no version
-control safety net; back up before large edits).
+Source repo: **`~/repos/mine/luaScripts/helicarrier-fcs`** — a git repo, remote
+`git@github.com:MuiGoku123432/helicarrier-fcs.git`. Moved here 2026-08-26 from
+`~/repos/fcs-wireless-pods-v2`, which was NOT under version control and is now
+superseded; the two were byte-identical at the import, so nothing was lost.
+
+**There is a safety net now.** The old "back up before large edits" warning is
+retired — commit instead. That matters more than it sounds: this session found
+four separate cases of a test or harness encoding the flight code's mistaken
+belief, and being able to bisect is worth more than any of the individual
+fixes.
 
 **Creative test world. The craft is expendable.** Prefer deploying a tool and
 gathering real data over perfecting the offline harness — but see
@@ -148,7 +156,7 @@ The instance's sync tooling lives in
 `"~/Library/Application Support/PrismLauncher/instances/F&F Server/packDev/"`
 and never touches `world/`, so computer files are safe from pack syncs.
 
-Rescued flight logs: `~/repos/fcs-wireless-pods-v2/flight-logs/`
+Rescued flight logs: `~/repos/mine/luaScripts/helicarrier-fcs/flight-logs/`
 
 ---
 
