@@ -1,7 +1,7 @@
 # Helicarrier FCS — session handoff
 
-Last updated: 2026-08-26 (late morning). Axis convention calibrated; five
-stacked distortions removed from the axis-response measurement; SSH key auth.
+Last updated: 2026-08-26 (midday). Authority SOLVED from the inertia tensor,
+not flown for; the 4.49 ratio bound was wrong and runs 18/19 are impossible.
 Written for a fresh session picking this up cold. Rewritten rather than
 patched: superseded findings are REMOVED, not annotated, except where the wrong
 answer is instructive. Keep it that way.
@@ -37,9 +37,16 @@ gathering real data over perfecting the offline harness — but see
 
 ## START HERE: what to do first
 
-**Run `/fcs/axisresponse.lua` in the FCS-DEV "Flight Tools" tab and read the
-RESPONSE MATRIX.** Everything below is context for why that one number is worth
-another flight.
+**Do not fly `/fcs/axisresponse.lua` for another authority number. You have
+it.** `luajit tools/test_craftgeom.lua` prints it in a second, from the inertia
+tensor, on the ground:
+
+    roll 27.84   pitch 14.60 deg/s^2 per unit demand   (ratio 1.91)
+
+The next piece of work is the **rate-damping term**, which is what all of this
+was for. A flight is now only worth it as a *check* on a predicted number — and
+a 6-sample roll pulse is perfectly adequate for that, which is exactly what
+nineteen flights of trying to make it a *measurement* could never manage.
 
 ### State of the craft, in one place
 
@@ -61,12 +68,17 @@ another flight.
 
 ### What is being measured, and why it kept failing
 
-`authority.roll` / `authority.pitch` in `mixer_profile.lua` are still
-placeholders at **0.25**. They are the hard blocker on any attitude
-controller — and the attitude controller is what fixes the strafe, because the
-strafe is an underdamped oscillation and you cannot trim away an oscillation.
+`authority.roll` / `authority.pitch` in `mixer_profile.lua` are **0.25, and
+that is fine** — read the comment there before touching them. They are not a
+measured physical constant; they are the demand→power scalar, a design choice.
+What was missing was the *response* that scalar produces, and that is now known
+(27.84 / 14.60 deg/s^2 per unit demand at 0.25).
 
-Measuring them took **nine flights**, because FIVE separate distortions were
+That was the hard blocker on any attitude controller — and the attitude
+controller is what fixes the strafe, because the strafe is an underdamped
+oscillation and you cannot trim away an oscillation.
+
+Chasing it by flight took **nine flights**, because FIVE separate distortions were
 stacked on top of each other. All five are now fixed, but a fresh session
 should know they existed, because each one produced plausible numbers:
 
@@ -81,22 +93,84 @@ should know they existed, because each one produced plausible numbers:
 Roll authority read 3.98, 5.43, 28.33, 26.93, 22.79, 14.07, 17.32, 20.01,
 12.97, 86.03 across those runs. **None of that spread was physics.**
 
-### The next run is the first with all five off
+### Runs 18 and 19 flew with all five off, and BOTH are physically impossible
 
-Expect: both axes reaching `differential applied: spread 0.1500 of 0.1500`,
-roll with 8+ samples rather than 3, and a `roll/pitch ratio` at or below **4.49**
-(the bound the inertia tensor imposes — the tool checks this itself now and
-flags a real violation separately from measurement error).
+They are archived as `flight-logs/axisresponse_result_run18.txt` / `_run19.txt`
+with their CSVs. The five fixes held — `spread 0.1500 of 0.1500` on both axes,
+Phase A exact at 0.0% residual, the flight CSV surviving the whole run — and
+the numbers still came out wrong:
 
-**Two consecutive runs agreeing within a few percent is the bar.** Until then
-do not write anything into `mixer_profile.lua`. Everything in the table above
-looked repeatable at the time.
+| | run 18 | run 19 | samples |
+|---|---|---|---|
+| roll | 46.69 | 75.29 | 7 → 6 |
+| pitch | 11.47 | 13.47 | 13 → 13 |
+
+The axis with 13 samples repeats to 17%. The axis with 6 has a **61% spread**.
+
+**Do not fly this again to get a better number. The measurement was never the
+route.** See the next section — the answer was in the inertia tensor the whole
+time, and it says roll is about **27**, so both of these are 1.7x and 2.7x
+over what the craft can physically produce.
+
+### The arms come from the tensor — no flight required
+
+`mixer_profile.lua` offered two routes: *"Calibrate by measuring the arms, or
+by flying a per-axis step response."* Nineteen flights went into the second.
+The first is arithmetic.
+
+`getInertiaTensor()` returns three diagonals, which **over-determine** the hull
+box for a known mass. `fcs/craftgeom.lua` solves it:
+
+    beam 87.1  x  length 205.1  x  height 47.9 blocks   (2.35x longer than wide)
+
+Checked three ways: the solve round-trips all three diagonals, all three
+edge-squares come out positive, and this document had already derived "about
+2.4x longer than wide" from runs 6/8 by a completely different route.
+`getCenterOfMass()` and `rotationPoint` agree to ~1e-5, so the craft rotates
+about its COM and that is where the arms measure from — checked, not assumed.
+
+A pod cannot sit outboard of the hull, so half the box is a hard ceiling on the
+moment arm. With ion force already exact, the unit chain closes (it reproduces
+the documented 3.342x weight with no fudge factor):
+
+    ceiling: roll 27.84   pitch 14.60   expected roll/pitch ratio 1.91
+
+| run | roll | % of ceiling | ratio | |
+|---|---|---|---|---|
+| 6 | 3.98 | 14% | 1.88 | starved, but proportioned right |
+| 8 | 5.43 | 20% | 2.10 | same |
+| **9** | **28.33** | **102%** | — | **at the ceiling** |
+| **10** | **26.93** | **97%** | — | **at the ceiling** |
+| 18 | 46.69 | 168% | 4.07 | IMPOSSIBLE |
+| 19 | 75.29 | 270% | 5.59 | IMPOSSIBLE |
+
+**Runs 9 and 10 — dismissed as distorted — were the honest ones**, and they
+agreed with each other to 4.9%.
+
+### The 4.49 bound was wrong, and it is why run 18 passed
+
+`axisresponse.lua` checked the ratio against `t[1][1]/t[3][3]` = **4.49**.
+That is the value for a craft whose lateral and longitudinal moment arms are
+**equal** — a square craft. This hull's arm ratio is **0.425**, so the expected
+ratio is **1.91**. Run 18's 4.07 sailed through a check that was measuring the
+wrong quantity, and being one-sided it could never have caught a low reading
+either.
+
+**That is the fifth instance of this project's signature failure mode** — a
+test or harness encoding what the code believed rather than what the craft is.
+The others: the atan bug, the axis labels, the RR-deficit constant, the pitch
+sign. Fixed in `d7a4770`; both checks now derive from the live tensor, the
+ratio check is two-sided, and there is a per-axis absolute ceiling.
 
 ### After that
 
-1. **Write the rate-damping term.** That is what the calibration is for, and it
-   is what kills the strafe. It belongs on the BEARINGS (continuous) rather
-   than the ions (quantised at 22.28% of weight per step).
+1. **Write the rate-damping term** — now unblocked, using roll 27.84 /
+   pitch 14.60 deg/s^2 per unit demand. It is what kills the strafe, and it
+   belongs on the BEARINGS (continuous) rather than the ions (quantised at
+   22.28% of weight per step). Treat the two numbers as **ceilings** the pods
+   approach rather than exact gains: they assume the pods sit at the hull
+   extremes, and runs 9/10 came in at 97-102%, so they are tight but not exact.
+   Design the damper to be stable if the true gain is 10-20% lower.
 2. **Yaw is still unsolved.** `getMagneticNorth()` is `{0,0,0}`; vectoring is
    the route and the command path exists. Measure the sign of the lateral force
    from a bearing tilt first — it has never been verified.
@@ -490,6 +564,11 @@ and rolling about the bow swings the craft's width; a wide craft would have the
 LARGEST inertia there. **The craft is long and narrow, so `arm_ratio < 1` and
 the ratio cannot exceed 4.49.** 11.02 is not merely high, it is on the wrong
 side of a hard bound.
+
+**The reasoning is right; 4.49 was far too generous a bound.** `arm_ratio` is
+not merely "< 1" — the tensor pins it at **0.425**, so the real expectation is
+**1.91**. The loose bound let run 18's 4.07 through. See *The arms come from
+the tensor* in START HERE.
 
 **The cause was in the report all along:** the pitch pulse began with the craft
 **banked -6.89 degrees**. The hull self-levels, so a residual bank is not a
@@ -973,8 +1052,18 @@ degrees would have mixed `t[1][1]` and `t[2][2]` — which differ by 46.5 millio
 change is **300x smaller** than that prediction.
 
 So `t[i][j]` indexes BODY axes. **"Index 3 (+Z, the bow) is the cheap axis" and
-the 32% coupling figure both hold as written**, and the 4.60-vs-4.49 ratio that
-corroborated the bow being +Z was a fair comparison after all.
+the 32% coupling figure both hold as written.**
+
+**But strike the 4.60-vs-4.49 corroboration — it was never evidence.** 4.49 is
+`t[1][1]/t[3][3]`, which is the expected response ratio only if the lateral and
+longitudinal moment arms are EQUAL. This hull is 2.35x longer than wide, so the
+expected ratio is **1.91**, and a measured 4.60 against it is a 2.4x
+discrepancy, not agreement. The frame question was decided correctly on the
+tilt data above; the ratio "confirmation" was reading the right number off the
+wrong yardstick.
+
+**The bow=+Z conclusion is unaffected**, because it never rested on this — it
+stands on the two tensor-free legs stated above.
 
 *Historical, for the method:* `sensors.lua` reads the tensor every
 Nth sample (`sensors.tensorEveryNth`, default 10) and `main.lua` logs
@@ -1487,6 +1576,18 @@ rates on both sides.** Static reasoning about CC has repeatedly produced wrong
 answers on this project; measurement has not.
 
 ## Testing without going in game
+
+**Start here, and note what it replaces:**
+
+    luajit tools/test_craftgeom.lua
+
+Solves the hull box from the inertia tensor and prints the authority ceiling
+(roll 27.84, pitch 14.60, ratio 1.91) in about a second, on the ground. 27
+assertions, including that the ceiling still sorts the flight record into
+possible and impossible — if a change ever makes run 19's 75.29 admissible,
+the bound has stopped meaning anything. **This is the tool that ended a
+nineteen-flight measurement campaign.**
+
 
 `tools/cc_harness.lua` is a ComputerCraft stand-in — virtual clock, four
 simulated pods using the carrier's real numbers, craft physics with air density,
