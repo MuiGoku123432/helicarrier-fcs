@@ -55,9 +55,21 @@ trim.MEASURED = {
     -- it by rpm, which multiplies the answer by four and was caught here by
     -- the test pinning 0.63 deg to 0.130 blocks/s.
     --
-    -- (It sits oddly against the harness's vertical prop thrust, which DOES
-    -- scale with rpm from a 16 rpm base. Whether the lateral constant should
-    -- too is unresolved -- but 13960.98 is what the craft measured.)
+    -- AND THE SUSPICION IN THIS COMMENT TURNED OUT TO MATTER. 13960.98 is the
+    -- bearing thrust at 16 RPM, and the lateral measurement that produced it
+    -- was taken ON THE GROUND. The craft flies at 64. If lateral force scales
+    -- with rpm the way lift does, the real figure is ~4x this and every drift
+    -- cost below is 4x optimistic.
+    --
+    -- Two trim flights say it is at least partly true: levelling the hull by
+    -- 74% did not reduce the drift at all, and pass 2 made it worse. A 1 degree
+    -- trim costing 0.82 rather than 0.205 blocks/s explains that exactly.
+    -- Differencing the +/-2 degree pairs brackets it at 0.23 (roll) to 0.47
+    -- (pitch) per degree -- not clean, because the hull tilt moves too.
+    --
+    -- DO NOT build a gain on this number until it is measured at flight rpm:
+    -- hull level under the damper, a known tilt commanded, terminal net drift
+    -- read off. One window settles it.
     thrustPerBearing = 13960.98,
 
     -- The hull's self-levelling spring, from the 42 s oscillation period.

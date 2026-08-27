@@ -377,44 +377,44 @@ ratio check is two-sided, and there is a per-axis absolute ceiling.
    does not level. That is item 3 below, and it is now the blocking piece for
    flying the craft flat.
 
-2. **RE-FLY `/fcs/trimflight.lua`.** It flew 2026-08-27 and **trimmed 71% of
-   the standing tilt** (`flight-logs/trimflight_run1.txt`) -- but it was judged
-   on the wrong metric and the tool has changed since. Fly it again.
+2. **~~Trim the standing tilt~~ FLOWN TWICE. It levels the craft. It does NOT
+   fix the drift, and that is now measured rather than argued.**
 
-       /fcs/trimflight.lua --ground-only   the maths and the plan, commands nothing
-       /fcs/trimflight.lua --probe-only    measure the coupling sign, then land
-       /fcs/trimflight.lua                 measure, trim, correct, verify
-
-   **Run 1's result, and why it needs re-flying:**
-
-   | | before | after |
+   | | run 1 | run 2 |
    |---|---|---|
-   | standing roll | +0.205 | -0.065 |
-   | standing pitch | +0.692 | -0.196 |
-   | standing tilt | 0.721 | **0.206 deg, -71%** |
-   | mean ground speed | 1.167 | 1.195 -- *unchanged* |
+   | standing tilt | 0.721 -> 0.206 (**-71%**) | 0.706 -> 0.180 (**-74%**) |
+   | net drift | not measurable (see below) | **0.812 -> 1.517, WORSE** |
 
-   The attitude trim worked, on a craft whose two axes have OPPOSITE coupling
-   signs. The drift did not move, and **that was the instrument, not the
-   craft**: mean ground speed is a MAGNITUDE, so the hull's oscillation
-   contributes to it even when the mean velocity is exactly zero. Both windows
-   sat on a ~1.1 blocks/s floor of pure AC. `mean(|v|)` was the wrong question;
-   `|mean(v)|` -- net displacement over the window -- is the right one.
+   `flight-logs/trimflight_run1.txt`, `_run2.txt`. The attitude trim is
+   reproducible, on a craft whose two axes have OPPOSITE coupling signs, using
+   gains it measures itself. That part works and is worth keeping: a level hull
+   is the reference any controller needs.
 
-   The harness makes the point on one flight: net drift **1.856 -> 0.282
-   blocks/s, -85%**, while mean speed over the same run moved 2.858 -> 2.523
-   and looked like nothing.
+   **THE DRIFT DOES NOT IMPROVE, because the actuator pays back what it
+   removes.** The model says a 1 degree trim costs 0.205 blocks/s of its own
+   lateral force. That rests on `2*T*sin(tilt)` with **T = 13960.98, which is
+   the bearing thrust at 16 RPM and was measured ON THE GROUND** -- it
+   reproduces the vectorprobe reading of 3886.3 at 8 degrees exactly, which is
+   how we know that is the value it used. The craft flies at 64 rpm. If lateral
+   force scales with rpm the way lift does, the real cost is ~0.82 blocks/s per
+   degree, and pass 1's 1.084 degrees of tilt accounts for the whole 0.812
+   measured.
 
-   **The floor is the actuator, not a failure.** 0.282 measured against 0.277
-   predicted for the trim's own lateral force. You cannot trim below what the
-   bearings themselves push with.
+   Differencing the +/-2 degree pairs brackets it without settling it: ~0.23
+   blocks/s per degree on roll (model agrees), ~0.47 on pitch (2.3x the model).
+   The hull tilt is moving at the same time, so it is not a clean calibration.
 
-   **It also overshot both axes by ~30%**, consistently -- effective gains 1.130
-   and 0.816 against the 0.857 and 0.636 phase A measured. Likely the 12 s
-   settle against a ~42 s period: the hull had not finished moving when the
-   window opened, so its response read short. There is now a second pass that
-   corrects from the residual at HALF strength; a full-strength correction
-   overshot in the harness and ended worse than leaving it alone.
+   **What to do instead.** Read the same fact the other way: the bearings are a
+   FAR better translation actuator than the model credits -- somewhere between
+   0.2 and 0.8 blocks/s per degree against a 15 degree clamp. Cancelling
+   1.5 blocks/s needs 2 to 7 degrees, well inside limits. **The drift fix is a
+   closed loop on VELOCITY, not on tilt.** `fcs/lateralhold.lua` was built for
+   exactly that, is unit-tested (73 assertions), and has never been flown.
+
+   Settle the constant first, because the loop's gain depends on it: hold the
+   hull level with the damper, command a KNOWN bearing tilt at 64 rpm, and
+   measure the terminal net drift. That is one window, and it turns a factor
+   of four of uncertainty into a number.
 
 3. **Trim standing tilt on the bearings.** 0.63 deg cancels the roll offset,
    1.16 deg the pitch one. This is also the safe way to finally measure the
