@@ -204,8 +204,28 @@ end
 --
 -- The offset is a MEAN, never a reading: the hull swings either side of it by
 -- several times its size.
+-- NET DISPLACEMENT, not mean speed.
+--
+-- Run 1 measured mean ground speed and it did not move: 1.167 -> 1.195, on a
+-- run that cut the standing tilt by 71%. Mean speed CANNOT show a DC
+-- improvement -- it is a magnitude, so an oscillation contributes to it even
+-- when the mean velocity is exactly zero. Both windows sat on a ~1.1 blocks/s
+-- floor that was pure AC.
+--
+-- The DC drift is where the craft actually ENDED UP: net displacement over the
+-- window, divided by its length. The oscillation averages out of that by
+-- construction. mean(|v|) is the wrong question; |mean(v)| is the right one.
+local function horizontal(position)
+    if not position then return nil end
+    local x = position.x or position[1]
+    local z = position.z or position[3]
+    if not x or not z then return nil end
+    return x, z
+end
+
 local function measureWindow(label, seconds, starboard, bow)
     local samples = {}
+    local firstX, firstZ, firstAt, lastX, lastZ, lastAt
     session.cheapRead = true
     commandTilt(starboard, bow)
 
@@ -221,6 +241,11 @@ local function measureWindow(label, seconds, starboard, bow)
                 pitch = state.pitch,
                 speed = groundSpeed(state),
             }
+            local x, z = horizontal(state.position)
+            if x then
+                if not firstX then firstX, firstZ, firstAt = x, z, now end
+                lastX, lastZ, lastAt = x, z, now
+            end
             if math.abs(state.roll) > plan.probeAbortTilt
                 or math.abs(state.pitch) > plan.probeAbortTilt then
                 return string.format("tilt passed %.1f deg (roll %.2f pitch %.2f)",
@@ -232,11 +257,20 @@ local function measureWindow(label, seconds, starboard, bow)
     local meanRoll = trim.mean(samples, "roll")
     local meanPitch = trim.mean(samples, "pitch")
     local meanSpeed = trim.mean(samples, "speed")
-    note(string.format("  %-22s roll %+6.3f  pitch %+6.3f  speed %5s  (%d samples)",
+
+    local netDrift = nil
+    if firstX and lastAt and lastAt > firstAt then
+        local dx, dz = lastX - firstX, lastZ - firstZ
+        netDrift = math.sqrt(dx * dx + dz * dz) / ((lastAt - firstAt) / 1000)
+    end
+
+    note(string.format(
+        "  %-22s roll %+6.3f  pitch %+6.3f  net %5s  mean %5s  (%d samples)",
         label, meanRoll or 0, meanPitch or 0,
+        netDrift and string.format("%.3f", netDrift) or "?",
         meanSpeed and string.format("%.3f", meanSpeed) or "?", #samples))
     return { roll = meanRoll, pitch = meanPitch, speed = meanSpeed,
-             count = #samples }, stop
+             netDrift = netDrift, count = #samples }, stop
 end
 
 -- Let a commanded tilt reach equilibrium before measuring it.
@@ -406,48 +440,89 @@ end
 -- Report
 -- ---------------------------------------------------------------------------
 
-local function report(before, after, gains, tilts)
+local function report(before, pass1, pass2, gains, tilts1, tilts2)
     note("")
     note("== RESULT ==")
     note("")
-    note("                          BEFORE        AFTER")
-    note(string.format("  standing roll         %+8.3f     %+8.3f  deg",
-        before.roll or 0, after.roll or 0))
-    note(string.format("  standing pitch        %+8.3f     %+8.3f  deg",
-        before.pitch or 0, after.pitch or 0))
-    note(string.format("  ground speed          %8.3f     %8.3f  blocks/s",
-        before.speed or 0, after.speed or 0))
+    note("                        BEFORE       PASS 1       PASS 2")
+    note(string.format("  standing roll       %+8.3f     %+8.3f     %+8.3f  deg",
+        before.roll or 0, pass1.roll or 0, pass2.roll or 0))
+    note(string.format("  standing pitch      %+8.3f     %+8.3f     %+8.3f  deg",
+        before.pitch or 0, pass1.pitch or 0, pass2.pitch or 0))
+    note(string.format("  NET drift           %8s     %8s     %8s  blocks/s",
+        before.netDrift and string.format("%.3f", before.netDrift) or "?",
+        pass1.netDrift and string.format("%.3f", pass1.netDrift) or "?",
+        pass2.netDrift and string.format("%.3f", pass2.netDrift) or "?"))
+    note(string.format("  mean speed          %8.3f     %8.3f     %8.3f  blocks/s",
+        before.speed or 0, pass1.speed or 0, pass2.speed or 0))
     note("")
-    note(string.format("  trim applied: %+.3f deg starboard, %+.3f deg bow",
-        tilts.starboard, tilts.bow))
+    note("  NET drift is the payoff. Mean speed is shown only because run 1 was")
+    note("  judged on it and could not be: it is a magnitude, so the hull's")
+    note("  oscillation contributes even when the mean velocity is zero.")
+    note("")
+    note(string.format("  trim: pass 1 %+.3f/%+.3f, pass 2 %+.3f/%+.3f (starboard/bow)",
+        tilts1.starboard, tilts1.bow, tilts2.starboard, tilts2.bow))
     note(string.format("  measured gains: roll %.4f  pitch %.4f",
         gains.roll or 0, gains.pitch or 0))
+
+    -- What the second pass says about the first pass's gain. A consistent bias
+    -- on both axes is worth knowing about; noise is not.
+    for _, axis in ipairs({ { "roll", before.roll, pass1.roll, tilts1.starboard, gains.roll },
+                            { "pitch", before.pitch, pass1.pitch, tilts1.bow, gains.pitch } }) do
+        local name, start, ended, applied, gain = axis[1], axis[2], axis[3], axis[4], axis[5]
+        if start and ended and applied and math.abs(applied) > 1e-6 and gain then
+            -- ended = start + applied * gain, so gain = (ended - start) / applied.
+            -- Written the other way round first, which reported a correct
+            -- +0.484 gain as -0.486 and "-200%".
+            local effective = (ended - start) / applied
+            note(string.format("    %-5s effective gain %+.3f against %+.3f measured (%+.0f%%)",
+                name, effective, gain, (effective / gain - 1) * 100))
+        end
+    end
     note("")
 
-    local beforeTilt = math.sqrt((before.roll or 0) ^ 2 + (before.pitch or 0) ^ 2)
-    local afterTilt = math.sqrt((after.roll or 0) ^ 2 + (after.pitch or 0) ^ 2)
+    local function magnitude(sample)
+        return math.sqrt((sample.roll or 0) ^ 2 + (sample.pitch or 0) ^ 2)
+    end
+    local beforeTilt, finalTilt = magnitude(before), magnitude(pass2)
 
-    if afterTilt < beforeTilt * 0.5 then
-        note(string.format("  TRIMMED. Standing tilt %.3f -> %.3f deg, a %.0f%% reduction.",
-            beforeTilt, afterTilt, (1 - afterTilt / beforeTilt) * 100))
-    elseif afterTilt < beforeTilt then
-        note(string.format("  PARTIAL. Standing tilt %.3f -> %.3f deg. Better, but the"
-            .. " gain or the clamp is limiting it.", beforeTilt, afterTilt))
+    local pass1Tilt = magnitude(pass1)
+    if pass1Tilt < finalTilt then
+        note(string.format("  NOTE: pass 1 ended flatter than pass 2 (%.3f vs %.3f deg).",
+            pass1Tilt, finalTilt))
+        note(string.format("  The trim worth keeping is pass 1's: %+.3f starboard,"
+            .. " %+.3f bow.", tilts1.starboard, tilts1.bow))
+        note("  A second pass helps when the residual is well clear of the")
+        note("  measurement noise and hurts when it is not.")
+        note("")
     else
-        note(string.format("  NOT TRIMMED. Standing tilt %.3f -> %.3f deg -- no better.",
-            beforeTilt, afterTilt))
-        note("  If it got WORSE, the measured gain has the wrong sign and phase A")
-        note("  should have caught it; check the reverse pair samples above.")
+        note(string.format("  The trim worth keeping is %+.3f starboard, %+.3f bow.",
+            tilts2.starboard, tilts2.bow))
+        note("")
     end
 
-    if before.speed and after.speed and before.speed > 0.05 then
-        note(string.format("  Ground speed %.3f -> %.3f blocks/s (%+.0f%%).",
-            before.speed, after.speed,
-            (after.speed / before.speed - 1) * 100))
-        note(string.format("  For reference the trim's own lateral force is worth"
-            .. " about %.3f blocks/s.",
-            math.sqrt(trim.bearingDrift(tilts.starboard) ^ 2
-                + trim.bearingDrift(tilts.bow) ^ 2)))
+    if finalTilt < beforeTilt * 0.5 then
+        note(string.format("  TRIMMED. Standing tilt %.3f -> %.3f deg, a %.0f%% reduction.",
+            beforeTilt, finalTilt, (1 - finalTilt / beforeTilt) * 100))
+    elseif finalTilt < beforeTilt then
+        note(string.format("  PARTIAL. Standing tilt %.3f -> %.3f deg.",
+            beforeTilt, finalTilt))
+    else
+        note(string.format("  NOT TRIMMED. Standing tilt %.3f -> %.3f deg -- no better.",
+            beforeTilt, finalTilt))
+        note("  If it got WORSE the gain sign is wrong, and phase A should have")
+        note("  caught it -- check the reverse pairs above.")
+    end
+
+    if before.netDrift and pass2.netDrift then
+        local cost = math.sqrt(trim.bearingDrift(tilts2.starboard) ^ 2
+            + trim.bearingDrift(tilts2.bow) ^ 2)
+        note(string.format("  NET DRIFT %.3f -> %.3f blocks/s (%+.0f%%).",
+            before.netDrift, pass2.netDrift,
+            before.netDrift > 0.01 and (pass2.netDrift / before.netDrift - 1) * 100 or 0))
+        note(string.format("  The trim's own lateral force is worth about %.3f of that,",
+            cost))
+        note("  so a floor near that value is the actuator, not a failure.")
     end
 end
 
@@ -543,10 +618,59 @@ local function mainLoop()
         clearTilt()
         return
     end
-    local after = measureWindow("trimmed", plan.verifySeconds,
+    local after = measureWindow("trim pass 1", plan.verifySeconds,
         tilts.starboard, tilts.bow)
 
-    report(before, after, gains, tilts)
+    -- A SECOND PASS, because run 1 overshot both axes by the same ~30%.
+    --
+    -- Effective gains came out 1.130 and 0.816 against the 0.857 and 0.636
+    -- phase A measured -- consistently HIGH, on both axes, which is a bias and
+    -- not noise. The likely cause is the 12 s settle against a ~42 s period:
+    -- the hull had not finished moving when the window opened, so its response
+    -- read short and the gain with it.
+    --
+    -- Lengthening the settle would cost another two minutes of flight and
+    -- still only reduce the bias. Correcting from the RESIDUAL removes it
+    -- whatever its cause: the second pass is measured against a craft already
+    -- near level, where the remaining error is small and the same gain applies
+    -- to it.
+    -- UNDER-RELAXED. A full-strength correction overshot in the harness --
+    -- pitch went +0.298 to -0.352, worse than leaving it alone -- because the
+    -- residual after pass 1 is comparable to the noise in measuring it, and
+    -- correcting noise at full strength just moves the error to the other
+    -- side. Half a step converges instead of ringing.
+    local RELAXATION = 0.5
+    local rawRoll = trim.tiltFor(after.roll, gains.roll)
+    local rawPitch = trim.tiltFor(after.pitch, gains.pitch)
+    local correctionRoll = rawRoll and rawRoll * RELAXATION
+    local correctionPitch = rawPitch and rawPitch * RELAXATION
+    local final, finalTilts = after, tilts
+
+    if correctionRoll and correctionPitch
+        and (math.abs(correctionRoll) > 0 or math.abs(correctionPitch) > 0) then
+        finalTilts = {
+            starboard = tilts.starboard + correctionRoll,
+            bow = tilts.bow + correctionPitch,
+        }
+        note("")
+        note(string.format("== B: pass 2, correcting %+.3f starboard %+.3f bow"
+            .. " -> %+.3f / %+.3f ==",
+            correctionRoll, correctionPitch, finalTilts.starboard, finalTilts.bow))
+
+        local secondStop = settleAt(finalTilts.starboard, finalTilts.bow)
+        if secondStop then
+            note("  " .. secondStop)
+            clearTilt()
+            return
+        end
+        final = measureWindow("trim pass 2", plan.verifySeconds,
+            finalTilts.starboard, finalTilts.bow)
+    else
+        note("")
+        note("  pass 2 skipped: the residual is inside the deadband already.")
+    end
+
+    report(before, after, final, gains, tilts, finalTilts)
 
     clearTilt()
     note("")

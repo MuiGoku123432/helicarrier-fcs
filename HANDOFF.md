@@ -377,31 +377,44 @@ ratio check is two-sided, and there is a per-axis absolute ceiling.
    does not level. That is item 3 below, and it is now the blocking piece for
    flying the craft flat.
 
-2. **FLY `/fcs/trimflight.lua`.** Written, harness-flown in three modes,
-   deployed; never flown on the craft. It is the DC half of the drift fix:
+2. **RE-FLY `/fcs/trimflight.lua`.** It flew 2026-08-27 and **trimmed 71% of
+   the standing tilt** (`flight-logs/trimflight_run1.txt`) -- but it was judged
+   on the wrong metric and the tool has changed since. Fly it again.
 
        /fcs/trimflight.lua --ground-only   the maths and the plan, commands nothing
        /fcs/trimflight.lua --probe-only    measure the coupling sign, then land
-       /fcs/trimflight.lua                 measure, then trim, then verify
+       /fcs/trimflight.lua                 measure, trim, correct, verify
 
-   **The standing offsets explain 94% of the craft's drift speed** -- +0.368
-   roll and -0.638 pitch imply 1.571 blocks/s against a measured mean of 1.670.
-   That is a DC problem with a DC fix. It does NOT fix the CURVING; that is the
-   damper's job, and the damper now works.
+   **Run 1's result, and why it needs re-flying:**
 
-   **Pitch is the bigger half** (1.361 vs 0.785 blocks/s). Everything this
-   project has done about drift went to roll, because the repaired RR deficit
-   was a roll torque. Trimming roll alone collects 31% of what is available.
+   | | before | after |
+   |---|---|---|
+   | standing roll | +0.205 | -0.065 |
+   | standing pitch | +0.692 | -0.196 |
+   | standing tilt | 0.721 | **0.206 deg, -71%** |
+   | mean ground speed | 1.167 | 1.195 -- *unchanged* |
 
-   Phase A MEASURES the bearing coupling sign by reverse pairs at 2 degrees --
-   it has never been measured, and a saturated 12 degree command with it wrong
-   once ran the craft from 1.76 to 11.5 blocks/s. Phase B refuses to trim on a
-   gain too small to trust. Harness-proved for BOTH signs and for the refusal:
-   `luajit tools/run_trimflight_harness.lua positive|negative|nocoupling`.
+   The attitude trim worked, on a craft whose two axes have OPPOSITE coupling
+   signs. The drift did not move, and **that was the instrument, not the
+   craft**: mean ground speed is a MAGNITUDE, so the hull's oscillation
+   contributes to it even when the mean velocity is exactly zero. Both windows
+   sat on a ~1.1 blocks/s floor of pure AC. `mean(|v|)` was the wrong question;
+   `|mean(v)|` -- net displacement over the window -- is the right one.
 
-   Expect roughly a 5x reduction in drift speed, not a cure: trimming with
-   bearings buys back 0.272 blocks/s of its own lateral force against the 1.571
-   it removes.
+   The harness makes the point on one flight: net drift **1.856 -> 0.282
+   blocks/s, -85%**, while mean speed over the same run moved 2.858 -> 2.523
+   and looked like nothing.
+
+   **The floor is the actuator, not a failure.** 0.282 measured against 0.277
+   predicted for the trim's own lateral force. You cannot trim below what the
+   bearings themselves push with.
+
+   **It also overshot both axes by ~30%**, consistently -- effective gains 1.130
+   and 0.816 against the 0.857 and 0.636 phase A measured. Likely the 12 s
+   settle against a ~42 s period: the hull had not finished moving when the
+   window opened, so its response read short. There is now a second pass that
+   corrects from the residual at HALF strength; a full-strength correction
+   overshot in the harness and ended worse than leaving it alone.
 
 3. **Trim standing tilt on the bearings.** 0.63 deg cancels the roll offset,
    1.16 deg the pitch one. This is also the safe way to finally measure the

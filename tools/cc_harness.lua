@@ -908,7 +908,13 @@ function harness.install(env)
         getName = function() error("no name on this sublevel", 0) end,
         getMass = function() return harness.craft.mass end,
         getLogicalPose = function()
-            return { position = { x = 0, y = harness.craft.y, z = 0 },
+            -- Horizontal POSITION too, not just altitude. Velocity was wired
+            -- up and position was not, so a tool measuring NET DISPLACEMENT --
+            -- which is the only honest way to see DC drift under an
+            -- oscillation -- read 0.000 no matter what the craft did.
+            return { position = { x = -harness.craft.starboard,
+                                  y = harness.craft.y,
+                                  z = harness.craft.bow },
                      orientation = harness.orientation(),
                      rotationPoint = { x = 0, y = 0, z = 0 } }
         end,
