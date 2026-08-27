@@ -134,55 +134,6 @@ local session = flight.new({
 -- damped one stops. Counted on the rate rather than the angle because the
 -- angle also carries the standing 0.31 degree offset, which would add
 -- crossings or remove them depending on which side of zero it sits.
-local function zeroCrossings(samples)
-    local crossings, previous = 0, nil
-    for _, sample in ipairs(samples) do
-        local rate = sample.rollRate
-        if previous and rate and previous ~= 0 and rate ~= 0 then
-            if (previous > 0) ~= (rate > 0) then
-                crossings = crossings + 1
-            end
-        end
-        if rate and rate ~= 0 then previous = rate end
-    end
-    return crossings
-end
-
--- Time for |roll rate| to fall to 1/e of its starting value, read off the
--- running peak rather than fitted. A fit would imply a model of the decay
--- shape; this asks only "when did it get small", which is what the comparison
--- needs and is robust to the shape being wrong.
-local function decayTime(samples)
-    if #samples == 0 then return nil end
-    local peak = 0
-    for _, sample in ipairs(samples) do
-        local magnitude = math.abs(sample.rollRate or 0)
-        if magnitude > peak then peak = magnitude end
-    end
-    if peak <= 0 then return nil, peak end
-
-    local target = peak / math.exp(1)
-    -- The first time it drops below the target AND STAYS below for a second:
-    -- a single sample dipping through zero mid-oscillation is not decay.
-    for index, sample in ipairs(samples) do
-        if math.abs(sample.rollRate or 0) <= target then
-            local stayed, checked = true, 0
-            for ahead = index, #samples do
-                if samples[ahead].t - sample.t > 1.0 then break end
-                checked = checked + 1
-                if math.abs(samples[ahead].rollRate or 0) > target then
-                    stayed = false
-                    break
-                end
-            end
-            if stayed and checked > 1 then
-                return sample.t - samples[1].t, peak
-            end
-        end
-    end
-    return nil, peak
-end
-
 local function peakAbsRoll(samples)
     local peak = 0
     for _, sample in ipairs(samples) do
@@ -475,16 +426,21 @@ local function report(off, on)
     note("== RESULT ==")
     note("")
 
-    local offCrossings, onCrossings = zeroCrossings(off), zeroCrossings(on)
-    local offDecay, offPeak = decayTime(off)
-    local onDecay, onPeak = decayTime(on)
+    local offCrossings, onCrossings = rolldamp.zeroCrossings(off), rolldamp.zeroCrossings(on)
+    local offDecay, offPeak = rolldamp.decayTime(off)
+    local onDecay, onPeak = rolldamp.decayTime(on)
 
     note("                        DAMPER OFF     DAMPER ON")
     note(string.format("  samples               %8d      %8d", #off, #on))
     note(string.format("  peak roll rate        %8.3f      %8.3f  deg/s", offPeak or 0, onPeak or 0))
     note(string.format("  peak |roll|           %8.2f      %8.2f  deg",
         peakAbsRoll(off), peakAbsRoll(on)))
-    note(string.format("  zero crossings        %8d      %8d", offCrossings, onCrossings))
+    note(string.format("  zero crossings        %8d      %8d  (above %.2f deg/s)",
+        offCrossings, onCrossings, rolldamp.DEFAULTS.deadbandRate))
+    -- Said out loud every run, because it reads like a verdict and is not one.
+    note("      (crossings are AMPLITUDE-BLIND: a damper that arrests the big")
+    note("       swing early then drifts across zero at a tenth the amplitude")
+    note("       scores WORSE here. Peak excursion and decay carry the result.)")
     note(string.format("  time to 1/e           %8s      %8s  s",
         offDecay and string.format("%.1f", offDecay) or "never",
         onDecay and string.format("%.1f", onDecay) or "never"))
@@ -509,6 +465,26 @@ local function report(off, on)
         return
     end
 
+    -- THE AUTHORITY, re-measured from the undamped pulse. Free, independent of
+    -- the damping result, and the one number the damper's gain rests on.
+    local measured, peak, seconds =
+        rolldamp.authorityFromPulse(off, plan.pulseRpm, plan.pulseSeconds)
+    local stored = rolldamp.MEASURED.flightAuthorityPerRpm
+    if measured then
+        local drift = (measured - stored) / stored
+        note(string.format("  AUTHORITY, re-measured from the undamped pulse:"))
+        note(string.format("    %.4f deg/s^2 per rpm  (%+.1f%% vs the stored %.4f)",
+            measured, drift * 100, stored))
+        note(string.format("    %d rpm reached %.3f deg/s in %.1f s",
+            plan.pulseRpm, peak, seconds))
+        if math.abs(drift) > 0.20 then
+            note("    ** That is more than 20% from the figure the damper's gain")
+            note("    ** uses. Either this run is unusual or the stored value is")
+            note("    ** stale -- re-measure before trusting the damping result.")
+        end
+        note("")
+    end
+
     -- The comparison is only meaningful if both halves started alike.
     if (offPeak or 0) > 0 and (onPeak or 0) > 0 then
         local ratio = math.abs((onPeak - offPeak) / offPeak)
@@ -526,9 +502,10 @@ local function report(off, on)
     elseif offDecay and onDecay and onDecay < offDecay * 0.7 then
         note(string.format("  DAMPED. Decay went %.1f s -> %.1f s, a %.0f%% improvement.",
             offDecay, onDecay, (1 - onDecay / offDecay) * 100))
-    elseif onCrossings < offCrossings then
-        note("  PARTIAL. Decay did not clearly improve, but the damped half")
-        note(string.format("  crossed zero %d times against %d.", onCrossings, offCrossings))
+    elseif peakAbsRoll(on) < peakAbsRoll(off) * 0.8 then
+        note(string.format("  PARTIAL. Decay did not clearly improve, but the damped half"
+            .. " went %.1f deg against %.1f -- the craft physically travelled less.",
+            peakAbsRoll(on), peakAbsRoll(off)))
     else
         note("  NO EFFECT MEASURED. Before blaming the law, check the SIGN:")
         note("  a damper with the sign wrong drives the oscillation, and that")

@@ -212,6 +212,103 @@ function rolldamp.newRateEstimator(options)
     return estimator
 end
 
+-- ---------------------------------------------------------------------------
+-- Reading a flight back
+-- ---------------------------------------------------------------------------
+
+-- WITH HYSTERESIS, and the first flight is why.
+--
+-- The naive version counted every sign flip. A damped trace ENDS near zero and
+-- jitters across it -- -0.00, 0.01, 0.03 -- so run 1 reported 4 crossings
+-- damped against 3 undamped, which reads as "the damper made it worse" when
+-- what it actually measured was the damper having finished. A crossing only
+-- counts once the rate has genuinely gone somewhere since the last one.
+--
+-- The floor is the damper's own deadband: below that the damper is not acting,
+-- so motion below it is not oscillation the damper is failing to stop.
+function rolldamp.zeroCrossings(samples, floor)
+    floor = floor or rolldamp.DEFAULTS.deadbandRate
+    local crossings, armedSign = 0, nil
+    for _, sample in ipairs(samples) do
+        local rate = sample.rollRate
+        if rate and math.abs(rate) >= floor then
+            local sign = rate > 0 and 1 or -1
+            if armedSign and sign ~= armedSign then
+                crossings = crossings + 1
+            end
+            armedSign = sign
+        end
+    end
+    return crossings
+end
+
+-- Re-measure the authority from the pulse that started the UNDAMPED half.
+--
+-- A clean measurement falls out of the disturbance for free: a known
+-- differential held for a known time from rest, and the rate it produced. The
+-- header of this file claimed it did this from the day it was written and it
+-- did not -- run 1's 0.0900 was worked out by hand afterwards, which is exactly
+-- the sort of thing that stops happening the moment nobody remembers to.
+--
+-- Peak rate rather than rate at release, because the props do not stop the
+-- instant the command does: run 1 kept accelerating for 1.4 s after release
+-- while the RSC spun down. Measuring to the peak captures the whole impulse;
+-- using the release instant alone understates the time and so overstates the
+-- authority.
+function rolldamp.authorityFromPulse(samples, pulseRpm, pulseSeconds)
+    if #samples == 0 or not pulseRpm or pulseRpm == 0 then return nil end
+
+    local peak, peakAt = 0, 0
+    for _, sample in ipairs(samples) do
+        local magnitude = math.abs(sample.rollRate or 0)
+        if magnitude > peak then
+            peak, peakAt = magnitude, sample.t
+        end
+    end
+    if peak <= 0 then return nil end
+
+    -- t is measured from release, so the impulse ran for the pulse itself plus
+    -- however long the rate kept climbing afterwards.
+    local effectiveSeconds = pulseSeconds + math.max(peakAt, 0)
+    if effectiveSeconds <= 0 then return nil end
+    return (peak / effectiveSeconds) / math.abs(pulseRpm), peak, effectiveSeconds
+end
+
+-- Time for |roll rate| to fall to 1/e of its starting value, read off the
+-- running peak rather than fitted. A fit would imply a model of the decay
+-- shape; this asks only "when did it get small", which is what the comparison
+-- needs and is robust to the shape being wrong.
+function rolldamp.decayTime(samples)
+    if #samples == 0 then return nil end
+    local peak = 0
+    for _, sample in ipairs(samples) do
+        local magnitude = math.abs(sample.rollRate or 0)
+        if magnitude > peak then peak = magnitude end
+    end
+    if peak <= 0 then return nil, peak end
+
+    local target = peak / math.exp(1)
+    -- The first time it drops below the target AND STAYS below for a second:
+    -- a single sample dipping through zero mid-oscillation is not decay.
+    for index, sample in ipairs(samples) do
+        if math.abs(sample.rollRate or 0) <= target then
+            local stayed, checked = true, 0
+            for ahead = index, #samples do
+                if samples[ahead].t - sample.t > 1.0 then break end
+                checked = checked + 1
+                if math.abs(samples[ahead].rollRate or 0) > target then
+                    stayed = false
+                    break
+                end
+            end
+            if stayed and checked > 1 then
+                return sample.t - samples[1].t, peak
+            end
+        end
+    end
+    return nil, peak
+end
+
 -- Per-corner RPM for a base setting and a differential.
 --
 -- Positive differential raises the PORT corners, which is a positive roll

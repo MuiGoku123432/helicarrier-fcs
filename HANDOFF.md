@@ -39,21 +39,69 @@ gathering real data over perfecting the offline harness — but see
 
 ## START HERE: what to do first
 
-**The roll damper is calibrated. Build it.**
+**THE ROLL DAMPER WORKS. It flew 2026-08-27 and it damps.**
+
+`flight-logs/rolldampflight_run1.txt`, A/B on an injected 3 rpm pulse, damper
+off then on, same disturbance both halves:
+
+| | DAMPER OFF | DAMPER ON | |
+|---|---|---|---|
+| peak roll rate | 1.184 | 1.096 | deg/s -- **7.4% apart, so comparable** |
+| **peak roll excursion** | **5.58** | **3.43** | deg -- **39% less** |
+| time to 1/e | 4.6 | 2.8 | s -- **40% faster** |
+
+The excursion is the number that matters: the craft physically went a third
+less far over from the same kick.
+
+**And the pulse re-measured the authority for free: 0.0897 deg/s^2 per rpm,
+4.5% below the stored 0.0941.** That is a FOURTH measurement, from a different
+manoeuvre, agreeing with the three that set the value -- and it is inside the
+7.7% spread of those three.
 
     roll authority = 0.0941 deg/s^2 per RPM of differential propeller RPM
     critical damping (0.2987) is reached at 3.2 rpm; the clamp is 4
-
-Three measurements, two flights, two rpm levels, spread 7.7%:
 
 | measurement | per rpm | vs mean |
 |---|---|---|
 | 2 rpm pair | 0.0910 | -3.3% |
 | 3 rpm pair | 0.0931 | -1.1% |
 | 3 rpm pair, next flight | 0.0983 | +4.4% |
+| **run 1 pulse, damper flight** | **0.0897** | **-4.7%** |
 
-That clears the two-runs-within-a-few-percent bar, and it is the number
-nineteen axis-response flights never produced for the ions.
+### Two things run 1 changed, beyond "it works"
+
+**THE HULL DAMPS ITSELF MORE THAN THIS DOCUMENT SAYS.** Undamped, roll went
++5.57 -> -0.72 -> +0.44: an 87% amplitude drop in the FIRST half cycle, with a
+period near 35 s rather than the recorded 42 s. "5 zero crossings over 105 s"
+reads as barely damped, and that is not what run 1 flew. Whatever the strafe
+is, roll is not an undamped oscillator -- which lowers how much a damper is
+expected to buy, and is worth re-deriving `springPerDegree` from.
+
+**THE DAMPER LEAVES A STANDING OFFSET.** The damped half arrested the swing and
+then sat at ~1.9 degrees for the rest of the window. That is correct and
+designed -- it damps RATE and does not level -- but it means the damper alone
+does not put the craft flat. **Trim is now the blocking piece**, and it belongs
+on the bearings: 0.63 deg of tilt cancels the roll offset. See open item 2.
+
+### The instrument was wrong twice, and both are fixed
+
+Neither was visible in the verdict, which said DAMPED correctly:
+
+1. **Zero crossings counted noise.** It reported 4 damped against 3 undamped --
+   reading as "worse" -- by tallying sign flips of a trace that had FINISHED and
+   was sitting at zero. Now counted with hysteresis above the damper's own
+   deadband. But the honest limit is pinned as a test: **crossings are
+   amplitude-blind** and still score the damped half worse, because it arrests
+   the big swing early and then drifts across zero at a tenth the amplitude.
+   Peak excursion and decay carry the result; crossings are a diagnostic.
+2. **The tool claimed the pulse re-measured the authority and it never did.**
+   Run 1's 0.0897 was worked out by hand afterwards. It is computed and printed
+   now, with a warning if a run drifts more than 20% from the stored figure.
+
+`rolldamp.zeroCrossings`, `decayTime` and `authorityFromPulse` are pure module
+functions pinned to **run 1's actual logged trace** in `tools/test_rolldamp.lua`
+-- including an assertion that the naive count called the damped half worse, so
+the bug cannot come back unnoticed.
 
 **FR was not the problem, and that is now measured.** The premise this
 document carried for a session -- "FR has needed two attempts on nearly every
@@ -309,25 +357,14 @@ ratio check is two-sided, and there is a per-axis absolute ceiling.
 
 ### After that
 
-1. **FLY `/fcs/rolldampflight.lua`.** Written, harness-flown, deployed; never
-   flown on the craft. Ground check first:
+1. **~~Fly the roll damper~~ DONE 2026-08-27 -- it damps.** See START HERE.
+   `/fcs/rolldampflight.lua` re-flies the A/B any time; `--ground-only` is safe
+   and prints the law, the sign and a live rate without commanding anything.
 
-       /fcs/rolldampflight.lua --ground-only     prints the law, the sign, live rate
-       /fcs/rolldampflight.lua                   the A/B
-
-   It pulses +3 rpm differential for 3 s, releases, and logs 40 s -- once with
-   the damper OFF, once ON -- then compares decay time and zero crossings from
-   the same disturbance. Result to `/fcs/rolldampflight_result.txt`.
-
-   **Read the verdict before believing the numbers.** It reports NO DISTURBANCE
-   if the pulse did not move the craft (a different and larger problem than a
-   weak damper), refuses the comparison if the two halves started more than 25%
-   apart, and aborts with a SIGN diagnosis if the damper drives the oscillation.
-   All three are reproduced offline.
-
-   *Do NOT put the damper on the bearings.* That was this document's
-   long-standing advice and the measurements retired it -- see the actuator
-   survey in START HERE. Bearings trim and translate; RPM damps.
+   **What is left on roll is TRIM, not damping.** The damped half settled at a
+   ~1.9 degree standing offset and stayed there, because this damps rate and
+   does not level. That is item 3 below, and it is now the blocking piece for
+   flying the craft flat.
 
 2. **Measure the pitch spring, then add pitch damping.** Only roll's 42 s
    period was ever measured, and the pitch offset is the larger of the two.
