@@ -344,6 +344,58 @@ local function lateralCheck(rpm)
     note(string.format("  geometry predicts %9.1f from the live thrust  (%.1f%% of measured)",
         predicted, reading.force.lateralOfSum > 0
             and (predicted / reading.force.lateralOfSum * 100) or 0))
+
+    -- ALL FOUR CORNERS, THE WAY A FLIGHT COMMANDS THEM.
+    --
+    -- Everything above tilts ONE corner, which is what makes it safe -- and it
+    -- is not the command any flight tool sends. /fcs/velocityholdflight.lua
+    -- measured a craft whose bearings never moved while this same ground check
+    -- reported a clean 8.00 on FL, and the difference between the two is that
+    -- the flight tilts all four at once. So do that here, on the ground, and
+    -- read every corner back.
+    note("")
+    note("  -- the same command to ALL FOUR corners, as a flight sends it --")
+    for _, each in ipairs(flight.CORNERS) do
+        banks.send(each, "set_tilt", {
+            angle = plan.tiltDegrees, azimuth = plan.tiltAzimuth,
+            bearing = nil, mirror = true,
+        })
+    end
+    commandedTilt = true
+    waitSeconds(plan.tiltSettleSeconds)
+
+    local answered, shown = 0, {}
+    for _, each in ipairs(flight.CORNERS) do
+        local pod = banks.getState()[each]
+        local prop = pod and pod.prop
+        local angle = prop and prop.tiltAngle
+        local active = prop and prop.active
+        shown[#shown + 1] = string.format("%s %s%s", each,
+            type(angle) == "number" and string.format("%.2f", angle) or "--",
+            active and "" or "(inactive)")
+        if type(angle) == "number" and math.abs(angle) >= plan.tiltDegrees * 0.5 then
+            answered = answered + 1
+        end
+    end
+    note("    " .. table.concat(shown, "   "))
+
+    for _, each in ipairs(flight.CORNERS) do
+        banks.send(each, "set_tilt",
+            { angle = 0, azimuth = 0, bearing = nil, mirror = true })
+    end
+    waitSeconds(0.5)
+    commandedTilt = false
+
+    if answered == #flight.CORNERS then
+        note("    all four answered. A flight-shaped tilt command works on the")
+        note("    ground, so a flight that measures no response is not being")
+        note("    refused by the pods.")
+    else
+        note(string.format("    ** ONLY %d OF %d ANSWERED a flight-shaped command, where the",
+            answered, #flight.CORNERS))
+        note("    ** single-corner command above worked. That is the difference")
+        note("    ** between this check and the flight that measured nothing.")
+    end
     if verdict ~= vectoring.ADDS then
         note("  ** NOT ADDING at flight rpm. Every gain below describes a force")
         note("  ** the craft does not feel. Stop and re-run vectorprobe.")
