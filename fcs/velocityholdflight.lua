@@ -86,6 +86,23 @@ local plan = {
     -- so the AC averages out and the DC drift is what remains.
     averageSeconds = 15,
 
+    -- HOW OFTEN A SET-AND-HOLD COMMAND IS RE-SENT.
+    --
+    -- set_tilt and set_rpm have NO watchdog pod-side -- "it is set-and-hold"
+    -- (pod/main.lua) -- so re-sending them every 0.15 s sample buys nothing
+    -- except traffic: 4 corners x 2 command types x 6.7 Hz is about 107
+    -- messages a second on top of the ion keepalive.
+    --
+    -- MEASURED CONSEQUENCE. The ground sweep sends one set_tilt and waits, and
+    -- all four corners answer 8.00. This tool re-sent at the sample rate and
+    -- all four answered 0.00, on the same craft, twenty minutes apart -- while
+    -- the pods logged 72 COMMAND_TIMEOUTs, meaning ion commands were not
+    -- getting through inside 750 ms either. One saturated link explains both.
+    --
+    -- A dropped set-and-hold command still needs re-sending; it does not need
+    -- re-sending seven times a second. Any CHANGE goes out immediately.
+    resendPeriodMs = 1000,
+
     abortSpeed = velocityhold.DEFAULTS.abortSpeed,
     abortTilt = velocityhold.DEFAULTS.abortTilt,
     groundedGain = 0.6,
@@ -146,7 +163,17 @@ end
 -- Fire and forget, mirrored, re-sent every loop -- the link drops a few percent
 -- and set_tilt is set-and-hold, so the loop IS the retry. A blocking waiter
 -- here would be a full second of silence per corner.
+local lastTiltSentAt, tiltMessages = 0, 0
+
 local function commandTilt(starboard, bow)
+    local now = os.epoch("utc")
+    local changed = math.abs(starboard - applied.starboard) > 1e-6
+        or math.abs(bow - applied.bow) > 1e-6
+    -- Unchanged and recently sent: nothing to say. The pods hold it.
+    if not changed and (now - lastTiltSentAt) < plan.resendPeriodMs then
+        return
+    end
+
     local magnitude = math.sqrt(starboard * starboard + bow * bow)
     local heading = math.deg(math.atan2(starboard, bow))
     local azimuth = lateralhold.azimuthForHeading(heading)
@@ -154,12 +181,19 @@ local function commandTilt(starboard, bow)
         banks.send(corner, "set_tilt", {
             angle = magnitude, azimuth = azimuth, bearing = nil, mirror = true,
         })
+        tiltMessages = tiltMessages + 1
     end
     applied.starboard, applied.bow = starboard, bow
+    lastTiltSentAt = now
     if magnitude > 0 then commandedTilt = true end
 end
 
 local function clearTilt()
+    -- Never throttled. Clearing the tilt is the one command that must not wait
+    -- on a resend window, and it resets the throttle so the next command is
+    -- seen as a change.
+    applied.starboard, applied.bow = 0, 0
+    lastTiltSentAt = 0
     for _, corner in ipairs(flight.CORNERS) do
         banks.send(corner, "set_tilt",
             { angle = 0, azimuth = 0, bearing = nil, mirror = true })
@@ -167,11 +201,23 @@ local function clearTilt()
     applied.starboard, applied.bow = 0, 0
 end
 
+local lastPropsSentAt, lastDifferential, propMessages = 0, nil, 0
+
 local function commandProps(rollRate)
     local differential = rollRate and rolldamp.differentialFor(rollRate) or 0
-    session:sendProps(rolldamp.cornerRpm(plan.propRpm, differential,
-        { minimumRpm = config.propeller.minimumRpm }))
-    commandedProps = true
+    local now = os.epoch("utc")
+    -- The differential is an INTEGER, so "changed" is exact and the damper
+    -- still gets every command it asks for the instant it asks. What is
+    -- throttled is repeating a number the pods already hold.
+    if differential ~= lastDifferential
+        or (now - lastPropsSentAt) >= plan.resendPeriodMs then
+        session:sendProps(rolldamp.cornerRpm(plan.propRpm, differential,
+            { minimumRpm = config.propeller.minimumRpm }))
+        propMessages = propMessages + #flight.CORNERS
+        lastPropsSentAt = now
+        lastDifferential = differential
+        commandedProps = true
+    end
     return differential
 end
 
@@ -253,6 +299,10 @@ local function confirmTilt(magnitude)
         commandProps(feed(state, now))
         commandTilt(magnitude, 0)
     end)
+
+    note(string.format("    outgoing during the check: %d tilt + %d rpm messages"
+        .. " (%.0f/s)", tiltMessages, propMessages,
+        (tiltMessages + propMessages) / 6))
 
     local reported, missing = tiltReadback()
     local shown, confirmed = {}, 0

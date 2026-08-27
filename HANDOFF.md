@@ -314,7 +314,41 @@ flight-shaped command -- all four corners, same angle, same mirror -- and all
 four answer 8.00 (`flight-logs/bearingsweep_run4_allcorners.txt`). The pods are
 not refusing anything.
 
-**Root cause of the starvation not yet established.** A bearing only obeys a manual target while
+**RUN 2 REPRODUCED IT IN TEN SECONDS**
+(`flight-logs/velocityholdflight_run2_tiltrefused.txt`). The confirmation gate
+fired: `reported tilt: FL 0.00 FR 0.00 RL 0.00 RR 0.00`. So the craft gives a
+clean A/B on itself:
+
+| | set_tilt sent | all four report |
+|---|---|---|
+| **ground**, `/fcs/bearingsweep.lua` | ONCE, then wait | **8.00** |
+| **flight**, velocity tool | every 0.15 s sample | **0.00** |
+
+Same craft, twenty minutes apart, same command shape.
+
+**THE LIKELY CAUSE IS TRAFFIC.** `set_tilt` and `set_rpm` have NO watchdog
+pod-side -- "it is set-and-hold" (`pod/main.lua`) -- so re-sending them every
+sample buys nothing but load: 4 corners x 2 command types x 6.7 Hz is about
+**107 messages a second** on top of the ion keepalive. One saturated link
+explains both symptoms at once -- the tilt never arriving AND ion commands
+missing their 750 ms watchdog.
+
+`Session:hold`'s own header records the same failure from the other side: "a
+200 ms keepalive silently became ~550 ms against a 750 ms watchdog and produced
+79 straight COMMAND_TIMEOUT faults."
+
+**FIXED IN THE VELOCITY TOOL:** set-and-hold commands are re-sent at most once
+a second, and immediately on any CHANGE -- so the damper still gets every
+command the instant it asks. 107 messages/s down to about 9. The tool reports
+the achieved rate during the confirmation.
+
+**NOT YET DONE, and worth doing:** `trimflight.lua` and `pitchdampflight.lua`
+re-send at the sample rate too. trimflight's probe worked at 09:49 and the
+velocity tool failed at 13:43 and 15:08 on the same pattern, so the margin is
+thin rather than absent. Give them the same throttle before trusting a long
+window from either.
+
+ A bearing only obeys a manual target while
 it is ACTIVE -- "at 0 RPM the target is stored and completely ignored:
 getTiltAngle stays 0 and getThrustVector does not move" (`props.lua`) -- and
 this tool read neither `prop.active` nor the achieved `prop.tiltAngle`.
