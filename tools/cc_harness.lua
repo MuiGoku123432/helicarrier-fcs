@@ -208,6 +208,11 @@ harness.model = {
     bearingTiltRollPerDegree = 0.011,
     bearingTiltPitchPerDegree = 0.011,
     bearingCouplingSign = 1,
+    -- THE TWO AXES DISAGREE ON THE CRAFT, measured 2026-08-27: roll -0.8205
+    -- hull deg per commanded deg, pitch +0.5588. A single sign for both cannot
+    -- represent that, and the craft is the thing the harness is supposed to
+    -- resemble. Defaults to the roll sign so no existing runner changes.
+    bearingCouplingSignPitch = nil,
     -- DOES LATERAL FORCE SCALE WITH RPM? The reported thrust does -- exactly
     -- linear, r^2 = 1.000000 from 8 to 96 RPM -- and the lateral force is
     -- built out of that same reading. But fcs/trim.lua and
@@ -539,8 +544,9 @@ local function stepRotation(dt)
     local couplingSign = harness.model.bearingCouplingSign or 1
     craft.rollRate = craft.rollRate
         + couplingSign * harness.model.bearingTiltRollPerDegree * tiltStarboard * dt
+    local couplingSignPitch = harness.model.bearingCouplingSignPitch or couplingSign
     craft.pitchRate = craft.pitchRate
-        + couplingSign * harness.model.bearingTiltPitchPerDegree * tiltBow * dt
+        + couplingSignPitch * harness.model.bearingTiltPitchPerDegree * tiltBow * dt
 
     -- Optional restoring moment (returns toward level) and angular damping
     -- (opposes rate). Both zero unless a runner turns them on.

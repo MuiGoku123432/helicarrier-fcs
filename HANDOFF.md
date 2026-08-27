@@ -1,7 +1,10 @@
 # Helicarrier FCS — session handoff
 
-Last updated: 2026-08-27 (evening). **THE CURVE IS SOLVED, AND IT IS ONE
-OSCILLATOR: ROLL.** Read **THE DRIFT ANALYSIS**. Also: **three archived flight
+Last updated: 2026-08-27 (evening). **LAYER 2 IS BUILT:
+`/fcs/velocityholdflight.lua`.** And the reason every previous attempt at
+station keeping failed is now a measurement rather than a mystery -- **the
+actuator is INVERTED AND SLOW**; see **THE VELOCITY LOOP**.
+**THE CURVE IS SOLVED, AND IT IS ONE OSCILLATOR: ROLL.** Read **THE DRIFT ANALYSIS**. Also: **three archived flight
 logs have TRANSPOSED angle columns**, including the passive drift flight this
 document's standing offsets come from. **PITCH IS NOT AN UNDAMPED AXIS -- it
 is overdamped and it levels itself, so it wants no damper.** The pitch flight
@@ -81,7 +84,9 @@ oscillation, seen from above.
               roll: FLOWN AND WORKING.  pitch: DOES NOT NEED IT (measured).
 
     layer 2   VELOCITY HOLD      seconds   bearing common-mode tilt
-              never flown. fcs/lateralhold.lua implements it, 73 assertions.
+              BUILT, not yet flown: fcs/velocityhold.lua +
+              /fcs/velocityholdflight.lua. The actuator is INVERTED
+              and SLOW -- see THE VELOCITY LOOP before touching it.
 
     layer 3   ATTITUDE REFERENCE slow, weak, subordinate to layer 2
 
@@ -110,7 +115,11 @@ separation and the two loops chase each other.
    Pitch does not ring -- it is OVERDAMPED and it levels itself. No damper
    wanted. See **THE PITCH FLIGHT**. What replaces this: *what actually
    rotates the tilt vector*, since it is not an undamped pitch axis.
-3. **FLY VELOCITY HOLD** with the calibrated gain.
+3. **FLY VELOCITY HOLD -- `/fcs/velocityholdflight.lua`, BUILT AND WAITING.**
+   `--ground-only` first: it prints the plant, which is worth reading before
+   committing to air. Then `--measure-only` (phase A, ~5 min) measures the NET
+   gain per axis; the full run adds the A/B (~9 min). See **THE VELOCITY
+   LOOP**.
 4. Only then ask whether any standing trim is still wanted. Probably not.
 
 ### What has FLOWN and works
@@ -195,6 +204,79 @@ design failed by asking one of them to do a job it is structurally incapable of.
 - **Pods push full telemetry at ~1 Hz and are never polled while healthy.**
   Steady-state pod-directed traffic is zero from any number of tabs.
 - **`/fcs-dev.lua` (the monitor hub) is still NOT deployed.**
+
+### THE VELOCITY LOOP -- the actuator is INVERTED and SLOW
+
+Built 2026-08-27: `fcs/velocityhold.lua` and `/fcs/velocityholdflight.lua`.
+Not yet flown.
+
+#### THE PLANT, and why every previous attempt ran away
+
+A commanded bearing tilt does two things to the craft's velocity, and as of
+today both halves are measured:
+
+| | | |
+|---|---|---|
+| **direct**, and it is **FAST** | the bearings make a horizontal force | **+0.8165** blocks/s per commanded deg |
+| **through the hull**, and it is **SLOW and BIGGER** | the same command rolls the craft, and a leaning hull points its lift sideways | roll **-1.751**, pitch **-1.192** |
+
+    roll axis    +0.8165 - 1.7505  =  NET -0.934 blocks/s per commanded degree
+    pitch axis   +0.8165 - 1.1921  =  NET -0.376
+
+**A tilt commanded to push the craft starboard moves it PORT** once the hull
+catches up -- after moving it starboard for the first few seconds. The direct
+force arrives with drag's 11 s time constant; the hull term arrives on the
+hull's own, and roll rings at 32.7 s.
+
+**THAT SIGN CHANGE BETWEEN FAST AND SLOW IS THE 1.76 -> 11.5 BLOCKS/S
+RUNAWAY.** A loop that closes quickly is closing on the fast half, which is the
+half with the wrong sign: it sees the craft move the right way, watches it
+reverse, and answers by commanding harder. It is no longer a mystery and it
+does not need a special mode to avoid -- it needs a slow loop.
+
+#### WHAT THE TOOL DOES ABOUT IT
+
+- **Phase A measures the NET per axis**, by reverse pairs, with 35 s settles so
+  the hull has finished moving -- a short settle measures the fast half and
+  gets the SIGN backwards. It also records the first 6 s of the reversal, so
+  the inversion appears in the log as a measurement rather than as a claim in
+  a comment.
+- **Phase B rate-limits the command to 0.05 deg/s.** A full 4 degree command
+  takes 80 s to build, against the hull's ~30 s response, so the loop cannot
+  outrun the half of the plant that makes it stable. This is the single most
+  important line in the file.
+- **The loop acts on a 15 s MEAN velocity, not a reading.** The velocity
+  carries the hull's 32.7 s oscillation, and commanding against the swing
+  injects energy: in the harness the loop acted properly, averaged a quarter
+  degree of tilt, and left the craft drifting twice as fast until the mean was
+  put in front of it.
+- **It refuses** below a net gain of 0.10 blocks/s per degree. Dividing a drift
+  by a gain that small is a saturated command derived from noise.
+- **Judged on NET DISPLACEMENT**, never mean ground speed -- trim run 1 was
+  judged on mean speed and could not be.
+
+`velocityhold.lua` stores no gain. The net is built from the bearing thrust and
+the craft's mass, both of which move when the hull is loaded.
+
+#### TWO THINGS THE HARNESS CAUGHT, both of them mine
+
+- The baseline window opened the instant phase A's last 2 degree probe was
+  released, so it measured a craft still coasting out of a commanded tilt --
+  0.519 blocks/s on a craft whose standing drift is nearer 1.0 -- and the loop
+  was then blamed for the craft returning to normal. `trimflight` settles
+  before its baseline; this did not. It does now.
+- A "WORSE, 108% MORE" verdict on a run where the loop ended at +0.015 deg.
+  **Attribution requires action**: if the loop did not act, the A/B says
+  nothing about the loop, whatever the two numbers did. There is a guard for
+  that now.
+
+#### WHAT THIS SUPERSEDES
+
+`fcs/lateralhold.lua` answered the runaway by making ROLL the controlled
+variable and tilt the thing that holds it -- a reasonable response to an
+unexplained event. With the plant measured the simpler statement is that the
+actuator is inverted and slow, and a loop that respects both works. lateralhold
+remains the truth about azimuths and body velocity and is used by the new code.
 
 ### THE DRIFT ANALYSIS -- 2026-08-27, from the CSVs, no flight required
 
@@ -531,6 +613,13 @@ prints the per-corner thrust spread, which is where that check would start.
   oscillation contributes even when the mean velocity is zero. Run 1 of the
   trim was judged on it and could not be. Use NET DISPLACEMENT over the window.
 - **Do not chase FR.** It answered 20 of 20. The per-pod hunt is over.
+- **Do not close a fast loop on the bearings.** The actuator's fast half has
+  the OPPOSITE sign to its slow half. That is the runaway, measured. Rate-limit
+  the command and feed the loop a mean, not a reading.
+- **Do not open a measurement window straight after releasing a command.** The
+  craft is still coasting out of it. Settle first -- trimflight always did, and
+  the velocity tool's first version did not and blamed its own loop for the
+  difference.
 - **Do not read `roll_deg` / `pitch_deg` out of an archived CSV.** Three of the
   logged flights predate the axis fix and have the two columns swapped.
   Recompute from `quaternion_*` -- `tools/analyse_drift.lua` does, and reports

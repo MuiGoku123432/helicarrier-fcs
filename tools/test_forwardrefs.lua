@@ -28,6 +28,7 @@ local FILES = {
     "fcs/trim.lua", "fcs/trimflight.lua",
     "fcs/bearinggain.lua", "fcs/bearingsweep.lua",
     "fcs/pitchdamp.lua", "fcs/pitchdampflight.lua",
+    "fcs/velocityhold.lua", "fcs/velocityholdflight.lua",
     "tools/analyse_drift.lua",
     -- The harness too. It is not flight code, but the rule is the same and it
     -- has now cost a run: commandedTilt() was called from stepRotation fifty

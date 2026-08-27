@@ -30,6 +30,7 @@ local FILES = {
     "fcs/trim.lua", "fcs/trimflight.lua",
     "fcs/bearinggain.lua", "fcs/bearingsweep.lua",
     "fcs/pitchdamp.lua", "fcs/pitchdampflight.lua",
+    "fcs/velocityhold.lua", "fcs/velocityholdflight.lua",
     "tools/analyse_drift.lua",
     -- Pod code is deployed flight code too, and it is the half that runs
     -- with nobody watching the screen.
