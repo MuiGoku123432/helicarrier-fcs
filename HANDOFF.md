@@ -1,9 +1,10 @@
 # Helicarrier FCS — session handoff
 
-Last updated: 2026-08-26 (evening). THE ACTUATOR SURVEY IS FINISHED and the
-roll damper is calibrated at 0.0941 deg/s^2 per rpm of differential propeller
-RPM. Ions cannot do attitude; bearings cannot damp; RPM cannot trim. Each of
-those is measured, not argued.
+Last updated: 2026-08-27. THE ROLL DAMPER HAS FLOWN AND IT WORKS. The bearing
+coupling signs are measured at last -- and they DISAGREE between axes. Trim
+levels the craft and does NOT fix the drift, which is measured rather than
+argued and which changed the plan: **the drift fix is a closed loop on
+VELOCITY, not on tilt.** Read THE STRATEGY in START HERE before anything else.
 Written for a fresh session picking this up cold. Rewritten rather than
 patched: superseded findings are REMOVED, not annotated, except where the wrong
 answer is instructive. Keep it that way.
@@ -39,236 +40,197 @@ gathering real data over perfecting the offline harness — but see
 
 ## START HERE: what to do first
 
-**THE ROLL DAMPER WORKS. It flew 2026-08-27 and it damps.**
+Three actuators are now measured AND two of them have flown. The craft damps
+its roll, holds altitude, levels its hull on command, and talks to its pods
+without losing anything. What it still does is **drift**, and the plan for that
+changed on 2026-08-27 when the obvious fix was flown and did not work.
 
-`flight-logs/rolldampflight_run1.txt`, A/B on an injected 3 rpm pulse, damper
-off then on, same disturbance both halves:
+### THE STRATEGY, and it is a reframe
 
-| | DAMPER OFF | DAMPER ON | |
+**STOP TRYING TO FIX DRIFT THROUGH ATTITUDE.** That was the implicit plan for
+this document's whole history. Two flights killed it: the only actuator with
+the resolution to trim tilt is also a strong lateral thruster, so it pushes the
+craft about as hard as the tilt it removes. **Trim is drift-neutral by
+construction.**
+
+The drift is TWO separable problems wanting DIFFERENT actuators:
+
+| | what sets it | actuator | closed on |
 |---|---|---|---|
-| peak roll rate | 1.184 | 1.096 | deg/s -- **7.4% apart, so comparable** |
-| **peak roll excursion** | **5.58** | **3.43** | deg -- **39% less** |
-| time to 1/e | 4.6 | 2.8 | s -- **40% faster** |
+| **speed** (1.2-1.7 blocks/s) | tilt magnitude against drag -> terminal velocity | bearing tilt | **velocity** |
+| **direction** (the -225 deg curve) | roll and pitch oscillating OUT OF PHASE, so the tilt vector rotates | differential prop RPM | **rate** |
 
-The excursion is the number that matters: the craft physically went a third
-less far over from the same kick.
+The curve is not a separate mystery from the oscillation. It IS the
+oscillation, seen from above.
 
-**And the pulse re-measured the authority for free: 0.0897 deg/s^2 per rpm,
-4.5% below the stored 0.0941.** That is a FOURTH measurement, from a different
-manoeuvre, agreeing with the three that set the value -- and it is inside the
-7.7% spread of those three.
+#### Three layers, separated by TIMESCALE
 
-    roll authority = 0.0941 deg/s^2 per RPM of differential propeller RPM
-    critical damping (0.2987) is reached at 3.2 rpm; the clamp is 4
+    layer 1   RATE DAMPING       ~0.15 s   differential prop RPM
+              roll: FLOWN AND WORKING.  pitch: DOES NOT EXIST.
 
-| measurement | per rpm | vs mean |
+    layer 2   VELOCITY HOLD      seconds   bearing common-mode tilt
+              never flown. fcs/lateralhold.lua implements it, 73 assertions.
+
+    layer 3   ATTITUDE REFERENCE slow, weak, subordinate to layer 2
+
+**A velocity loop makes trim REDUNDANT.** Holding velocity at zero does not
+care what the standing tilt is -- the loop commands whatever tilt cancels the
+drift, INCLUDING the drift the standing tilt causes. Trim was worth flying
+because it measured the coupling signs layer 2 needs. It should not survive as
+a control layer.
+
+**Why the layers do not fight: timescale separation.** A velocity command tilts
+the bearings, which rolls the craft -- there is no pure attitude channel, that
+is measured. The damper absorbs it because it is ~40x faster. Break the
+separation and the two loops chase each other.
+
+#### Do these in this order
+
+1. **CALIBRATE THE BEARING LATERAL GAIN AT FLIGHT RPM.** One window, ~2 min.
+   Hull held level by the damper, a known bearing tilt commanded at 64 rpm,
+   terminal net drift read off. Everything in layer 2 scales with this number
+   and it is currently uncertain **by a factor of four** -- see open item 1.
+   Cheapest thing here and it unblocks the rest.
+2. **PITCH DAMPING.** Measure the pitch spring first (never done -- only roll's
+   42 s period was), then the fore/aft sign pattern on the same actuator.
+   Expect authority near half of roll's. This is the largest single win
+   available: half the oscillation that makes the curve is undamped.
+3. **FLY VELOCITY HOLD** with the calibrated gain.
+4. Only then ask whether any standing trim is still wanted. Probably not.
+
+### What has FLOWN and works
+
+**ROLL DAMPER — `/fcs/rolldampflight.lua`, 2026-08-27.** A/B on an injected
+3 rpm pulse (`flight-logs/rolldampflight_run1.txt`):
+
+| | damper OFF | damper ON |
 |---|---|---|
-| 2 rpm pair | 0.0910 | -3.3% |
-| 3 rpm pair | 0.0931 | -1.1% |
-| 3 rpm pair, next flight | 0.0983 | +4.4% |
-| **run 1 pulse, damper flight** | **0.0897** | **-4.7%** |
+| peak roll rate | 1.184 | 1.096 deg/s (7.4% apart, so comparable) |
+| **peak roll excursion** | **5.58** | **3.43 deg — 39% less** |
+| time to 1/e | 4.6 | 2.8 s — 40% faster |
 
-### Two things run 1 changed, beyond "it works"
+The pulse re-measured the authority for free at **0.0897 deg/s^2 per rpm**, a
+fourth measurement agreeing with the three that set 0.0941.
 
-**THE HULL DAMPS ITSELF MORE THAN THIS DOCUMENT SAYS.** Undamped, roll went
-+5.57 -> -0.72 -> +0.44: an 87% amplitude drop in the FIRST half cycle, with a
-period near 35 s rather than the recorded 42 s. "5 zero crossings over 105 s"
-reads as barely damped, and that is not what run 1 flew. Whatever the strafe
-is, roll is not an undamped oscillator -- which lowers how much a damper is
-expected to buy, and is worth re-deriving `springPerDegree` from.
+**BEARING TRIM — `/fcs/trimflight.lua`, flown twice.** Standing tilt
+0.721 -> 0.206 (-71%) and 0.706 -> 0.180 (-74%), on a craft whose two axes have
+OPPOSITE coupling signs, using gains it measures itself. **The attitude trim
+works and is reproducible.** The drift did not improve and pass 2 made it worse
+-- see the strategy above. Keep the tool: it is how the coupling signs get
+measured, and a level hull is the reference any controller needs.
 
-**THE DAMPER LEAVES A STANDING OFFSET.** The damped half arrested the swing and
-then sat at ~1.9 degrees for the rest of the window. That is correct and
-designed -- it damps RATE and does not level -- but it means the damper alone
-does not put the craft flat. **Trim is now the blocking piece**, and it belongs
-on the bearings: 0.63 deg of tilt cancels the roll offset. See open item 2.
+**THE COUPLING SIGNS, measured at last** (`flight-logs/trimflight_probe1.txt`):
 
-### The instrument was wrong twice, and both are fixed
+    roll    -0.8205 hull deg per commanded deg   NEGATIVE
+    pitch   +0.5588                              POSITIVE
 
-Neither was visible in the verdict, which said DAMPED correctly:
+**The two axes disagree, and roll is opposite to the prediction.** Anything
+assuming one sign for both is right on pitch and backwards on roll -- which is
+almost certainly the 1.76 -> 11.5 blocks/s runaway, a roll event on a saturated
+12 degree command. Any bearing loop must take the sign PER AXIS.
 
-1. **Zero crossings counted noise.** It reported 4 damped against 3 undamped --
-   reading as "worse" -- by tallying sign flips of a trace that had FINISHED and
-   was sitting at zero. Now counted with hysteresis above the damper's own
-   deadband. But the honest limit is pinned as a test: **crossings are
-   amplitude-blind** and still score the damped half worse, because it arrests
-   the big swing early and then drifts across zero at a tenth the amplitude.
-   Peak excursion and decay carry the result; crossings are a diagnostic.
-2. **The tool claimed the pulse re-measured the authority and it never did.**
-   Run 1's 0.0897 was worked out by hand afterwards. It is computed and printed
-   now, with a warning if a run drifts more than 20% from the stored figure.
+**COMMAND LOSS — FIXED.** The pods lost 2.5-5% of commands because
+`status_request` was answered inline in `networkLoop`, and the 160-getter read
+it triggers sits inside a nested `parallel.waitForAll` that pulls events
+unfiltered and DISCARDS every one that is not `task_complete`. Each pod now has
+ONE central sampler; `networkLoop` reads no peripheral, ever. Verified 80/80
+with the logger running. See **THE POD SAMPLER**. FR was never the problem --
+it answered 20 of 20.
 
-`rolldamp.zeroCrossings`, `decayTime` and `authorityFromPulse` are pure module
-functions pinned to **run 1's actual logged trace** in `tools/test_rolldamp.lua`
--- including an assertion that the naive count called the damped half worse, so
-the bug cannot come back unnoticed.
+### The actuator survey — still the durable result
 
-**FR was not the problem, and that is now measured.** The premise this
-document carried for a session -- "FR has needed two attempts on nearly every
-command and now fails outright" -- did not survive its first measurement.
-`/fcs/podprobe.lua`, grounded, 10 `set_rpm` round trips per corner
-(`flight-logs/podprobe_result.txt`):
+Three actuators, each measured, each good at exactly one job. Every previous
+design failed by asking one of them to do a job it is structurally incapable of.
 
-| corner | resolves | transmitting | acks | median | worst | unanswered |
-|---|---|---|---|---|---|---|
-| FL | pinned 2 = live 2 | 8 msgs / 822 ms | 10/10 | 51 ms | 86 ms | 0 |
-| FR | pinned 3 = live 3 | 8 msgs / 815 ms | 9/10 | 51 ms | 67 ms | **1** |
-| RL | pinned 4 = live 4 | 8 msgs / 800 ms | 8/10 | 50 ms | 66 ms | **2** |
-| RR | pinned 5 = live 5 | 8 msgs / 828 ms | 9/10 | 51 ms | 62 ms | **1** |
-
-Read that carefully, because three separate beliefs died:
-
-1. **FR IS NOT SPECIAL.** RL dropped twice as many. The per-pod hunt is over.
-2. **NOTHING IS SLOW.** Every ack that landed came back in about 51 ms, worst
-   86. The 1000 ms timeout is ~20x the median, so **raising it cannot help** --
-   it was the fix this document was about to recommend.
-3. **NO GHOST HOST.** Pinned id, looked-up id and the id actually transmitting
-   agree on all four corners. The deployed `fcs/config.lua` pins `podIds`
-   (FL=2, FR=3, RL=4, RR=5), so `rednet.lookup` is never consulted on the live
-   craft and the lookup race is structurally impossible. It is still worth
-   checking, because a pin can go stale.
-
-What is left is **4 unanswered commands in 40, spread across three corners,
-with the link otherwise fast and healthy.** That is a uniform few-percent drop
-rate, and it is the thing the damper has to survive.
-
-**It is COMMAND LOSS, and it is attributed.** Second run, 20 round trips per
-corner, with the pod's own `commandsSeen` counter sampled either side
-(`flight-logs/podprobe_result_run2.txt`):
-
-| corner | acks | median | worst | unanswered | pod counter |
-|---|---|---|---|---|---|
-| FL | 20/20 | 52 ms | 85 ms | 0 | — |
-| FR | **20/20** | 51 ms | 58 ms | **0** | — |
-| RL | 19/20 | 52 ms | 86 ms | 1 | rose by 19 of 20 |
-| RR | 19/20 | 51 ms | 81 ms | 1 | rose by 19 of 20 |
-
-The counter agrees exactly with the reply count, so the two drops are
-**commands that never reached the pod** -- not lost acks. The actuator did not
-move, and nothing on the craft was left in a state the FCS misread. `faults=0`
-throughout, so these are not `not_armed` rejections either; this is genuine
-loss, distinct from the ~5% rejection tail this document already says not to
-chase.
-
-**FR answered 20 of 20.** Across both runs it is 29/30 while RL is 27/30. FR is
-cleared; do not spend another session on it.
-
-Rate across both runs: **6 lost in 120, about 5%.**
-
-**The mechanism is found, and it is a variant of bug 6.** `status_request` was
-answered INLINE IN `networkLoop` with a full `reply()`, which builds
-`thrusters.telemetry()` -- 160 peripheral getters inside a nested
-`parallel.waitForAll`. `parallel` pulls events **unfiltered** and hands each
-one only to its own children, all of which wait on `task_complete`. So every
-`rednet_message` landing in that ~250 ms window was pulled off the queue and
-**discarded** -- not queued, not redelivered.
-
-Four things agree:
-
-| evidence | says |
-|---|---|
-| `untrusted_msgs=0` on all four pods | the lost commands never reached `rednet.receive`; not a trust, corner or protocol rejection |
-| CC:Tweaked has no packet-loss model | ender modems, unlimited range, no probabilistic drop anywhere -- there is no wire to lose it on |
-| loss uncorrelated with corner | a duty cycle, not a pod fault |
-| **logger stopped: 80/80, zero lost** | the poll IS the cause |
-
-And the craft times its own window: with the poll stopped, telemetry arrives
-every **1250 ms** against a configured `telemetryPeriodSeconds = 1.00`. That
-250 ms of overhead is the payload build, measured. 250 ms per 2000 ms poll
-predicts 6-12% loss against the 2.5-5% observed.
-
-**THE RULE, and it is the useful part: a coroutine is deaf only to work it does
-ITSELF.** Run 3 proves the sibling case is safe -- the sampler was building a
-payload 20% of the time and `networkLoop` lost nothing. So the fix is not a
-cheaper read. It is moving the read off the coroutine that receives commands.
-See **THE POD SAMPLER**.
-
-**So: do not put a blocking ack-waiter in the damper loop.** At a few
-percent per command and four corners per iteration, roughly one iteration in
-eight loses something, and `actuators.setPropellerRpm` turns that into a full
-second of no commands at all -- the failure `/fcs/vectorprobe.lua` already hit
-four times and solved by sending fire-and-forget and confirming from telemetry.
-`set_rpm` is set-and-hold with no pod-side watchdog and is idempotent, so a
-re-send costs nothing.
-
-In flight the same evidence now reaches `/fcs/heartbeat.txt` as
-`rejected_per_corner=` and `last_sender_mismatch=` (`corner expected=N got=M`).
-The bare `sender_mismatch` counter could say a pod was being thrown away but
-never WHICH, and "which" is the entire diagnosis. **That change is committed
-but NOT deployed** -- it needs computer 1 rebooted, because the running logger
-holds the old module in memory.
-
-### The actuator survey is FINISHED — this is the durable result
-
-Three actuators, each now measured rather than assumed, and each good at
-exactly one thing. Every previous design failed by asking one of them to do a
-job it is structurally incapable of.
-
-| job | actuator | authority | why this one |
+| job | actuator | authority | status |
 |---|---|---|---|
-| **damp** (fast, large) | differential prop RPM | **0.0941 deg/s^2 per rpm** | 3.2 rpm reaches critical damping, ~4 usable steps |
-| **trim** (slow, tiny) | bearing tilt | 0.011 deg/s^2 per deg | continuous; the ONLY one with the resolution |
-| **translate** (outer) | bearing tilt, common mode | 2*T*sin(tilt), linear to 0.06% | measured directly, all four corners |
+| **damp** (fast, large) | differential prop RPM | **0.0941 deg/s^2 per rpm** | roll FLOWN; pitch missing |
+| **translate** (drift) | bearing tilt, common mode | 0.2-0.8 blocks/s per deg — **uncertain 4x** | never flown |
+| **trim** (slow, tiny) | bearing tilt | roll -0.86, pitch +0.64 hull deg per deg | flown; drift-neutral |
 
 - **IONS CANNOT DO ATTITUDE.** One level is 7.42 deg/s^2 against the 0.268
-  damping needs -- 28x too coarse, and 166-333x too coarse to hold a tilt. They
-  are the collective/altitude actuator and nothing else.
+  damping needs -- 28x too coarse. They are the collective actuator, nothing else.
 - **DIFFERENTIAL RPM CANNOT TRIM.** One rpm held constantly shifts the
-  equilibrium by **4.14 degrees**, against a standing offset of 0.31 deg roll /
-  0.57 deg pitch. It is 7-13x too coarse. Great damper, hopeless trim.
-- **BEARING TILT CANNOT DAMP.** Its roll torque needs a vertical moment arm and
-  measures 0.011 deg/s^2 per degree, so the 12 degree clamp gives 0.13 against
-  the 0.268 needed. It trims and it translates.
-
-### What is still open
-
-1. **Pitch damping does not exist.** `rolldamp.cornerRpm` uses the
-   port/starboard sign pattern only. Pitch needs fore/aft, and its authority
-   should land near half of roll's (2.35x the arm, 4.5x the inertia). **The
-   pitch spring constant has never been measured** -- only roll's 42 s period
-   was -- and the pitch offset (0.57 deg) is the LARGER of the two.
-2. **THE RECORDED STANDING OFFSETS LOOK STALE.** The reverse-pair midpoints
-   from probe 1 -- which ARE the standing offset, with the response cancelled
-   out -- came to **roll -0.490, pitch +0.498**, against the recorded
-   **+0.368 / -0.638**. Both disagree in SIGN as well as size.
-
-   That matters because the recorded pair is what the "standing tilt explains
-   94% of the drift" case is built on. It does not block trimming --
-   `/fcs/trimflight.lua` measures its own baseline in phase B -- but the
-   expected payoff is uncertain until the offsets are re-measured. A passive
-   `/fcs/rolldrift.lua` run would settle it directly.
-
-3. **Standing tilt has no corrector.** Damping cannot touch a DC offset. Trim
-   belongs on the bearings: 0.63 deg of tilt cancels the roll offset, 1.16 deg
-   the pitch one, both continuous and well inside the 15 degree clamp. The side
-   effect is 0.13-0.24 blocks/s of drift, which the translation loop should
-   absorb rather than fight.
-3. **The bearing roll-coupling SIGN is still unmeasured.** It caused a runaway
-   (1.76 -> 11.5 blocks/s). It is now safe to measure, because trim needs a
-   slow 0.6 degree command rather than a saturated 12 degree one.
-4. **Measured roll authority is 35% of prediction and nobody knows why.** It is
-   NOT the moment arm -- ion authority validated against the same craftgeom arm
-   at 97% and 102% on runs 9 and 10. Something in the propeller
-   force-per-RPM chain is off by ~3x, and that chain feeds any thrust model
-   built later.
+  equilibrium 4.14 degrees against offsets of a few tenths. Great damper,
+  hopeless trim.
+- **BEARINGS CANNOT DAMP.** 0.011 deg/s^2 per degree, so the 12 degree clamp
+  gives 0.13 against the 0.268 needed. They translate, and they trim.
+- **BEARINGS HAVE NO PURE ATTITUDE CHANNEL.** The two props of a corner sit at
+  the SAME height, so the same command makes lateral force AND roll. That is
+  why trim pays back its own drift, and why layer 1 must absorb what layer 2
+  commands.
 
 ### State of the craft, in one place
 
-- **bearing_5 repair: VERIFIED.** All four corners bit-for-bit identical. The
-  standing roll torque is gone. Do not re-investigate the RR deficit.
+- **Grounded and disarmed.** Computer 1 and all four pods are running current
+  code as of 2026-08-27.
+- **bearing_5 repair: VERIFIED.** All four corners bit-for-bit identical under
+  load. Do not re-investigate the RR deficit.
 - **The axis convention is CALIBRATED: bow = body +Z, port = body +X.**
-  `attitude.lua` had assumed +X forward and was reporting roll and pitch
-  TRANSPOSED. Fixed, and pinned by `tools/test_attitude.lua` (133 assertions).
-- **`getInertiaTensor()` is BODY-FRAME**, confirmed on five separate flights
-  across tilts up to 20 deg. So "index 3 (+Z, the bow) is the cheap axis" and
-  the 32% coupling figure hold as written.
+  `attitude.lua` had assumed +X forward and reported roll and pitch TRANSPOSED.
+  Fixed, and pinned by `tools/test_attitude.lua` (133 assertions).
+- **`getInertiaTensor()` is BODY-FRAME**, confirmed on five flights across
+  tilts to 20 degrees.
 - **Force-per-power is 3.342x craft weight**, confirmed in flight at 0.0%
   residual.
-- **The craft still STRAFES**, and not for the reason this document assumed for
-  most of its life. See **THE STRAFE**. It is the main open problem after the
-  calibration.
-- The craft is grounded and disarmed; the logger and all four pods are running
-  current code.
+- **Propeller thrust is LINEAR in rpm** (r^2 = 1.000000, 8 to 96 rpm). The
+  harness default of 2.0 predates that measurement; every runner sets 1.0.
+- **AZIMUTH 0 PUSHES TO STARBOARD**, measured on all four corners.
+  `lateralhold.azimuthForHeading` encodes heading = azimuth + 90.
+- **Pods push full telemetry at ~1 Hz and are never polled while healthy.**
+  Steady-state pod-directed traffic is zero from any number of tabs.
+- **`/fcs-dev.lua` (the monitor hub) is still NOT deployed.**
+
+### What is still open, in the order the strategy needs it
+
+1. **THE BEARING LATERAL GAIN IS UNCERTAIN BY 4x, and it blocks layer 2.**
+   `2*T*sin(tilt)` uses **T = 13960.98, which is the bearing thrust at 16 RPM
+   from a measurement taken ON THE GROUND** -- it reproduces vectorprobe's
+   3886.3 at 8 degrees exactly, which is how we know. The craft flies at 64 rpm.
+   If lateral force scales with rpm the way lift does, the real figure is ~4x
+   and every drift cost in `fcs/trim.lua` is 4x optimistic. The flights bracket
+   it at 0.23 (roll) to 0.47 (pitch) blocks/s per degree against a modelled
+   0.205, but the hull tilt moves at the same time so it is not clean.
+   **Measure it: hull level under the damper, a known tilt at 64 rpm, terminal
+   net drift.**
+
+2. **PITCH DAMPING DOES NOT EXIST.** `rolldamp.cornerRpm` uses the
+   port/starboard sign pattern only. Pitch needs fore/aft, and its authority
+   should land near half of roll's (2.35x the arm, 4.5x the inertia). **The
+   pitch spring has never been measured** -- only roll's 42 s period was.
+
+3. **THE STANDING OFFSETS ARE NOT CONSTANTS.** They have moved every flight:
+   recorded +0.368/-0.638, then -0.490/+0.498, +0.205/+0.692, -0.244/+0.695.
+   Only pitch looks stable, at about +0.68 -- OPPOSITE in sign to the recorded
+   value. Anything that re-measures is right; anything that stores a number is
+   not. A passive `/fcs/rolldrift.lua` run would settle the current values.
+
+4. **THE HULL DAMPS ITSELF MORE THAN THIS DOCUMENT SAYS.** Undamped, run 1's
+   roll went +5.57 -> -0.72 -> +0.44: an 87% amplitude drop in the FIRST half
+   cycle, period nearer 35 s than the recorded 42. "5 zero crossings over 105 s"
+   reads as barely damped and that is not what flew. Worth re-deriving
+   `springPerDegree` from -- it changes what pitch damping is expected to buy.
+
+5. **Measured roll authority is 35% of prediction and nobody knows why.** NOT
+   the moment arm: ion authority validated against the same craftgeom arm at
+   97% and 102%. Something in the propeller force-per-RPM chain is off by ~3x,
+   and that chain feeds any thrust model built later.
+
+### Do not repeat these
+
+- **Do not trim standing tilt to fix drift.** Flown twice, measured, does not
+  work. The actuator pays back what it removes.
+- **Do not put the damper on the bearings.** This document recommended it for
+  most of its life; the measurements retired it. Bearings translate and trim;
+  RPM damps.
+- **Do not put a blocking ack-waiter in a control loop.** `set_rpm` is
+  idempotent and set-and-hold, so a loop re-sending every iteration IS the
+  retry. A blocking waiter turns a dropped command into a full second of
+  silence.
+- **Do not judge drift by mean ground speed.** It is a magnitude, so the hull's
+  oscillation contributes even when the mean velocity is zero. Run 1 of the
+  trim was judged on it and could not be. Use NET DISPLACEMENT over the window.
+- **Do not chase FR.** It answered 20 of 20. The per-pod hunt is over.
 
 ### What is being measured, and why it kept failing
 
@@ -366,68 +328,25 @@ The others: the atan bug, the axis labels, the RR-deficit constant, the pitch
 sign. Fixed in `d7a4770`; both checks now derive from the live tensor, the
 ratio check is two-sided, and there is a per-axis absolute ceiling.
 
-### After that
+### Also open, not on the critical path
 
-1. **~~Fly the roll damper~~ DONE 2026-08-27 -- it damps.** See START HERE.
-   `/fcs/rolldampflight.lua` re-flies the A/B any time; `--ground-only` is safe
-   and prints the law, the sign and a live rate without commanding anything.
-
-   **What is left on roll is TRIM, not damping.** The damped half settled at a
-   ~1.9 degree standing offset and stayed there, because this damps rate and
-   does not level. That is item 3 below, and it is now the blocking piece for
-   flying the craft flat.
-
-2. **~~Trim the standing tilt~~ FLOWN TWICE. It levels the craft. It does NOT
-   fix the drift, and that is now measured rather than argued.**
-
-   | | run 1 | run 2 |
-   |---|---|---|
-   | standing tilt | 0.721 -> 0.206 (**-71%**) | 0.706 -> 0.180 (**-74%**) |
-   | net drift | not measurable (see below) | **0.812 -> 1.517, WORSE** |
-
-   `flight-logs/trimflight_run1.txt`, `_run2.txt`. The attitude trim is
-   reproducible, on a craft whose two axes have OPPOSITE coupling signs, using
-   gains it measures itself. That part works and is worth keeping: a level hull
-   is the reference any controller needs.
-
-   **THE DRIFT DOES NOT IMPROVE, because the actuator pays back what it
-   removes.** The model says a 1 degree trim costs 0.205 blocks/s of its own
-   lateral force. That rests on `2*T*sin(tilt)` with **T = 13960.98, which is
-   the bearing thrust at 16 RPM and was measured ON THE GROUND** -- it
-   reproduces the vectorprobe reading of 3886.3 at 8 degrees exactly, which is
-   how we know that is the value it used. The craft flies at 64 rpm. If lateral
-   force scales with rpm the way lift does, the real cost is ~0.82 blocks/s per
-   degree, and pass 1's 1.084 degrees of tilt accounts for the whole 0.812
-   measured.
-
-   Differencing the +/-2 degree pairs brackets it without settling it: ~0.23
-   blocks/s per degree on roll (model agrees), ~0.47 on pitch (2.3x the model).
-   The hull tilt is moving at the same time, so it is not a clean calibration.
-
-   **What to do instead.** Read the same fact the other way: the bearings are a
-   FAR better translation actuator than the model credits -- somewhere between
-   0.2 and 0.8 blocks/s per degree against a 15 degree clamp. Cancelling
-   1.5 blocks/s needs 2 to 7 degrees, well inside limits. **The drift fix is a
-   closed loop on VELOCITY, not on tilt.** `fcs/lateralhold.lua` was built for
-   exactly that, is unit-tested (73 assertions), and has never been flown.
-
-   Settle the constant first, because the loop's gain depends on it: hold the
-   hull level with the damper, command a KNOWN bearing tilt at 64 rpm, and
-   measure the terminal net drift. That is one window, and it turns a factor
-   of four of uncertainty into a number.
-
-3. **Trim standing tilt on the bearings.** 0.63 deg cancels the roll offset,
-   1.16 deg the pitch one. This is also the safe way to finally measure the
-   bearing roll-coupling SIGN, since a slow 0.6 degree command cannot run away
-   the way a saturated 12 degree one did.
-
-4. **Then the translation loop**, using common-mode bearing tilt, and fold the
-   trim demand into the same command rather than letting them fight.
-2. **Yaw is still unsolved.** `getMagneticNorth()` is `{0,0,0}`; vectoring is
-   the route and the command path exists. Measure the sign of the lateral force
-   from a bearing tilt first — it has never been verified.
-3. **The +23 block hold ceiling** may have lifted on its own now the watchdog
-   is not forcing `commsLossPower` half the time. Untested.
+- **Yaw is unsolved.** `getMagneticNorth()` is `{0,0,0}`; vectoring is the
+  route and the command path exists. `mixer.allocate` already accepts
+  `demand.yaw`, echoes it in `unmet.yaw`, and gates it behind
+  `yawAvailable = false` -- turning it on is a coefficient table and a flag.
+  Measure the sign of the lateral force from a bearing tilt first; the
+  calibration in strategy step 1 gives it.
+- **The +23 block hold ceiling** was measured while the watchdog was forcing
+  `commsLossPower` roughly half the time -- exactly the level-2/level-3 dither
+  that set the ceiling. That watchdog problem is long fixed, so the ceiling may
+  have lifted on its own. Untested.
+- **Validate the 280->320 atmosphere segment** with
+  `atmosphere.verify(model, {285, 290, 300, 310})`. Nothing was ever measured
+  between, and y=320 is a hard flight-envelope ceiling.
+- **`mixer_profile.lua`'s `authority.roll` / `authority.pitch` are 0.25 and
+  that is fine.** They are the demand->power scalar, a design choice, not a
+  measured constant. The response they produce is known: 27.84 / 14.60
+  deg/s^2 per unit demand at 0.25.
 
 ---
 
@@ -1909,7 +1828,7 @@ From the passive rolldrift flight (nothing commanded to rotate,
 |---|---|
 | horizontal drift | **81 blocks in 48 s** |
 | mean ground speed | **1.67 blocks/s** |
-| mean roll / pitch | +0.368 deg / **-0.638 deg** |
+| mean roll / pitch | +0.368 deg / **-0.638 deg** (see open item 3 -- these WANDER) |
 | **net heading change** | **-225 degrees** |
 
 And from the axis-response flight: 191 blocks in 84 s at 2.27 blocks/s.
@@ -1939,17 +1858,23 @@ away — and why the old "425 blocks in 60 s" projection, which integrated
 - **Pitch offset now exceeds roll offset** (-0.638 vs +0.368). Everything here
   focused on ROLL because the RR deficit was a roll torque. Nobody has looked
   for a pitch asymmetry, and the tensor says t[2][3] couples them at 32%.
-- **You cannot trim away an oscillation.** Trim cancels a DC offset. This is AC.
-  Adding trim against a rotating tilt vector chases its own tail.
-- **The fix is DAMPING**: feed roll/pitch RATE back as an opposing torque. That
-  turns the underdamped spiral into a dead-beat return to level, which kills
-  both the rotation of the tilt vector and most of the accumulated drift.
+- **You cannot trim away an oscillation.** Trim cancels a DC offset. This is
+  AC. That was written before trim was flown, and the flights went further:
+  trim does not fix the drift's DC part either, because the actuator pays back
+  what it removes. See THE STRATEGY.
+- **The direction is fixed by DAMPING BOTH AXES.** Feeding rate back as an
+  opposing torque turns the underdamped spiral into a dead-beat return to
+  level, which stops the tilt vector rotating. Roll damping is FLOWN and works.
+  **Pitch damping does not exist**, so the vector still sweeps.
+- **The speed is fixed by a VELOCITY LOOP on the bearings**, not by levelling
+  the hull. `fcs/lateralhold.lua` implements it and has never flown.
 
-**THE DAMPER IS NOW CALIBRATED**, and not on the actuator this section spent
-its life recommending. See the actuator survey in START HERE:
+**THE DAMPER IS FLOWN**, and not on the actuator this section spent its life
+recommending. See the actuator survey in START HERE:
 
     differential propeller RPM   0.0941 deg/s^2 per rpm, MEASURED
     critical damping reached at 3.2 rpm, clamp 4
+    FLOWN 2026-08-27: 39% less roll excursion, 40% faster decay
 
 The table below is still correct about TRIMMING a small moment, and it is why
 trim belongs on the bearings. It was wrong to conclude that DAMPING belongs
@@ -2500,18 +2425,26 @@ per command, which any inner control loop will need.
 - ~~The axis convention is unverified~~ — **CALIBRATED AND FIXED 2026-08-26.
   The bow is +Z, port is +X.** `attitude.lua` had it as +X forward and was
   transposing roll with pitch. The corner map was always correct.
-- **The sign of the lateral force from a bearing tilt.** See THE STRAFE.
-- **`authority.roll` / `authority.pitch` in `mixer_profile.lua` are
-  placeholders (0.25).** `/fcs/axisresponse.lua` measures them; its pulse
-  demand is now 0.30, above the ion quantum. Under quantisation the smallest
-  meaningful pulse is one level (~3.4 deg/s^2), so pulses cannot be made
-  gentle — the tool measures the ANGLE swept, not the rate.
+- ~~The sign of the lateral force from a bearing tilt~~ — **MEASURED
+  2026-08-27, and the two axes DISAGREE: roll -0.8205, pitch +0.5588 hull deg
+  per commanded deg.** See START HERE. What is still open is its MAGNITUDE in
+  blocks/s per degree at flight rpm, which is uncertain by 4x and blocks the
+  velocity loop -- strategy step 1.
+- **The angular rate channel is unusable for control**, and there is a working
+  answer: `Session:readCheap` omits angular velocity entirely, so the damper
+  takes a least-squares slope over ANGLES instead
+  (`rolldamp.newRateEstimator`, 0.6 s window). Flown.
+- ~~`authority.roll` / `authority.pitch` are placeholders~~ — **RETIRED as a
+  question.** They are 0.25 and that is correct: a demand->power scalar, a
+  design choice, not a measured constant. The RESPONSE they produce is measured
+  (27.84 / 14.60 deg/s^2 per unit demand). Read the comment in
+  `mixer_profile.lua` before touching them.
 - **The angular RATE channel is unreliable at this loop period** — it read
   exactly 0.0000 in 5 of 12 samples. Prefer angle-based fits.
 - **Yaw is unsolved.** `getMagneticNorth()` is `{0,0,0}`. Vectoring is the
   route and the command path now exists; nothing has been wired to the axis.
-- **Loop period ~950 ms** against `samplePeriodSeconds = 0.25`. Sable calls
-  dominate. Fine for logging, marginal for control.
+- ~~Loop period ~950 ms~~ — **STALE.** With `Session:readCheap` the flight
+  loops run at ~0.13-0.15 s, which is what makes the damper possible.
 - **`getObstruction` returns exactly 0 always**, idle and at full thrust, and
   there is no `isObstructed`. The predicate is now `clearance > 0`, which is
   correct if 0 means "nothing found" and harmless if the getter is
@@ -2620,56 +2553,15 @@ per command, which any inner control loop will need.
 
 ## Suggested next steps
 
-The first three items on the previous list are done or retired. What is left:
+**They live in START HERE now, under THE STRATEGY**, in the order the work
+actually depends on: calibrate the bearing lateral gain at flight rpm, then
+pitch damping, then fly velocity hold. Keeping a second list here is how this
+document ended up recommending the damper go on the bearings for months after
+the measurements said otherwise.
 
-1. **Calibrate `Aroll` / `Apitch`** with `/fcs/axisresponse.lua` — still the
-   hard blocker. `mixer_profile.lua` carries placeholder 0.25s.
-
-   **The instrument is finally clean.** Nine flights were spent removing five
-   stacked distortions (see START HERE); the next run is the first with all of
-   them off. Require, before believing a number:
-
-   - `differential applied: spread 0.1500 of 0.1500 wanted` on BOTH axes
-   - 8+ samples on roll, not 3
-   - no `SUSPECT` flag and no hard bound violation
-   - **and a second run agreeing within a few percent**
-
-   That last one is not optional. Every previous value looked solid in
-   isolation, and the spread across runs was 3.98 to 86.03.
-
-   ~~Re-run `/fcs/rolldrift.lua` first~~ — **DONE.** Self-levelling re-confirmed
-   on the symmetric craft (5 zero crossings). See *The hull self-levels*.
-
-2. **Write the rate-damping term, and point it at the strafe.** This is what
-   the calibration is FOR. The strafe is an underdamped oscillation in two axes
-   out of phase, so trim cannot touch it — only damping can. Put it on the
-   BEARINGS: continuous, against 22.28% of weight per ion step.
-3. **Solve yaw with the bearings.** The vectoring command path exists and is
-   closed-loop; nothing is wired to the axis. `mixer.allocate` already accepts
-   `demand.yaw`, echoes it in `unmet.yaw`, and gates it behind
-   `yawAvailable = false` — turning it on is a coefficient table and a flag.
-   Measure the sign of the lateral force first (see THE STRAFE).
-4. **Validate the 280->320 atmosphere segment** with
-   `atmosphere.verify(model, {285, 290, 300, 310})`. Nothing was ever measured
-   between, and y=320 is a hard flight-envelope ceiling.
-5. **Then a full controller.** Note what it must respect: no hover level
-   (dither between ion levels 2 and 3), 32% axis coupling, and fine trim living
-   on the bearings rather than the ions. The ~950 ms loop figure is now stale —
-   with `Session:readCheap` the flight loop runs at ~0.13 s.
-
-6. **Re-test the +23 block hold ceiling.** It was measured while the watchdog
-   was forcing `commsLossPower` roughly half the time, which is exactly the
-   level-2/level-3 dither that set the ceiling. It may have lifted on its own.
-
-**`props.lua` fix is LIVE** (pods rebooted 2026-08-26). Confirmed by the
-heartbeat: `vec=` now reports real direction vectors — `{~0, +/-1, ~0}`, the
-bearings pointing straight up and down — where it used to print `nil,nil,nil`.
-The closed-loop feedback that thrust vectoring needs is finally readable.
-
-**Repair re-confirmed under load:** with props loaded, all four corners report
-pod thrust **111687.8702592019, bit-for-bit identical**. At rest they split
-into two families 0.0004% apart; under load they are exactly equal. The
-symmetry claim no longer rests on a single at-rest reading.
+What was on this list and is now DONE: the axis-response calibration (roll
+authority measured, then re-measured by the damper flight), the roll damper
+itself, the bearing coupling sign, and the pod command loss.
 
 ---
 
