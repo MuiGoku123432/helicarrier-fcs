@@ -293,6 +293,25 @@ local function probeAxis(axis)
 
     note(string.format("  GAIN %.4f hull deg per commanded deg  (predicted %.3f)",
         gain, trim.predictedGain() or 0))
+
+    -- THE MIDPOINT IS THE STANDING OFFSET, free with every reverse pair:
+    -- hull(+T) = offset + g*T and hull(-T) = offset - g*T, so their mean is
+    -- the offset with the response cancelled out.
+    --
+    -- Reported because probe 1 threw it away and it carried the more
+    -- surprising result: midpoints of -0.490 roll and +0.498 pitch against a
+    -- recorded +0.368 / -0.638 -- disagreeing in SIGN as well as size. The
+    -- recorded pair is what the whole case for trimming is built on.
+    local midpoint = (positive[field] + negative[field]) / 2
+    local recorded = isRoll and trim.MEASURED.standingRoll
+        or trim.MEASURED.standingPitch
+    note(string.format("  standing %s from the midpoint: %+.3f deg  (recorded %+.3f)",
+        field, midpoint, recorded))
+    if midpoint * recorded < 0 then
+        note("  ** OPPOSITE SIGN to the recorded value. One of them is stale, and")
+        note("  ** the recorded pair is what the 94%-of-drift case rests on.")
+        note("  ** Phase B measures its own baseline, so the trim is unaffected.")
+    end
     -- Report the sign only when there IS one. A gain of 0.0000 is not
     -- "negative" -- `gain > 0` is false for zero, and the first version said
     -- NEGATIVE for a craft whose bearings did nothing at all, which is the
@@ -308,6 +327,19 @@ local function probeAxis(axis)
     if math.abs(gain) < trim.DEFAULTS.minimumUsableGain then
         note(string.format("  ** below the %.2f needed to trust it. Trim would be a"
             .. " large command derived from noise.", trim.DEFAULTS.minimumUsableGain))
+    end
+
+    -- A SIGN that disagrees with the prediction is the single most consequential
+    -- fact this tool produces, so it is never merely implied by a minus sign in
+    -- a number. Probe 1 measured roll NEGATIVE against a positive prediction --
+    -- which is very likely the 1.76 -> 11.5 blocks/s runaway, since that was a
+    -- roll event on a saturated command.
+    local predictedSign = trim.predictedGain()
+    if predictedSign and gain * predictedSign < 0
+        and math.abs(gain) >= trim.DEFAULTS.minimumUsableGain then
+        note("  ** THE SIGN IS OPPOSITE TO THE PREDICTION. Anything that assumed")
+        note("  ** the predicted sign on this axis would DRIVE the offset, not")
+        note("  ** cancel it. Trim below uses the measured sign.")
     end
 
     -- A gain wildly off the prediction is the signature of a window that did

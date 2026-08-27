@@ -227,7 +227,18 @@ job it is structurally incapable of.
    should land near half of roll's (2.35x the arm, 4.5x the inertia). **The
    pitch spring constant has never been measured** -- only roll's 42 s period
    was -- and the pitch offset (0.57 deg) is the LARGER of the two.
-2. **Standing tilt has no corrector.** Damping cannot touch a DC offset. Trim
+2. **THE RECORDED STANDING OFFSETS LOOK STALE.** The reverse-pair midpoints
+   from probe 1 -- which ARE the standing offset, with the response cancelled
+   out -- came to **roll -0.490, pitch +0.498**, against the recorded
+   **+0.368 / -0.638**. Both disagree in SIGN as well as size.
+
+   That matters because the recorded pair is what the "standing tilt explains
+   94% of the drift" case is built on. It does not block trimming --
+   `/fcs/trimflight.lua` measures its own baseline in phase B -- but the
+   expected payoff is uncertain until the offsets are re-measured. A passive
+   `/fcs/rolldrift.lua` run would settle it directly.
+
+3. **Standing tilt has no corrector.** Damping cannot touch a DC offset. Trim
    belongs on the bearings: 0.63 deg of tilt cancels the roll offset, 1.16 deg
    the pitch one, both continuous and well inside the 15 degree clamp. The side
    effect is 0.13-0.24 blocks/s of drift, which the translation loop should
@@ -1945,9 +1956,24 @@ An actuator coarse enough to damp is far too coarse to trim, and vice versa.
 **That is why this craft needs both, and why every single-actuator design in
 this document's history failed.**
 
-**Still UNVERIFIED and now blocking:** the sign of the lateral force from a
-bearing tilt. `getThrust` is signed by handedness and `getThrustVector` reports
-each bearing's own axis. Measure it before closing any loop.
+**MEASURED 2026-08-27, and it was blocking for a long time**
+(`flight-logs/trimflight_probe1.txt`, reverse pairs at +/-2 degrees, damper
+running):
+
+| axis | gain, hull deg per commanded deg | sign | vs predicted +0.493 |
+|---|---|---|---|
+| **roll** | **-0.8205** | **NEGATIVE** | **wrong sign**, 1.66x |
+| pitch | +0.5588 | POSITIVE | 1.13x |
+
+**THE TWO AXES HAVE OPPOSITE SIGNS**, and the roll one is opposite to the
+prediction. Anything that assumed the predicted sign would DRIVE the roll
+offset rather than cancel it -- which is almost certainly the 1.76 -> 11.5
+blocks/s runaway, since that was a roll event on a saturated 12 degree command.
+Measuring rather than assuming is the whole reason the probe exists, and it
+earned itself on its first flight.
+
+Any loop that tilts the bearings must take the sign per AXIS. One sign for both
+is right on pitch and backwards on roll.
 
 ---
 
