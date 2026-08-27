@@ -1,6 +1,9 @@
 # Helicarrier FCS — session handoff
 
-Last updated: 2026-08-27 (later still). **PITCH IS NOT AN UNDAMPED AXIS -- it
+Last updated: 2026-08-27 (evening). **THE CURVE IS SOLVED, AND IT IS ONE
+OSCILLATOR: ROLL.** Read **THE DRIFT ANALYSIS**. Also: **three archived flight
+logs have TRANSPOSED angle columns**, including the passive drift flight this
+document's standing offsets come from. **PITCH IS NOT AN UNDAMPED AXIS -- it
 is overdamped and it levels itself, so it wants no damper.** The pitch flight
 falsified the premise it was built on, and the drift curve now has no
 explanation. Read **THE PITCH FLIGHT** before planning any more damping work.
@@ -67,7 +70,7 @@ The drift is TWO separable problems wanting DIFFERENT actuators:
 | | what sets it | actuator | closed on |
 |---|---|---|---|
 | **speed** (1.2-1.7 blocks/s) | tilt magnitude against drag -> terminal velocity | bearing tilt | **velocity** |
-| **direction** (the -225 deg curve) | roll and pitch oscillating OUT OF PHASE, so the tilt vector rotates | differential prop RPM | **rate** |
+| **direction** (the curve) | ROLL oscillating at 32.7 s against a slow pitch transient, winding the tilt vector | differential prop RPM | **rate** -- FLOWN |
 
 The curve is not a separate mystery from the oscillation. It IS the
 oscillation, seen from above.
@@ -192,6 +195,90 @@ design failed by asking one of them to do a job it is structurally incapable of.
 - **Pods push full telemetry at ~1 Hz and are never polled while healthy.**
   Steady-state pod-directed traffic is zero from any number of tabs.
 - **`/fcs-dev.lua` (the monitor hub) is still NOT deployed.**
+
+### THE DRIFT ANALYSIS -- 2026-08-27, from the CSVs, no flight required
+
+`luajit tools/analyse_drift.lua flight-logs/rolldrift_run2/*.csv`. The passive
+drift flight is the only clean free-oscillation record here -- run16, run18,
+run19 and the axisresponse runs were all commanding attitude, and their period
+spreads (60-119%) say so.
+
+#### FIRST: three archived logs have TRANSPOSED angle columns
+
+`attitude.lua` once assumed +X forward and reported roll and pitch swapped.
+Flights either side of that fix are both in `flight-logs/` and nothing in the
+files says which is which -- so `analyse_drift` recomputes every angle from
+`quaternion_*`, which is raw sensor output, and compares:
+
+| log | verdict |
+|---|---|
+| `rolldrift_run2/flight_1787719926829.csv` | **TRANSPOSED** |
+| `axisresponse_run4/*`, `axisresponse_run5/*` | **TRANSPOSED** |
+| `run16_csv`, `run18_csv`, `run19_csv` | correct, to 0.0000 deg |
+
+Recomputed ROLL equals logged PITCH to 0.0000 on the transposed files. **Any
+conclusion drawn by reading `roll_deg`/`pitch_deg` out of those three has the
+two axes swapped** -- and that includes the recorded standing pair
+**+0.368 roll / -0.638 pitch**, which comes from the passive drift flight and
+which the whole trim case was built on. Over the corrected window the means are
+**roll -0.615, pitch -0.338**.
+
+That also closes open item 3's puzzle -- "only pitch looks stable, at about
++0.68, OPPOSITE in sign to the recorded value". It was not drifting. It was the
+other axis.
+
+**Never read the angle columns of an archived flight. Derive from the
+quaternion.** `analyse_drift` does, and says so when a file disagrees.
+
+#### THE CURVE IS ONE OSCILLATOR PLUS ONE TRANSIENT
+
+With the axes corrected, over the 48 s passive window:
+
+| | mean | range | amplitude | crossings | period |
+|---|---|---|---|---|---|
+| **roll** | -0.615 | -4.07 .. +4.11 | 4.09 | 3 | **32.7 s**, spread 0% |
+| **pitch** | -0.338 | -4.66 .. +1.88 | 3.27 | 1 | none |
+
+**Roll oscillates. Pitch does not** -- it makes a single overdamped return from
+-4.7 to +1.9 over about 30 s and stays there. All three independent sources now
+agree with each other for the first time: the damper flight's roll period
+("nearer 35 s than 42"), the pitch flight's OVERDAMPED verdict, and this CSV.
+
+So **"roll and pitch oscillate out of phase" was wrong**, and the corrected
+mechanism is simpler: one axis oscillating fast against one axis traversing
+slowly still winds the tilt VECTOR round. It does not need two oscillators.
+
+#### AND THE TILT REALLY IS STEERING THE CRAFT
+
+Every artifact that could have faked this was checked and none of them did:
+
+    velocity heading, WORLD      +208.9 deg in 48 s   (+4.31 deg/s)
+    yaw                            -3.5 deg           -- 2%, NOT a yaw artifact
+    tilt magnitude       min 0.97, mean 2.88 deg      -- never near zero, so
+                                                         not an atan2 artifact
+    speed                min 2.32, mean 4.65 blocks/s -- never near zero either
+
+    velocity rotation vs tilt rotation:  r = 0.75 at a lag of 2.7 s
+
+**Nothing other than hull tilt needs to be invoked.** Lift points along the
+hull's up axis, the hull leans, the craft goes that way, and drag gives it a
+lag of a few seconds against the 11 s that `1/universalDrag` implies.
+
+One methodological note, because it produced a wrong answer first: comparing
+NET SWEEPS said the velocity was rotating **1.61x faster than the tilt driving
+it**, which would have been a real anomaly. It is an artifact of the window --
+the tilt winds forward and then unwinds while the velocity is still catching
+up. Correlating the two RATES at a range of lags is the honest test.
+
+#### WHAT THIS MEANS FOR THE PLAN
+
+**Damping roll IS the fix for the curve, and it already flew.** 39% less
+excursion, 40% faster decay. There is nothing to add on pitch: it is not an
+oscillator, and what it contributes to the curve is a one-time settling
+transient rather than a persistent one.
+
+So layer 1 is DONE, and the drift work is now entirely layer 2 -- the velocity
+loop, at the bearing gain measured on the ground.
 
 ### THE PITCH FLIGHT -- 2026-08-27, two runs, and the second corrects the first
 
@@ -397,20 +484,26 @@ prints the per-corner thrust spread, which is where that check would start.
    **Measure it: hull level under the damper, a known tilt at 64 rpm, terminal
    net drift.**
 
-2. **WHAT ACTUALLY ROTATES THE TILT VECTOR?** Pitch was the assumed answer and
-   it is measured not to be -- see **THE PITCH FLIGHT**. The heading still
-   swept -225 degrees in 47 s and nothing now explains it. Start with the
-   flight CSVs already in `flight-logs/`; this needs analysis, not a flight.
+2. ~~WHAT ROTATES THE TILT VECTOR?~~ **ANSWERED from the CSVs -- see THE DRIFT
+   ANALYSIS.** Roll oscillating at 32.7 s against a slow pitch transient, and
+   the tilt steers the craft at r = 0.75. Damping roll is the fix and it has
+   flown.
 
-   Secondary: the pitch AUTHORITY is not settled (two runs, 2x apart, one of
-   them void). `pitchdamp.MEASURED` ships every field **nil** on purpose.
-   One `--measure-only` run with the reverse pair closes it.
+   What is left on this axis: the pitch AUTHORITY is not settled (two runs, 2x
+   apart, one of them void). `pitchdamp.MEASURED` ships every field **nil** on
+   purpose. One `--measure-only` run with the reverse pair closes it, and it is
+   no longer on the critical path.
 
-3. **THE STANDING OFFSETS ARE NOT CONSTANTS.** They have moved every flight:
-   recorded +0.368/-0.638, then -0.490/+0.498, +0.205/+0.692, -0.244/+0.695.
-   Only pitch looks stable, at about +0.68 -- OPPOSITE in sign to the recorded
-   value. Anything that re-measures is right; anything that stores a number is
-   not. A passive `/fcs/rolldrift.lua` run would settle the current values.
+3. **THE STANDING OFFSETS ARE NOT CONSTANTS -- and the recorded pair was
+   TRANSPOSED.** The "+0.368 roll / -0.638 pitch" that the whole trim case rests
+   on comes from a log whose angle columns are swapped; corrected, that window
+   reads **roll -0.615, pitch -0.338**. See **THE DRIFT ANALYSIS**. That also
+   explains why "pitch looks stable at +0.68, OPPOSITE in sign to the recorded
+   value" -- it was the other axis all along.
+
+   The later readings (-0.490/+0.498, +0.205/+0.692, -0.244/+0.695) are from
+   post-fix flights and stand. They still move every flight: anything that
+   re-measures is right, anything that stores a number is not.
 
 4. **THE HULL DAMPS ITSELF MORE THAN THIS DOCUMENT SAYS.** Undamped, run 1's
    roll went +5.57 -> -0.72 -> +0.44: an 87% amplitude drop in the FIRST half
@@ -438,6 +531,13 @@ prints the per-corner thrust spread, which is where that check would start.
   oscillation contributes even when the mean velocity is zero. Run 1 of the
   trim was judged on it and could not be. Use NET DISPLACEMENT over the window.
 - **Do not chase FR.** It answered 20 of 20. The per-pod hunt is over.
+- **Do not read `roll_deg` / `pitch_deg` out of an archived CSV.** Three of the
+  logged flights predate the axis fix and have the two columns swapped.
+  Recompute from `quaternion_*` -- `tools/analyse_drift.lua` does, and reports
+  which files disagree.
+- **Do not compare NET SWEEPS of two rotating vectors.** It said the velocity
+  was rotating 1.61x faster than the tilt driving it, which would have been a
+  real anomaly and is only a window artifact. Correlate the RATES at a lag.
 - **Do not pulse an axis without a quiet window first, and subtract the
   pre-pulse rate.** A pulse measures itself PLUS whatever the craft was already
   doing, and here the second term is as large as the first: run 1 of the pitch
