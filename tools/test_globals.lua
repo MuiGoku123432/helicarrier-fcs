@@ -27,6 +27,7 @@ local FILES = {
     "fcs/banks.lua", "fcs/sensors.lua", "fcs/tiltctl.lua",
     "fcs/podprobe.lua",
     "fcs/rolldampflight.lua",
+    "fcs/trim.lua", "fcs/trimflight.lua",
     -- Pod code is deployed flight code too, and it is the half that runs
     -- with nobody watching the screen.
     "pod-template/pod/main.lua", "pod-template/pod/payload.lua",

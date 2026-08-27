@@ -25,6 +25,11 @@ local FILES = {
     "fcs/mixer.lua", "fcs/attitude.lua", "fcs/actuators.lua",
     "fcs/tiltctl.lua", "fcs/banks.lua", "fcs/podprobe.lua",
     "fcs/rolldampflight.lua",
+    "fcs/trim.lua", "fcs/trimflight.lua",
+    -- The harness too. It is not flight code, but the rule is the same and it
+    -- has now cost a run: commandedTilt() was called from stepRotation fifty
+    -- lines above its own definition, and the flight died at "climb to +12".
+    "tools/cc_harness.lua",
     -- Pod code is deployed flight code too, and it is the half that runs
     -- with nobody watching the screen.
     "pod-template/pod/main.lua", "pod-template/pod/payload.lua",

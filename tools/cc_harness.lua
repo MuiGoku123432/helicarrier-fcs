@@ -160,6 +160,18 @@ harness.model = {
     rollRestoring = 0.0,        -- deg/s^2 per degree of tilt
     rollDamping = 0.0,          -- 1/s on angular rate
 
+    -- WHERE THE SPRING PULLS TO. Not zero on the real craft: it sits at
+    -- +0.368 roll / -0.638 pitch and stays there, which is a standing torque
+    -- balanced by the spring, not a displacement.
+    --
+    -- Modelling it as a starting ANGLE instead -- which is what the first
+    -- version of the trim runner did -- gives a craft that oscillates about
+    -- LEVEL and averages to zero, so there is no standing offset to cancel and
+    -- a trim tool has nothing to measure. Found by the tool reporting a
+    -- baseline of -0.037 on a craft supposedly sitting at +0.368.
+    rollEquilibrium = 0.0,
+    pitchEquilibrium = 0.0,
+
     -- Scales ONLY the propeller contribution to roll torque, leaving lift and
     -- the ion torque alone.
     --
@@ -173,6 +185,26 @@ harness.model = {
     -- Set explicitly by tools/run_rolldampflight_harness.lua. Left at 1.0 here
     -- so no existing runner changes behaviour.
     propRollScale = 1.0,
+
+    -- --- bearings as a TRIM actuator ---------------------------------------
+    -- A bearing tilt makes a HORIZONTAL force. The two props of a corner sit at
+    -- the SAME height, so there is no pure attitude channel: the same command
+    -- gives force AND roll together, through the force's moment about the
+    -- centre of mass. That coupling is what ran the craft away from 1.76 to
+    -- 11.5 blocks/s on a saturated 12 degree command.
+    --
+    -- The MAGNITUDE is measured: 0.011 deg/s^2 per degree of tilt. THE SIGN IS
+    -- NOT, and that is the whole reason this is modelled here -- a trim loop
+    -- that assumes the wrong sign drives the offset instead of cancelling it.
+    -- Flip bearingCouplingSign to prove the tool measures the sign rather than
+    -- assuming it.
+    bearingTiltRollPerDegree = 0.011,
+    bearingTiltPitchPerDegree = 0.011,
+    bearingCouplingSign = 1,
+    -- Create's universal drag: a tilt-implied acceleration reaches terminal
+    -- velocity rather than integrating. This is why the craft cruises instead
+    -- of accelerating away.
+    universalDrag = 0.09,
 }
 
 local commandCount = 0
@@ -268,6 +300,13 @@ harness.craft = {
     -- here; do not reuse this for large-angle manoeuvres.
     roll = 0, pitch = 0, yaw = 0,
     rollRate = 0, pitchRate = 0, yawRate = 0,
+
+    -- HORIZONTAL, in hull axes: starboard and bow, blocks and blocks/s.
+    -- Added for the trim work. Before this the harness had no horizontal state
+    -- at all, so a tool whose whole purpose is removing drift measured zero
+    -- offline no matter what it did.
+    starboard = 0, bow = 0,
+    vStarboard = 0, vBow = 0,
 }
 
 local function pressureAt(y)
@@ -309,6 +348,25 @@ local function snapPower(power)
     return snapped
 end
 harness.snapPower = snapPower
+
+-- The commanded bearing tilt, resolved into hull axes and averaged over the
+-- four corners. heading = azimuth + 90 (lateralhold.azimuthForHeading), with
+-- heading 0 = bow and 90 = starboard -- MEASURED on all four corners, and not
+-- what either the old props.lua comment or a naive reading of the axes said.
+local function commandedTilt()
+    local starboard, bow, n = 0, 0, 0
+    for _, pod in pairs(pods) do
+        local tilt = pod.tiltAngle or 0
+        if tilt ~= 0 then
+            local heading = math.rad((pod.tiltAzimuth or 0) + 90)
+            starboard = starboard + tilt * math.sin(heading)
+            bow = bow + tilt * math.cos(heading)
+        end
+        n = n + 1
+    end
+    if n == 0 then return 0, 0 end
+    return starboard / n, bow / n
+end
 
 local function stepRotation(dt)
     local craft = harness.craft
@@ -381,13 +439,24 @@ local function stepRotation(dt)
     craft.rollRate = craft.rollRate + math.deg(rollTorque / harness.model.rollInertia) * dt
     craft.pitchRate = craft.pitchRate + math.deg(pitchTorque / harness.model.pitchInertia) * dt
 
+    -- Bearing tilt: force AND roll together, through the force's moment about
+    -- the centre of mass. Magnitude measured, SIGN not -- see the model block.
+    local tiltStarboard, tiltBow = commandedTilt()
+    local couplingSign = harness.model.bearingCouplingSign or 1
+    craft.rollRate = craft.rollRate
+        + couplingSign * harness.model.bearingTiltRollPerDegree * tiltStarboard * dt
+    craft.pitchRate = craft.pitchRate
+        + couplingSign * harness.model.bearingTiltPitchPerDegree * tiltBow * dt
+
     -- Optional restoring moment (returns toward level) and angular damping
     -- (opposes rate). Both zero unless a runner turns them on.
     local restoring = harness.model.rollRestoring or 0
     local damping = harness.model.rollDamping or 0
     if restoring ~= 0 then
-        craft.rollRate = craft.rollRate - restoring * craft.roll * dt
-        craft.pitchRate = craft.pitchRate - restoring * craft.pitch * dt
+        craft.rollRate = craft.rollRate
+            - restoring * (craft.roll - (harness.model.rollEquilibrium or 0)) * dt
+        craft.pitchRate = craft.pitchRate
+            - restoring * (craft.pitch - (harness.model.pitchEquilibrium or 0)) * dt
     end
     if damping ~= 0 then
         craft.rollRate = craft.rollRate - damping * craft.rollRate * dt
@@ -432,6 +501,54 @@ function harness.orientation()
     }
 end
 
+-- Horizontal motion: hull tilt, bearing tilt, and drag.
+--
+-- Two sources, and telling them apart is the entire point of trimming. The
+-- HULL's tilt swings the lift vector, which is the large one -- the standing
+-- +0.368 roll / -0.638 pitch alone imply 1.571 blocks/s against a measured
+-- mean of 1.670, so 94% of the cruise speed is a DC tilt. The BEARINGS' tilt
+-- makes its own lateral force, which is the price of using them to trim: 0.63
+-- and 1.16 degrees of tilt buy back the hull offsets at a cost of 0.272.
+--
+-- Drag is what makes both reach a terminal speed instead of integrating away.
+local function stepHorizontal(dt)
+    local craft = harness.craft
+    if craft.grounded then
+        craft.vStarboard, craft.vBow = 0, 0
+        return
+    end
+
+    local g = math.abs(craft.gravity)
+    -- Positive roll is starboard-low, so lift leans starboard.
+    local aStarboard = g * math.tan(math.rad(craft.roll))
+    -- Positive pitch is bow-up, so lift leans aft.
+    local aBow = -g * math.tan(math.rad(craft.pitch))
+
+    local tiltStarboard, tiltBow = commandedTilt()
+    local weight = craft.mass * g
+    local function bearingAccel(tiltDegrees)
+        -- BASE_BEARING_16 unscaled: this is the constant the craft's MEASURED
+        -- lateral force uses (2*T*sin(tilt) per corner), the same one
+        -- lateralhold.terminalSpeed and fcs/trim.lua take. Scaling it by rpm
+        -- the way vertical thrust is scaled would make lateral force 4x.
+        local force = 4 * 2 * BASE_BEARING_16 * math.sin(math.rad(tiltDegrees))
+        return (force / weight) * g
+    end
+    aStarboard = aStarboard + bearingAccel(tiltStarboard)
+    aBow = aBow + bearingAccel(tiltBow)
+
+    local drag = harness.model.universalDrag or 0
+    craft.vStarboard = craft.vStarboard + (aStarboard - drag * craft.vStarboard) * dt
+    craft.vBow = craft.vBow + (aBow - drag * craft.vBow) * dt
+    craft.starboard = craft.starboard + craft.vStarboard * dt
+    craft.bow = craft.bow + craft.vBow * dt
+end
+
+function harness.groundSpeed()
+    local craft = harness.craft
+    return math.sqrt(craft.vStarboard ^ 2 + craft.vBow ^ 2)
+end
+
 local function stepPhysics(dtMs)
     local craft = harness.craft
     local weight = craft.mass * math.abs(craft.gravity)
@@ -465,6 +582,7 @@ local function stepPhysics(dtMs)
     if craft.vy < (craft.peakDescent or 0) then craft.peakDescent = craft.vy end
 
     stepRotation(dt)
+    stepHorizontal(dt)
     -- Peak altitude is the number that decides whether a run was safe.
     if craft.peakY == nil or craft.y > craft.peakY then
         craft.peakY = craft.y
@@ -724,6 +842,12 @@ function harness.install(env)
                         -- what the FCS has to cope with.
                         rejected = "not_armed"
                     end
+                elseif pod.id == recipient and message.type == "set_tilt" then
+                    -- Set-and-hold, no arm gate, no watchdog -- like the pod.
+                    pod.tiltAngle = message.angle
+                    pod.tiltAzimuth = message.azimuth or 0
+                elseif pod.id == recipient and message.type == "clear_tilt" then
+                    pod.tiltAngle, pod.tiltAzimuth = 0, 0
                 elseif pod.id == recipient and message.type ~= "status_request" then
                     -- other command types are ignored by this model
                 end
@@ -788,8 +912,19 @@ function harness.install(env)
                      orientation = harness.orientation(),
                      rotationPoint = { x = 0, y = 0, z = 0 } }
         end,
-        getLinearVelocity = function() return { x = 0, y = harness.craft.vy, z = 0 } end,
-        getVelocity = function() return { x = 0, y = harness.craft.vy, z = 0 } end,
+        -- Horizontal included. It used to report {0, vy, 0}, which meant a
+        -- tool whose entire purpose is removing horizontal drift measured
+        -- 0.000 blocks/s offline no matter what the craft did.
+        --
+        -- Hull axes to world at yaw 0: bow = +Z, port = +X, so starboard = -X.
+        getLinearVelocity = function()
+            return { x = -harness.craft.vStarboard, y = harness.craft.vy,
+                     z = harness.craft.vBow }
+        end,
+        getVelocity = function()
+            return { x = -harness.craft.vStarboard, y = harness.craft.vy,
+                     z = harness.craft.vBow }
+        end,
         -- World-frame angular velocity in RADIANS/second, matching CC:Sable.
         -- The craft stores degrees/second because that is what the report
         -- reads in; converting here rather than there keeps the stub honest to

@@ -366,9 +366,31 @@ ratio check is two-sided, and there is a per-axis absolute ceiling.
    does not level. That is item 3 below, and it is now the blocking piece for
    flying the craft flat.
 
-2. **Measure the pitch spring, then add pitch damping.** Only roll's 42 s
-   period was ever measured, and the pitch offset is the larger of the two.
-   Same actuator, fore/aft sign pattern.
+2. **FLY `/fcs/trimflight.lua`.** Written, harness-flown in three modes,
+   deployed; never flown on the craft. It is the DC half of the drift fix:
+
+       /fcs/trimflight.lua --ground-only   the maths and the plan, commands nothing
+       /fcs/trimflight.lua --probe-only    measure the coupling sign, then land
+       /fcs/trimflight.lua                 measure, then trim, then verify
+
+   **The standing offsets explain 94% of the craft's drift speed** -- +0.368
+   roll and -0.638 pitch imply 1.571 blocks/s against a measured mean of 1.670.
+   That is a DC problem with a DC fix. It does NOT fix the CURVING; that is the
+   damper's job, and the damper now works.
+
+   **Pitch is the bigger half** (1.361 vs 0.785 blocks/s). Everything this
+   project has done about drift went to roll, because the repaired RR deficit
+   was a roll torque. Trimming roll alone collects 31% of what is available.
+
+   Phase A MEASURES the bearing coupling sign by reverse pairs at 2 degrees --
+   it has never been measured, and a saturated 12 degree command with it wrong
+   once ran the craft from 1.76 to 11.5 blocks/s. Phase B refuses to trim on a
+   gain too small to trust. Harness-proved for BOTH signs and for the refusal:
+   `luajit tools/run_trimflight_harness.lua positive|negative|nocoupling`.
+
+   Expect roughly a 5x reduction in drift speed, not a cure: trimming with
+   bearings buys back 0.272 blocks/s of its own lateral force against the 1.571
+   it removes.
 
 3. **Trim standing tilt on the bearings.** 0.63 deg cancels the roll offset,
    1.16 deg the pitch one. This is also the safe way to finally measure the
@@ -1947,6 +1969,7 @@ each bearing's own axis. Measure it before closing any loop.
 | `/fcs/propctl.lua`, `/fcs/bankctl.lua` | manual single commands | commands hardware |
 | `/fcs/podprobe.lua` | why a pod stops answering: ghost host vs slow pod vs packet loss | grounded; echoes each corner its OWN rpm |
 | `/fcs/rolldampflight.lua` | does differential-RPM damping actually damp? A/B on an injected pulse | **FLIES**; `--ground-only` safe |
+| `/fcs/trimflight.lua` | measures the bearing coupling SIGN, then cancels the standing tilt | **FLIES**; `--ground-only` and `--probe-only` |
 | probes | `/pod/yawprobe.lua`, `obstructionprobe.lua`, `thrustprobe.lua`, `stabprobe.lua`, `/fcs/pressureprobe.lua` | read-only diagnostics |
 | `tools/test_mixer.lua` | 102 assertions | offline |
 | `tools/test_atmosphere.lua` | 37 assertions, pinned to in-game measurements | offline |
@@ -2065,6 +2088,9 @@ answers on this project; measurement has not.
     luajit tools/test_banks_poll.lua    poll only what has gone quiet
     luajit tools/run_rolldampflight_harness.lua damped|undamped|wrongsign
                                         the damper A/B, and its two negative controls
+    luajit tools/test_trim.lua          the trim maths, for EITHER coupling sign
+    luajit tools/run_trimflight_harness.lua positive|negative|nocoupling
+                                        the trim flight; both signs must work
     luajit tools/run_podprobe_harness.lua all   the comms probe, in each
                                         failure mode it must tell apart
 
