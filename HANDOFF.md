@@ -71,7 +71,7 @@ oscillation, seen from above.
 #### Three layers, separated by TIMESCALE
 
     layer 1   RATE DAMPING       ~0.15 s   differential prop RPM
-              roll: FLOWN AND WORKING.  pitch: DOES NOT EXIST.
+              roll: FLOWN AND WORKING.  pitch: BUILT, NOT YET FLOWN.
 
     layer 2   VELOCITY HOLD      seconds   bearing common-mode tilt
               never flown. fcs/lateralhold.lua implements it, 73 assertions.
@@ -99,10 +99,18 @@ separation and the two loops chase each other.
    sending all along. Numbers in **THE BEARING GAIN** below. Re-run it whenever
    the hull's load changes.
    Cheapest thing here and it unblocks the rest.
-2. **PITCH DAMPING.** Measure the pitch spring first (never done -- only roll's
-   42 s period was), then the fore/aft sign pattern on the same actuator.
-   Expect authority near half of roll's. This is the largest single win
-   available: half the oscillation that makes the curve is undamped.
+2. **PITCH DAMPING -- `/fcs/pitchdampflight.lua` IS BUILT AND WAITING TO FLY.**
+   The largest single win available: half the oscillation that makes the curve
+   is undamped. One flight measures all three unknowns from one pulse --
+   authority, SIGN, and the spring nobody has ever measured -- and then damps
+   with them. Roughly 6 minutes. `--measure-only` stops after phase A.
+
+   Expect authority near **0.0493** (measured roll over the unit-free
+   geometric ratio 1.91 -- that route cancels the unexplained 2.9x in the
+   force chain, so it is a real prediction). The spring is genuinely open: if
+   the restoring torque per degree matches roll's it is 0.00497, an **89 s**
+   period; if the hull levels both axes at the same rate it is roll's own
+   0.0223, **42 s**. The tool reads back whichever it is and names it.
 3. **FLY VELOCITY HOLD** with the calibrated gain.
 4. Only then ask whether any standing trim is still wanted. Probably not.
 
@@ -152,7 +160,7 @@ design failed by asking one of them to do a job it is structurally incapable of.
 
 | job | actuator | authority | status |
 |---|---|---|---|
-| **damp** (fast, large) | differential prop RPM | **0.0941 deg/s^2 per rpm** | roll FLOWN; pitch missing |
+| **damp** (fast, large) | differential prop RPM | **0.0941 deg/s^2 per rpm** (roll); pitch predicted 0.0493 | roll FLOWN; pitch BUILT, unflown |
 | **translate** (drift) | bearing tilt, common mode | **0.8165 blocks/s per deg at 64 rpm** — measured | never flown |
 | **trim** (slow, tiny) | bearing tilt | roll -0.86, pitch +0.64 hull deg per deg | flown; drift-neutral |
 
@@ -312,10 +320,19 @@ prints the per-corner thrust spread, which is where that check would start.
    **Measure it: hull level under the damper, a known tilt at 64 rpm, terminal
    net drift.**
 
-2. **PITCH DAMPING DOES NOT EXIST.** `rolldamp.cornerRpm` uses the
-   port/starboard sign pattern only. Pitch needs fore/aft, and its authority
-   should land near half of roll's (2.35x the arm, 4.5x the inertia). **The
-   pitch spring has never been measured** -- only roll's 42 s period was.
+2. **PITCH DAMPING IS BUILT BUT HAS NOT FLOWN.** `fcs/pitchdamp.lua` and
+   `/fcs/pitchdampflight.lua`, 2026-08-27. Three quantities are still
+   UNMEASURED on the craft -- the authority, the sign, and the spring -- and
+   `pitchdamp.MEASURED` ships all of them **nil** on purpose:
+   `differentialFor` returns 0 and a reason rather than commanding from a
+   prediction. The flight measures them and only then damps.
+
+   The sign is the one to watch. Raising the FORWARD corners *should* raise
+   the bow; the same reasoning had roll and pitch transposed for weeks, and
+   the bearing coupling came back opposite to prediction on one axis and not
+   the other. The tool measures a SIGNED authority and divides by it, so it
+   damps either way -- proven in the harness, where the `wrongsign` craft is
+   damped exactly as well as the right-signed one.
 
 3. **THE STANDING OFFSETS ARE NOT CONSTANTS.** They have moved every flight:
    recorded +0.368/-0.638, then -0.490/+0.498, +0.205/+0.692, -0.244/+0.695.
@@ -349,6 +366,11 @@ prints the per-corner thrust spread, which is where that check would start.
   oscillation contributes even when the mean velocity is zero. Run 1 of the
   trim was judged on it and could not be. Use NET DISPLACEMENT over the window.
 - **Do not chase FR.** It answered 20 of 20. The per-pod hunt is over.
+- **Do not search a whole window for an impulse peak.** It works only while
+  the window is short against the spring. The pitch tool's first harness run
+  read an authority of -0.0015 -- 3% of prediction and BACKWARDS -- because on
+  a 120 s window the largest rate is the oscillation's own swing 46 s later,
+  not the pulse. `authorityFromPulse` takes a bound now; pass one.
 - **Do not store a gain, and do not fly to measure something the telemetry
   already reports.** The bearing lateral gain cost two trim flights and was
   sitting in `getThrust` the whole time. Before planning a flight, ask which

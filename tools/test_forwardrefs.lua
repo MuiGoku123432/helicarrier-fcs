@@ -26,6 +26,8 @@ local FILES = {
     "fcs/tiltctl.lua", "fcs/banks.lua", "fcs/podprobe.lua",
     "fcs/rolldampflight.lua",
     "fcs/trim.lua", "fcs/trimflight.lua",
+    "fcs/bearinggain.lua", "fcs/bearingsweep.lua",
+    "fcs/pitchdamp.lua", "fcs/pitchdampflight.lua",
     -- The harness too. It is not flight code, but the rule is the same and it
     -- has now cost a run: commandedTilt() was called from stepRotation fifty
     -- lines above its own definition, and the flight died at "climb to +12".

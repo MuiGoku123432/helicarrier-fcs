@@ -185,6 +185,13 @@ harness.model = {
     -- Set explicitly by tools/run_rolldampflight_harness.lua. Left at 1.0 here
     -- so no existing runner changes behaviour.
     propRollScale = 1.0,
+    -- Pitch's own versions of the three knobs above. All nil by default, each
+    -- falling back to its roll counterpart, so every existing runner is
+    -- untouched and a pitch runner can make the axes genuinely different.
+    propPitchScale = nil,
+    cornerArmLongitudinal = nil,
+    pitchRestoring = nil,
+    pitchDamping = nil,
 
     -- --- bearings as a TRIM actuator ---------------------------------------
     -- A bearing tilt makes a HORIZONTAL force. The two props of a corner sit at
@@ -480,7 +487,21 @@ local function stepRotation(dt)
     local rl, rr = ionRL + propRL, ionRR + propRR
 
     local arm = harness.model.cornerArmBlocks
+    -- PITCH ACTS ON A DIFFERENT LEVER, and until now the harness pretended it
+    -- did not. craftgeom solves the hull box at 87.1 beam by 205.1 length, so
+    -- the longitudinal arm is 2.35x the lateral one -- and with a single arm
+    -- the harness's roll/pitch authority ratio came out as the bare inertia
+    -- ratio, 4.49, which is precisely the SQUARE-CRAFT number that let run 18's
+    -- impossible reading through. Defaults to the lateral arm so no existing
+    -- runner changes behaviour.
+    local longArm = harness.model.cornerArmLongitudinal
+        or harness.model.cornerArmBlocks
     local propScale = harness.model.propRollScale or 1.0
+    -- Pitch gets its own scale for the same reason roll has one: the measured
+    -- response and the thrust model disagree by 2.9x on roll and nobody knows
+    -- why, so the pitch factor is a separate knob rather than an assumption
+    -- that the same error applies. Defaults to roll's.
+    local pitchScale = harness.model.propPitchScale or propScale
     -- roll: port (FL, RL) minus starboard (FR, RR). Port pushing harder raises
     -- port, drops starboard, and positive roll is starboard-low. Correct.
     --
@@ -499,7 +520,8 @@ local function stepRotation(dt)
     -- other and both disagreed with the craft -- the same way the harness's
     -- axis labels matched attitude.lua's wrong ones. Measured in flight:
     -- a +0.3 pitch demand produced -2.12 deg/s^2.
-    local pitchTorque = arm * ((fl + fr) - (rl + rr))
+    local pitchTorque = longArm * (((ionFL + ionFR) - (ionRL + ionRR))
+        + pitchScale * ((propFL + propFR) - (propRL + propRR)))
 
     -- Grounded, the ground carries the moment: a resting craft does not tip
     -- from a small thrust differential. This is why the pulse test has to fly.
@@ -522,17 +544,29 @@ local function stepRotation(dt)
 
     -- Optional restoring moment (returns toward level) and angular damping
     -- (opposes rate). Both zero unless a runner turns them on.
+    -- THE TWO AXES GET THEIR OWN SPRINGS. They used to share rollRestoring,
+    -- which made the harness a craft whose pitch and roll level themselves at
+    -- exactly the same rate -- and that is the single quantity
+    -- /fcs/pitchdampflight.lua exists to measure. A harness that assumes the
+    -- answer cannot test the tool that asks the question. Both default to the
+    -- roll values, so no existing runner changes behaviour.
     local restoring = harness.model.rollRestoring or 0
     local damping = harness.model.rollDamping or 0
+    local pitchRestoring = harness.model.pitchRestoring or restoring
+    local pitchDamping = harness.model.pitchDamping or damping
     if restoring ~= 0 then
         craft.rollRate = craft.rollRate
             - restoring * (craft.roll - (harness.model.rollEquilibrium or 0)) * dt
+    end
+    if pitchRestoring ~= 0 then
         craft.pitchRate = craft.pitchRate
-            - restoring * (craft.pitch - (harness.model.pitchEquilibrium or 0)) * dt
+            - pitchRestoring * (craft.pitch - (harness.model.pitchEquilibrium or 0)) * dt
     end
     if damping ~= 0 then
         craft.rollRate = craft.rollRate - damping * craft.rollRate * dt
-        craft.pitchRate = craft.pitchRate - damping * craft.pitchRate * dt
+    end
+    if pitchDamping ~= 0 then
+        craft.pitchRate = craft.pitchRate - pitchDamping * craft.pitchRate * dt
     end
 
     craft.roll = craft.roll + craft.rollRate * dt

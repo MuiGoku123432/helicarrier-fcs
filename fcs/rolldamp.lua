@@ -226,11 +226,12 @@ end
 --
 -- The floor is the damper's own deadband: below that the damper is not acting,
 -- so motion below it is not oscillation the damper is failing to stop.
-function rolldamp.zeroCrossings(samples, floor)
+function rolldamp.zeroCrossings(samples, floor, field)
     floor = floor or rolldamp.DEFAULTS.deadbandRate
+    field = field or "rollRate"
     local crossings, armedSign = 0, nil
     for _, sample in ipairs(samples) do
-        local rate = sample.rollRate
+        local rate = sample[field]
         if rate and math.abs(rate) >= floor then
             local sign = rate > 0 and 1 or -1
             if armedSign and sign ~= armedSign then
@@ -255,14 +256,36 @@ end
 -- while the RSC spun down. Measuring to the peak captures the whole impulse;
 -- using the release instant alone understates the time and so overstates the
 -- authority.
-function rolldamp.authorityFromPulse(samples, pulseRpm, pulseSeconds)
+--
+-- SEARCHSECONDS BOUNDS THE HUNT, and on a slow axis it is not optional.
+--
+-- "Peak over the window" is only the impulse response while the window is
+-- short compared with the spring. Give the same code a 120 s window on an axis
+-- whose period is 89 s and the largest rate in it is the oscillation's own
+-- swing half a minute later -- which has nothing to do with the pulse and
+-- carries the OPPOSITE sign. Measured in the harness: the pitch flight read
+-- -0.0015 deg/s^2 per rpm, 3% of prediction and backwards, off a peak found at
+-- t = 46.5 s. Nothing was wrong with the craft or the pulse.
+--
+-- Default nil keeps the whole window, which is what the roll flight measured
+-- at and what its recorded numbers mean. Any caller with a window longer than
+-- a few seconds should pass a bound.
+function rolldamp.authorityFromPulse(samples, pulseRpm, pulseSeconds, field,
+    searchSeconds)
+    field = field or "rollRate"
     if #samples == 0 or not pulseRpm or pulseRpm == 0 then return nil end
 
-    local peak, peakAt = 0, 0
+    -- SIGNED peak, because the pitch damper does not know its sign yet. The
+    -- roll pattern was measured long ago and this function only ever needed a
+    -- magnitude; on a fresh axis, WHICH WAY the craft went is the whole point,
+    -- and a magnitude-only answer is how a damper gets built backwards.
+    local peak, peakAt, signedPeak = 0, 0, 0
     for _, sample in ipairs(samples) do
-        local magnitude = math.abs(sample.rollRate or 0)
+        if searchSeconds and sample.t and sample.t > searchSeconds then break end
+        local value = sample[field] or 0
+        local magnitude = math.abs(value)
         if magnitude > peak then
-            peak, peakAt = magnitude, sample.t
+            peak, peakAt, signedPeak = magnitude, sample.t, value
         end
     end
     if peak <= 0 then return nil end
@@ -271,18 +294,118 @@ function rolldamp.authorityFromPulse(samples, pulseRpm, pulseSeconds)
     -- however long the rate kept climbing afterwards.
     local effectiveSeconds = pulseSeconds + math.max(peakAt, 0)
     if effectiveSeconds <= 0 then return nil end
-    return (peak / effectiveSeconds) / math.abs(pulseRpm), peak, effectiveSeconds
+    -- Magnitude first (every existing caller wants that), then the signed
+    -- authority: positive means a positive differential produced a positive
+    -- rate on this axis.
+    local magnitude = (peak / effectiveSeconds) / math.abs(pulseRpm)
+    local signed = (signedPeak / effectiveSeconds) / pulseRpm
+    return magnitude, peak, effectiveSeconds, signed
+end
+
+-- ---------------------------------------------------------------------------
+-- The SPRING, from the free oscillation
+--
+-- The hull levels itself, and how hard is a physical constant of the craft:
+-- alpha = -k * angle, so it oscillates at omega = sqrt(k) and a period of
+-- 2*pi/sqrt(k). Roll's k = 0.0223 came from a 42 s period observed once.
+-- PITCH'S HAS NEVER BEEN MEASURED AT ALL, and it is not safe to assume the two
+-- are equal: if the restoring TORQUE per degree were the same on both axes,
+-- pitch would spring at k/4.49 -- a 89 s period, twice roll's -- because pitch
+-- carries 4.49x the inertia. Assuming roll's number for pitch would set
+-- critical damping 2.1x too high.
+--
+-- These two are the whole conversion, kept in one place so a period measured
+-- in flight becomes a damping gain without anybody doing it by hand.
+-- ---------------------------------------------------------------------------
+
+function rolldamp.springFromPeriod(seconds)
+    if type(seconds) ~= "number" or seconds <= 0 then return nil end
+    local omega = 2 * math.pi / seconds
+    return omega * omega
+end
+
+function rolldamp.periodFromSpring(spring)
+    if type(spring) ~= "number" or spring <= 0 then return nil end
+    return 2 * math.pi / math.sqrt(spring)
+end
+
+-- WHEN the rate crossed zero, not merely how often. Same hysteresis as
+-- zeroCrossings -- a trace that has finished jitters across zero and every one
+-- of those is a "crossing" to a naive counter -- but it hands back the times,
+-- because half the interval between consecutive crossings is a period.
+function rolldamp.crossingTimes(samples, floor, field)
+    floor = floor or rolldamp.DEFAULTS.deadbandRate
+    field = field or "rollRate"
+    local times, armedSign, previous = {}, nil, nil
+    for _, sample in ipairs(samples) do
+        local rate = sample[field]
+        if rate and math.abs(rate) >= floor then
+            local sign = rate > 0 and 1 or -1
+            if armedSign and sign ~= armedSign then
+                -- Linear interpolation between the last armed sample and this
+                -- one. At 0.15 s sampling against a 40-90 s period the
+                -- correction is small, but it costs nothing and it stops the
+                -- period estimate quantising to the loop rate.
+                local crossing = sample.t
+                if previous and previous.rate and previous.t then
+                    local span = rate - previous.rate
+                    if math.abs(span) > 1e-9 then
+                        local fraction = -previous.rate / span
+                        if fraction >= 0 and fraction <= 1 then
+                            crossing = previous.t + fraction * (sample.t - previous.t)
+                        end
+                    end
+                end
+                times[#times + 1] = crossing
+            end
+            armedSign = sign
+            previous = { t = sample.t, rate = rate }
+        end
+    end
+    return times
+end
+
+-- The oscillation period, from the crossing times. A full period is TWO
+-- crossings, so the period is twice the mean interval.
+--
+-- Returns period, the number of intervals behind it, and their spread as a
+-- fraction of the mean. THE SPREAD IS THE POINT: one interval is not a
+-- measurement, and a period whose intervals disagree by half is a craft doing
+-- something other than ringing at a single frequency. Roll's recorded 42 s
+-- came from a single observation and the damper flight suggests it is nearer
+-- 35 -- exactly the kind of number that needs its own error bar.
+function rolldamp.measurePeriod(samples, floor, field)
+    local times = rolldamp.crossingTimes(samples, floor, field)
+    if #times < 2 then return nil, #times end
+
+    local intervals, total = {}, 0
+    for index = 2, #times do
+        local gap = times[index] - times[index - 1]
+        intervals[#intervals + 1] = gap
+        total = total + gap
+    end
+    local mean = total / #intervals
+
+    local low, high = math.huge, -math.huge
+    for _, gap in ipairs(intervals) do
+        if gap < low then low = gap end
+        if gap > high then high = gap end
+    end
+    local spread = mean > 0 and ((high - low) / mean) or nil
+
+    return mean * 2, #intervals, spread
 end
 
 -- Time for |roll rate| to fall to 1/e of its starting value, read off the
 -- running peak rather than fitted. A fit would imply a model of the decay
 -- shape; this asks only "when did it get small", which is what the comparison
 -- needs and is robust to the shape being wrong.
-function rolldamp.decayTime(samples)
+function rolldamp.decayTime(samples, field)
+    field = field or "rollRate"
     if #samples == 0 then return nil end
     local peak = 0
     for _, sample in ipairs(samples) do
-        local magnitude = math.abs(sample.rollRate or 0)
+        local magnitude = math.abs(sample[field] or 0)
         if magnitude > peak then peak = magnitude end
     end
     if peak <= 0 then return nil, peak end
@@ -291,12 +414,12 @@ function rolldamp.decayTime(samples)
     -- The first time it drops below the target AND STAYS below for a second:
     -- a single sample dipping through zero mid-oscillation is not decay.
     for index, sample in ipairs(samples) do
-        if math.abs(sample.rollRate or 0) <= target then
+        if math.abs(sample[field] or 0) <= target then
             local stayed, checked = true, 0
             for ahead = index, #samples do
                 if samples[ahead].t - sample.t > 1.0 then break end
                 checked = checked + 1
-                if math.abs(samples[ahead].rollRate or 0) > target then
+                if math.abs(samples[ahead][field] or 0) > target then
                     stayed = false
                     break
                 end
@@ -318,10 +441,16 @@ end
 -- Clamped to a floor: dropping a corner's props toward zero sheds the lift
 -- that corner is carrying, and the last hover run showed what one corner
 -- losing its props does -- FR went to 0 and the craft rolled past 28 degrees.
+--
+-- `options.signs` overrides the pattern, which is how the PITCH damper uses
+-- this same function: roll is port/starboard, pitch is fore/aft, and the only
+-- difference between the two dampers is which four numbers go here.
+rolldamp.ROLL_SIGNS = { FL = 1, FR = -1, RL = 1, RR = -1 }
+
 function rolldamp.cornerRpm(baseRpm, differential, options)
     options = options or {}
     local floor = options.minimumRpm or 8
-    local signs = { FL = 1, FR = -1, RL = 1, RR = -1 }
+    local signs = options.signs or rolldamp.ROLL_SIGNS
 
     local result = {}
     for corner, sign in pairs(signs) do
