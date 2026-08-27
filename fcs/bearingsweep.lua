@@ -251,11 +251,18 @@ local function measureRpm(rpm)
         spread = math.max(spread, math.abs(value / mean - 1))
     end
 
+    -- ALTITUDE ON EVERY ROW. Run 2 lifted at 48 rpm where run 1 had held the
+    -- ground all the way to 64, on the same thrust and the same mass -- so the
+    -- craft was not resting the way it had been, and there was no way to see
+    -- that coming in the log because only the abort reported height.
+    local nowState = session:read()
+    local nowY = nowState and session:craftY(nowState)
+    local gain = (nowY and baseY) and (nowY - baseY) or nil
+
     note(string.format("  %3d rpm  thrust/bearing %10.1f   per rpm %7.2f"
-        .. "   corners %d  spread %4.1f%%  bearing rpm %s",
+        .. "   corners %d  spread %4.1f%%  y %+5s",
         rpm, mean, mean / rpm, cornerCount, spread * 100,
-        reportedSamples > 0
-            and string.format("%.0f", reportedRpm / reportedSamples) or "--"))
+        gain and string.format("%.2f", gain) or "?"))
 
     return {
         rpm = rpm,
@@ -493,7 +500,60 @@ local function mainLoop()
         return
     end
 
-    if not skipTilt and not lifted then
+    -- THE TILT CHECK IS THE MORE IMPORTANT HALF, so a lift abort must not
+    -- silently skip it. Run 2 aborted at 48 rpm and returned no tilt readback
+    -- at all -- and the readback was the whole reason that run was flown, after
+    -- the velocity flight measured a craft whose bearings never moved.
+    --
+    -- So: cut the props, let the hull come back down, and do the check at the
+    -- highest rpm that DID hold the ground.
+    if not skipTilt and lifted and #samples > 0 then
+        local safeRpm = samples[#samples].rpm
+        note("")
+        note(string.format("  it lifted, so the tilt check runs at %d rpm -- the highest"
+            .. " that held", safeRpm))
+        note("  the ground. Cutting props and waiting for the hull to settle.")
+        session:setAllProps(0)
+
+        -- CLEAR THE FLAG BEFORE WAITING. waitSeconds returns immediately while
+        -- `lifted` is set -- that is what stops the sweep -- so waiting for the
+        -- descent with it still true spins without ever advancing the clock.
+        -- It hung the harness. The flag has done its job by here: the props are
+        -- off and the sweep is over.
+        lifted = false
+
+        -- WAIT FOR IT TO COME DOWN, rather than for a fixed count. A craft that
+        -- has just lifted is still moving upward when the props stop, and a
+        -- fixed 8 s wait declared a harness craft "not resting on the ground"
+        -- while it was halfway through falling back to it.
+        -- BOUNDED BY ITERATIONS, not by the clock. A wall-clock deadline here
+        -- hung the harness: if time does not advance the way the loop assumes,
+        -- a `while os.epoch() < deadline` never exits. A fixed number of waits
+        -- always terminates, whatever the clock is doing.
+        local gain, y
+        for _ = 1, 12 do
+            waitSeconds(1.0)
+            local state = session:read()
+            y = state and session:craftY(state)
+            gain = (y and baseY) and (y - baseY) or nil
+            if gain and gain <= plan.liftAbort then break end
+        end
+        if gain and gain > plan.liftAbort then
+            note(string.format("  ** STILL %+.2f BLOCKS UP with the props stopped. The hull"
+                .. " is not", gain))
+            note("  ** resting on the ground, and nothing measured here can be trusted")
+            note("  ** as a ground reading. Land it and re-run.")
+        else
+            local set = session:setAllProps(safeRpm)
+            commandedProps = true
+            if set then
+                waitSeconds(plan.settleSeconds)
+                lateralCheck(safeRpm)
+            else
+                note("  could not re-command the props for the tilt check")
+            end
+        end
+    elseif not skipTilt and not lifted then
         lateralCheck(samples[#samples].rpm)
     end
 

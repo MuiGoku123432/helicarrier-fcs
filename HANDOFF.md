@@ -486,6 +486,32 @@ before believing either.**
 `pitchdamp.MEASURED` still ships every field **nil**. Two runs have disagreed by
 a factor of two and a sign; nothing here is safe to store yet.
 
+### RUN 2 OF THE SWEEP: THE CRAFT LIFTED AT 48 RPM
+
+`flight-logs/bearingsweep_run2_lifted.txt`, 2026-08-27, three hours after run 1.
+
+    run 1   16 / 32 / 48 / 64 rpm all completed, hull on the ground throughout
+    run 2   16 / 32 completed; at 48 rpm the hull ROSE 0.89 blocks and aborted
+
+**On the same thrust and the same mass.** 13646 vs 13519 per bearing at 16 rpm
+(+0.9%), live mass 105296.4 against 105299.4. Nothing about the craft's lift or
+its weight changed, so **the craft is not resting the way it was** -- it is
+supported differently, or not fully supported. It drifted for about five
+minutes at 1.4 blocks/s during the failed velocity flight before landing, which
+is a few hundred blocks from where it started.
+
+This matters beyond the sweep: "64 rpm is 52.1% of weight and props-only hover
+is 122-124 rpm" is a measured fact from a craft sitting flat on the floor. A
+hull that lifts at 48 is not in that condition, and **no ground reading taken
+in that state should be trusted** -- including the bearing gain itself.
+
+**FIXED IN THE TOOL.** A lift abort used to skip the tilt readback entirely,
+which is how run 2 came back without the one number it had been flown for. It
+now cuts the props, waits for the hull to come down, and runs the tilt check at
+the highest rpm that DID hold the ground -- or says plainly that the hull never
+came back down. Every rpm row also reports the altitude gain, so a craft
+creeping upward is visible before it aborts.
+
 ### THE BEARING GAIN -- measured, 2026-08-27, on the ground
 
 `/fcs/bearingsweep.lua`, ~2 minutes, nothing armed, the craft never left the
