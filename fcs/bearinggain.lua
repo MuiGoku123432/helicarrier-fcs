@@ -223,12 +223,59 @@ function bearinggain.fitScaling(samples)
         end
     end
 
+    -- AFFINE: thrust = slope * rpm + offset, fitted WITHOUT forcing the
+    -- origin. The craft needed this on its first real sweep. Proportional
+    -- fitting made thrust/rpm climb 844.95 -> 865.94 across 16-64 and the
+    -- verdict came out NONLINEAR, which read as "this reading says nothing
+    -- about another rpm" -- alarming, and wrong. The data is a straight line
+    -- with a small NEGATIVE offset: 872.49 per rpm less 442.6, r^2 = 0.999997,
+    -- every point inside 0.11%.
+    --
+    -- And that slope is the recorded 872.56 to 0.0085%. The offset is what a
+    -- through-the-origin fit has to absorb by bending, and it is only 0.8% of
+    -- the thrust at 64 rpm against 3.3% at 16 -- which is exactly the shape
+    -- that makes a low-rpm calibration read high per rpm.
+    local slope, offset, affineR2
+    if #usable >= 3 then
+        local n = #usable
+        local meanX, meanY = 0, 0
+        for _, sample in ipairs(usable) do
+            meanX, meanY = meanX + sample.rpm, meanY + sample.thrust
+        end
+        meanX, meanY = meanX / n, meanY / n
+        local covariance, variance = 0, 0
+        for _, sample in ipairs(usable) do
+            covariance = covariance + (sample.rpm - meanX) * (sample.thrust - meanY)
+            variance = variance + (sample.rpm - meanX) ^ 2
+        end
+        if variance > 0 then
+            slope = covariance / variance
+            offset = meanY - slope * meanX
+            local affineResidual, affineTotal = 0, 0
+            for _, sample in ipairs(usable) do
+                affineResidual = affineResidual
+                    + (sample.thrust - (slope * sample.rpm + offset)) ^ 2
+                affineTotal = affineTotal + (sample.thrust - meanY) ^ 2
+            end
+            if affineTotal > 0 then affineR2 = 1 - affineResidual / affineTotal end
+        end
+    end
+
     return {
         perRpm = perRpm,
         exponent = exponent,
         r2 = r2,
         samples = #usable,
         spread = minRatio > 0 and (maxRatio / minRatio) or nil,
+        slope = slope,
+        offset = offset,
+        affineR2 = affineR2,
+        -- How much of the top reading the offset accounts for. Small means the
+        -- straight line is the whole story; large means it is a threshold
+        -- effect that a proportional model would misread badly.
+        offsetShare = (slope and offset and maxRatio > 0)
+            and math.abs(offset) / math.abs(slope * usable[#usable].rpm + offset)
+            or nil,
     }
 end
 
@@ -240,17 +287,39 @@ function bearinggain.thrustAtRpm(fit, rpm)
 end
 
 bearinggain.LINEAR_SPREAD_LIMIT = 1.02
+bearinggain.AFFINE_R2_LIMIT = 0.999
+-- An offset worth more than a tenth of the top reading is not a straight line
+-- with a quirk, it is a threshold, and extrapolating through it is a mistake.
+bearinggain.OFFSET_SHARE_LIMIT = 0.10
 
 -- Is the sweep linear enough to extrapolate from? A verdict rather than a
 -- number, because the caller has to decide whether to trust a gain built on it.
+--
+-- THREE ANSWERS, NOT TWO, because the craft turned out to be the third. A
+-- proportional fit bends to absorb a constant offset and the spread test then
+-- reports NONLINEAR on data that is a textbook straight line. LINEAR+OFFSET is
+-- as good as LINEAR for reading a gain AT a measured rpm, and it is the
+-- warning you want when extrapolating DOWN toward zero rpm, where the offset
+-- is the whole signal.
 function bearinggain.scalingVerdict(fit)
     if not fit then return "NO FIT" end
     if fit.samples < 3 then return "TOO FEW RPMS" end
     if fit.spread and fit.spread <= bearinggain.LINEAR_SPREAD_LIMIT then
         return "LINEAR"
     end
+    if fit.affineR2 and fit.affineR2 >= bearinggain.AFFINE_R2_LIMIT
+        and fit.offsetShare
+        and fit.offsetShare <= bearinggain.OFFSET_SHARE_LIMIT then
+        return "LINEAR+OFFSET"
+    end
     if fit.exponent and fit.exponent > 1.6 then return "SUPERLINEAR" end
     return "NONLINEAR"
+end
+
+-- Does a verdict entitle the caller to read a gain at the rpm it measured?
+-- Both linear answers do; a curved or truncated sweep does not.
+function bearinggain.usableAtMeasuredRpm(verdict)
+    return verdict == "LINEAR" or verdict == "LINEAR+OFFSET"
 end
 
 -- How far a live reading has moved from the calibration day, as a ratio. This

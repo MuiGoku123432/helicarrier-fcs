@@ -156,5 +156,53 @@ checkTrue("zero rpm is dropped, not divided by",
     bearinggain.fitScaling({ { rpm = 0, thrust = 0 }, { rpm = 16, thrust = 13960.98 },
         { rpm = 32, thrust = 27921.96 }, { rpm = 48, thrust = 41882.94 } }).samples == 3)
 
+-- --------------------------------------------------------------------------
+-- 4. THE CRAFT'S OWN SWEEP, 2026-08-27. Pinned to the numbers it produced, so
+--    a change to the fit has to answer to the carrier rather than to an
+--    invented curve.
+-- --------------------------------------------------------------------------
+
+local FLOWN = {
+    { rpm = 16, thrust = 13519.2 }, { rpm = 32, thrust = 27496.9 },
+    { rpm = 48, thrust = 41390.8 }, { rpm = 64, thrust = 55420.5 },
+}
+local flown = bearinggain.fitScaling(FLOWN)
+
+-- IT IS A STRAIGHT LINE WITH AN OFFSET, and the first version of this file
+-- could not say so. Forcing the fit through the origin made thrust/rpm climb
+-- 844.95 -> 865.94 and the verdict came out NONLINEAR -- "this rpm says
+-- nothing about another" -- on data whose affine residuals are all under 0.11%.
+check("the flown slope is 872.49 per bearing per rpm", flown.slope, 872.49, 0.05)
+check("with an offset of -442.6", flown.offset, -442.6, 1.0)
+check("affine r2 is 0.999997", flown.affineR2, 0.999997, 1e-5)
+checkEqual("verdict LINEAR+OFFSET", bearinggain.scalingVerdict(flown), "LINEAR+OFFSET")
+checkTrue("...which still entitles a gain at the rpm measured",
+    bearinggain.usableAtMeasuredRpm(bearinggain.scalingVerdict(flown)))
+
+-- THE SLOPE IS THE RECORDED CONSTANT. 6968.34 craft-wide over 8 bearings is
+-- 871.04 each, and the sweep found 872.49 -- 0.17% apart, on a measurement
+-- taken days apart by a different tool. That agreement is what says the two
+-- are the same quantity and the scaling question is closed.
+checkTrue("the slope matches the recorded per-bearing figure inside 0.5%",
+    math.abs(flown.slope / (bearinggain.REFERENCE.craftThrustPerRpm / 8) - 1) < 0.005)
+
+-- The gain that came out of it, which is what the velocity loop is built on.
+local flownGain = bearinggain.perDegree({
+    thrustPerBearing = 55420.5,
+    weight = bearinggain.weightFromMass(105296.4),
+})
+check("a degree of tilt is worth 0.8165 blocks/s at 64 rpm", flownGain, 0.8165, 0.001)
+check("...3.97x what the code stores", flownGain / trim.bearingDrift(1.0), 3.97, 0.01)
+
+-- A THRESHOLD is not a quirk: an offset worth more than a tenth of the top
+-- reading must NOT pass as linear, because extrapolating through it is where
+-- that model does real damage.
+local threshold = bearinggain.fitScaling({
+    { rpm = 16, thrust = 3961 }, { rpm = 32, thrust = 17922 },
+    { rpm = 48, thrust = 31883 }, { rpm = 64, thrust = 45844 },
+})
+checkTrue("a large offset does not pass as linear",
+    not bearinggain.usableAtMeasuredRpm(bearinggain.scalingVerdict(threshold)))
+
 print(string.format("%d passed, %d failed", passed, failed))
 os.exit(failed == 0 and 0 or 1)

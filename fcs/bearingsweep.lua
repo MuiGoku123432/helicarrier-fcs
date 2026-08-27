@@ -366,10 +366,23 @@ local function report(samples, mass, intendedTop)
         fit.r2 and string.format("%.6f", fit.r2) or "--",
         fit.spread and string.format("%.4f", fit.spread) or "--",
         verdict))
+    if fit.slope then
+        note(string.format("  as a straight line:   %.2f per rpm %s %.1f   (r2 %s)",
+            fit.slope, fit.offset and fit.offset < 0 and "-" or "+",
+            math.abs(fit.offset or 0),
+            fit.affineR2 and string.format("%.6f", fit.affineR2) or "--"))
+    end
     note(string.format("  the recorded craft-wide figure is %.2f per rpm over 8 bearings"
         .. " = %.2f each",
         bearinggain.REFERENCE.craftThrustPerRpm,
         bearinggain.REFERENCE.craftThrustPerRpm / 8))
+    if fit.slope then
+        note(string.format("  the SLOPE is that figure to %+.2f%%, which is what says the two"
+            .. " measurements", (fit.slope / (bearinggain.REFERENCE.craftThrustPerRpm / 8) - 1)
+            * 100))
+        note("  are of the same quantity. A constant offset does not change a gain read")
+        note("  AT an rpm; it only matters extrapolating down toward zero.")
+    end
     note("")
 
     local flightRpm = samples[#samples].rpm
@@ -384,7 +397,7 @@ local function report(samples, mass, intendedTop)
         note("  ** re-run once the reason it stopped is understood.")
         note("")
     end
-    if verdict ~= "LINEAR" then
+    if not bearinggain.usableAtMeasuredRpm(verdict) then
         note(string.format("  ** THE SCALING IS NOT LINEAR (%s), so the reading at one rpm"
             .. " says nothing", verdict))
         note("  ** about another. The gain below is good AT THE RPM IT WAS MEASURED AT")

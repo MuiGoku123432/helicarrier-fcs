@@ -1,8 +1,10 @@
 # Helicarrier FCS — session handoff
 
-Last updated: 2026-08-27 (later). THE BEARING LATERAL GAIN NO LONGER NEEDS A
-FLIGHT -- it is live telemetry, and the "uncertain by 4x" was never uncertain,
-it was unread. See step 1 below and **NOTHING MAY BE A STORED CONSTANT**.
+Last updated: 2026-08-27 (later). **THE BEARING LATERAL GAIN IS MEASURED AND
+THE ANSWER IS 4x.** It took a two-minute ground run, not a flight: it was live
+telemetry all along. A degree of common-mode tilt is worth **0.8165 blocks/s**,
+not the 0.205 two files store. See step 1 below and **NOTHING MAY BE A STORED
+CONSTANT**.
 THE ROLL DAMPER HAS FLOWN AND IT WORKS. The bearing
 coupling signs are measured at last -- and they DISAGREE between axes. Trim
 levels the craft and does NOT fix the drift, which is measured rather than
@@ -89,23 +91,13 @@ separation and the two loops chase each other.
 
 #### Do these in this order
 
-1. **CALIBRATE THE BEARING LATERAL GAIN -- ON THE GROUND, `/fcs/bearingsweep.lua`.**
-   ~2 min, nothing armed, the craft never leaves the floor. Everything in
-   layer 2 scales with this number.
-
-   **It does not need a flight, and it never did.** The lateral force is built
-   out of `getThrust`, which the pods already push every second, and `getThrust`
-   is *exactly* linear in rpm -- r^2 = 1.000000 across 8 to 96 RPM, which
-   brackets both 16 and 64. So the flight-rpm figure is **4x** the stored
-   13960.98, a degree of tilt is worth about **0.82 blocks/s** rather than
-   0.205, and what was missing was never data: two files stored a number
-   instead of reading one. The sweep steps 16/32/48/64 rpm (64 is 52% of
-   weight; hover is 122-124) and reads it off, then re-checks at flight rpm
-   that the bearing pair still ADDS -- verified at 16 rpm and never above it.
-
-   That already explains the trim flights: a 1 degree trim was costed at 0.205
-   and really costs 0.82, so trim buys back what it removes, which is exactly
-   what flew.
+1. ~~CALIBRATE THE BEARING LATERAL GAIN~~ **DONE, 2026-08-27, on the ground in
+   two minutes.** `/fcs/bearingsweep.lua`, log in
+   `flight-logs/bearingsweep_run1.txt`. **It never needed a flight** -- the
+   lateral force is built out of `getThrust`, which the pods already push every
+   second, so the question was answered by reading telemetry the craft had been
+   sending all along. Numbers in **THE BEARING GAIN** below. Re-run it whenever
+   the hull's load changes.
    Cheapest thing here and it unblocks the rest.
 2. **PITCH DAMPING.** Measure the pitch spring first (never done -- only roll's
    42 s period was), then the fore/aft sign pattern on the same actuator.
@@ -161,7 +153,7 @@ design failed by asking one of them to do a job it is structurally incapable of.
 | job | actuator | authority | status |
 |---|---|---|---|
 | **damp** (fast, large) | differential prop RPM | **0.0941 deg/s^2 per rpm** | roll FLOWN; pitch missing |
-| **translate** (drift) | bearing tilt, common mode | 0.2-0.8 blocks/s per deg — **uncertain 4x** | never flown |
+| **translate** (drift) | bearing tilt, common mode | **0.8165 blocks/s per deg at 64 rpm** — measured | never flown |
 | **trim** (slow, tiny) | bearing tilt | roll -0.86, pitch +0.64 hull deg per deg | flown; drift-neutral |
 
 - **IONS CANNOT DO ATTITUDE.** One level is 7.42 deg/s^2 against the 0.268
@@ -196,6 +188,69 @@ design failed by asking one of them to do a job it is structurally incapable of.
 - **Pods push full telemetry at ~1 Hz and are never polled while healthy.**
   Steady-state pod-directed traffic is zero from any number of tabs.
 - **`/fcs-dev.lua` (the monitor hub) is still NOT deployed.**
+
+### THE BEARING GAIN -- measured, 2026-08-27, on the ground
+
+`/fcs/bearingsweep.lua`, ~2 minutes, nothing armed, the craft never left the
+floor. Log: `flight-logs/bearingsweep_run1.txt`.
+
+| rpm | thrust per bearing | per rpm | corner spread |
+|---|---|---|---|
+| 16 | 13519.2 | 844.95 | 0.4% |
+| 32 | 27496.9 | 859.28 | 0.2% |
+| 48 | 41390.8 | 862.31 | 0.1% |
+| 64 | **55420.5** | 865.94 | 0.1% |
+
+**It is a straight line with a small offset:**
+
+    thrust = 872.49 x rpm - 442.6      r2 = 0.999997, every point inside 0.11%
+
+**THE SLOPE IS THE RECORDED CONSTANT TO 0.0085%.** 872.49 against the
+872.56 per bearing that 6968.34 craft-wide implies -- measured days apart, by a
+different tool, and they agree to one part in twelve thousand. That agreement
+is what closes the question rather than any single reading.
+
+**THE GAIN, at 64 rpm and the live mass of 105296.4:**
+
+    0.8165 blocks/s of terminal drift per degree of common-mode tilt
+    3.97x the 0.2057 that fcs/trim.lua and lateralhold.terminalSpeed store
+
+**THE LATERAL FORCE ITSELF SCALES 4.00x -- not merely the thrust reading.**
+Same corner, same 8 degree mirrored command, two tools two days apart:
+
+    vectorprobe  16 rpm   lateral  3886.0    lift  -27650.2
+    bearingsweep 64 rpm   lateral 15540.3    lift -110574.9
+    ratio                          3.9990          3.9991
+
+That was the one real doubt left -- whether the *lateral* component takes the
+rpm scaling the way lift does -- and it is now measured, not argued. It also
+retires the worry that the x1.353 air-density factor is hiding in here: the
+ratio is 4.00, not 5.4.
+
+**THE PAIR STILL ADDS AT FLIGHT RPM.** Coherence 1.000, pushing 90 deg =
+STARBOARD at azimuth 0. Verified at 16 rpm and never above it until now; if it
+had come back CANCELS, every lateral number in this document would have been
+describing a force the craft does not feel.
+
+**WHAT IT MEANS.**
+
+- The trim flights are explained with no new theory. A 1 degree trim was costed
+  at 0.206 blocks/s and really costs 0.817, so the actuator pays back what it
+  removes. That is exactly what flew, twice.
+- For layer 2: holding against the measured 1.2-1.7 blocks/s drift wants
+  **1.47 to 2.08 degrees** of tilt, comfortably inside the 4 degree clamp.
+- The vertical sum reads NEGATIVE on this craft (-110574.9 for a corner that is
+  lifting it). That is a handedness convention in `getThrust`, it is consistent
+  across both tools, and it is now modelled in the harness. Not a fault.
+- The per-corner spread is 0.1-0.4%. The four corners are still symmetric.
+
+**One caveat, stated because it is the only one left.** The offset means a fit
+forced through the origin BENDS: read proportionally, thrust/rpm climbs
+844.95 -> 865.94 and a naive linearity test cries NONLINEAR on textbook data.
+`bearinggain.scalingVerdict` returns **LINEAR+OFFSET** for this and still hands
+out the gain, because a constant offset does not change a gain read AT an rpm.
+It only matters extrapolating down toward zero, where the offset is the whole
+signal.
 
 ### NOTHING MAY BE A STORED CONSTANT -- the craft is going to change
 
@@ -242,12 +297,11 @@ prints the per-corner thrust spread, which is where that check would start.
 
 ### What is still open, in the order the strategy needs it
 
-1. **THE BEARING LATERAL GAIN -- ANSWERED, PENDING ONE GROUND RUN.** Run
-   `/fcs/bearingsweep.lua`; it reads the gain off live telemetry in two
-   minutes without flying, and `fcs/bearinggain.lua` computes every drift
-   figure from live thrust and live mass. What follows is the state of the
-   question before that tool existed, kept because the reasoning is still how
-   the answer is checked:
+1. **CLOSED 2026-08-27 -- see THE BEARING GAIN.** Measured 3.97x, ADDS at
+   flight rpm, confirmed against vectorprobe to 0.03%. The reasoning that
+   framed it is kept below because it is still how the answer is checked, and
+   because the shape of the mistake is worth remembering -- two files stored a
+   number instead of reading one, and it cost two flights:
    `2*T*sin(tilt)` uses **T = 13960.98, which is the bearing thrust at 16 RPM
    from a measurement taken ON THE GROUND** -- it reproduces vectorprobe's
    3886.3 at 8 degrees exactly, which is how we know. The craft flies at 64 rpm.

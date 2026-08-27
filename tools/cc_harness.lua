@@ -209,6 +209,9 @@ harness.model = {
     -- craft's real behaviour up against the code's belief and watch the two
     -- disagree by 4x. Turn it on for anything measuring a gain at flight rpm.
     bearingLateralScalesWithRpm = false,
+    -- A constant added to every bearing's reported thrust. Zero here; the
+    -- craft measures about -442.6. See bearingThrust.
+    bearingThrustOffset = 0,
     -- Create's universal drag: a tilt-implied acceleration reaches terminal
     -- velocity rather than integrating. This is why the craft cruises instead
     -- of accelerating away.
@@ -232,6 +235,14 @@ local function bearingThrust(corner, index, rpm)
     local deficient = harness.model.rrDeficit and corner == "RR" and index == 1
     local magnitude = deficient
         and RR5_BEARING_16_PREREPAIR * scale or BASE_BEARING_16 * scale
+    -- The craft's own sweep is a straight line with a small NEGATIVE offset:
+    -- 872.49 per rpm less 442.6, r^2 = 0.999997. Modelled because a
+    -- proportional fit has to BEND to absorb it, and the bend is what made the
+    -- first real sweep report NONLINEAR on textbook-straight data.
+    local offset = harness.model.bearingThrustOffset or 0
+    if offset ~= 0 and math.abs(rpm) > 0 then
+        magnitude = math.max(0, magnitude + offset)
+    end
     -- getThrust is signed by handedness: the pair reports +x and -x.
     return index == 1 and -magnitude or magnitude
 end
@@ -266,12 +277,21 @@ local function bearingVectors(pod, rpm, b1, b2)
     -- AND THE DIRECTION IS PINNED TO THE MEASUREMENT, not to whichever sign
     -- fell out of the algebra: AZIMUTH 0 PUSHES TO STARBOARD, measured on all
     -- four corners, and starboard is -X because port is +X.
+    --
+    -- THE VERTICAL SUM READS NEGATIVE ON THIS CRAFT, and the harness matches it
+    -- rather than tidying it up: vectorprobe logged lift -27650.2 at 16 rpm and
+    -- the gain sweep logged -110574.9 at 64, on the same corner at the same 8
+    -- degrees. A corner lifting the craft reports a downward vector sum,
+    -- because getThrust is signed by handedness and the axes come back paired
+    -- with it. The FIRST version of this model produced +110600 -- right in
+    -- magnitude, wrong in sign, and that is precisely the kind of harness
+    -- disagreement this project has been bitten by five times.
     local lateral = pod.tiltMirror and 1 or -1
     return {
         { name = "bearing_a", thrust = b1, assembled = true,
-          vx = lx, vy = -c, vz = lz },
+          vx = lx, vy = c, vz = lz },
         { name = "bearing_b", thrust = b2, assembled = true,
-          vx = -lateral * lx, vy = c, vz = -lateral * lz },
+          vx = -lateral * lx, vy = -c, vz = -lateral * lz },
     }
 end
 

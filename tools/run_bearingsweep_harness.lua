@@ -10,8 +10,13 @@
 -- reading, so the thing to prove is that it REPORTS WHAT THE CRAFT DOES rather
 -- than what the code believes:
 --
---   linear  the craft as measured (r^2 = 1.000000, 8 to 96 RPM). Must report
---           LINEAR, ~872 per rpm, and a 64 rpm gain 4x the stored constant.
+--   linear  proportional thrust. Must report LINEAR, ~872 per rpm, and a
+--           64 rpm gain 4x the stored constant.
+--   craft   what the carrier actually measured on 2026-08-27: the same slope
+--           with a -442.6 offset. Must report LINEAR+OFFSET and still hand out
+--           the gain -- a proportional fit BENDS to absorb that offset, and
+--           the bend is what made the first real sweep cry NONLINEAR on data
+--           whose residuals are all under 0.11%.
 --   square  a craft whose thrust went as rpm^2. Must NOT report LINEAR --
 --           this is the case where extrapolating from two points would have
 --           produced a confident wrong answer.
@@ -24,7 +29,7 @@
 package.path = "./?.lua;./?/init.lua;" .. package.path
 local harness = require("tools.cc_harness")
 
-local MODES = { "linear", "square", "flat", "dead" }
+local MODES = { "linear", "craft", "square", "flat", "dead" }
 local mode = arg[1] or "linear"
 
 if mode == "all" then
@@ -45,7 +50,9 @@ os.execute("rm -rf /tmp/cc_harness_bearingsweep")
 harness.model.exponent = 1.0
 harness.model.bearingLateralScalesWithRpm = true
 
-if mode == "square" then
+if mode == "craft" then
+    harness.model.bearingThrustOffset = -442.6
+elseif mode == "square" then
     harness.model.exponent = 2.0
 elseif mode == "flat" then
     harness.model.exponent = 0.0
