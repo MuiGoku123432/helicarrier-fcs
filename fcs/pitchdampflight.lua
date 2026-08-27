@@ -89,6 +89,11 @@ local plan = {
     -- simply parks at whatever attitude it is left in -- because it never
     -- recorded where the axis started.
     baselineSeconds = 12,
+    -- THE REVERSE HALF. A short window, because it exists only to measure the
+    -- authority -- the spring and the classification come from the long +P
+    -- window. Costs about 30 s of flight and it is what turns a number that
+    -- flipped sign between two runs into one that does not.
+    reverseWindowSeconds = 25,
 
     settleRate = 0.05,
     settleTimeout = 120,
@@ -328,7 +333,10 @@ end
 -- One half of the A/B
 -- ---------------------------------------------------------------------------
 
-local function recordWindow(label, damped)
+local function recordWindow(label, damped, options)
+    options = options or {}
+    local pulseRpm = options.pulseRpm or plan.pulseRpm
+    local windowSeconds = options.windowSeconds or plan.windowSeconds
     local samples = {}
     session.cheapRead = true
 
@@ -346,19 +354,29 @@ local function recordWindow(label, damped)
         end
     end)
     local baselinePitch = baselineCount > 0 and (baselineTotal / baselineCount) or nil
-    note(string.format("  %s: baseline pitch %s deg over %d samples", label,
-        baselinePitch and string.format("%+.3f", baselinePitch) or "?", baselineCount))
+
+    -- THE PRE-PULSE RATE, which is the number run 1 needed and did not have.
+    -- What a pulse produces is a CHANGE in rate; the craft was already doing
+    -- something, and out of a climb that something is as large as the signal.
+    -- Run 1 read -0.0440 off its own leftover climb motion -- its "peak" was
+    -- the first sample of the window -- where run 2, after sitting quiet,
+    -- read +0.0237. Opposite signs from the same command.
+    local initialRate = pitchRate:rate() or 0
+
+    note(string.format("  %s: baseline pitch %s deg, rate %+.3f deg/s (%d samples)",
+        label, baselinePitch and string.format("%+.3f", baselinePitch) or "?",
+        initialRate, baselineCount))
 
     note(string.format("  %s: pulsing %+d rpm fore/aft for %.1f s",
-        label, plan.pulseRpm, plan.pulseSeconds))
+        label, pulseRpm, plan.pulseSeconds))
 
-    commandDifferentials(0, plan.pulseRpm)
+    commandDifferentials(0, pulseRpm)
     local pulseStop = session:hold(plan.pulseSeconds, function(state, now)
         session:trim(plan.holdGain, flight.MAX_CLIMB_RATE, 0, state)
         local roll = feed(state, now)
         -- The roll damper rides through the pulse. Orthogonal pattern, so it
         -- cannot add or subtract from the pitch torque being applied.
-        commandDifferentials(rollCommand(roll), plan.pulseRpm)
+        commandDifferentials(rollCommand(roll), pulseRpm)
     end)
     if pulseStop then
         note("  " .. label .. ": " .. tostring(pulseStop))
@@ -368,10 +386,9 @@ local function recordWindow(label, damped)
 
     local releasedAt = os.epoch("utc")
     local baseline = nil
-    note(string.format("  %s: released, logging up to %.0f s", label,
-        plan.windowSeconds))
+    note(string.format("  %s: released, logging up to %.0f s", label, windowSeconds))
 
-    local stop = session:hold(plan.windowSeconds, function(state, now)
+    local stop = session:hold(windowSeconds, function(state, now)
         session:trim(plan.holdGain, flight.MAX_CLIMB_RATE, 0, state)
         local roll, pitch = feed(state, now)
 
@@ -421,6 +438,8 @@ local function recordWindow(label, damped)
             samples[#samples] and samples[#samples].t or 0))
     end
     samples.baselinePitch = baselinePitch
+    samples.initialRate = initialRate
+    samples.pulseRpm = pulseRpm
     return samples, (stop ~= "measured") and stop or nil
 end
 
@@ -480,7 +499,7 @@ local function peakAbsPitch(samples)
     return peak
 end
 
-local function analysePhaseA(samples)
+local function analysePhaseA(samples, reverse)
     note("")
     note("== A: what the pulse measured ==")
     note("")
@@ -493,7 +512,7 @@ local function analysePhaseA(samples)
     -- arrives within a second or two of release, while the props spin down.
     local magnitude, peak, seconds, signed = rolldamp.authorityFromPulse(
         samples, plan.pulseRpm, plan.pulseSeconds, "pitchRate",
-        plan.authoritySearchSeconds)
+        plan.authoritySearchSeconds, samples.initialRate)
 
     if not magnitude or peak < plan.minimumDisturbance then
         note(string.format("  NO DISTURBANCE. Peak pitch rate %.4f deg/s, below the"
@@ -507,12 +526,47 @@ local function analysePhaseA(samples)
         return false
     end
 
-    measured.authorityPerRpm = signed
     local predicted, ratio = pitchdamp.predictedAuthority()
 
-    note(string.format("  AUTHORITY  %+.4f deg/s^2 per rpm   (peak %.3f deg/s over %.1f s)",
-        signed, peak, seconds))
-    note(string.format("  predicted  %+.4f  -- measured is %.0f%% of it",
+    note(string.format("  +%d rpm half   %+.4f deg/s^2 per rpm  (peak %.3f deg/s over %.1f s)",
+        plan.pulseRpm, signed, peak, seconds))
+
+    -- THE REVERSE PAIR IS THE ANSWER WHEN THERE IS ONE. Any drift common to
+    -- both halves appears with the same sign in each and cancels in the
+    -- difference, while the response reverses and adds. Same reasoning as
+    -- trim.staticGain, and the same reason it was needed: on this craft the
+    -- thing being measured is smaller than the thing it sits on top of.
+    if reverse then
+        local paired, plusHalf, minusHalf = rolldamp.authorityFromReversePair(
+            samples, reverse, plan.pulseRpm, plan.pulseSeconds, "pitchRate",
+            plan.authoritySearchSeconds, samples.initialRate, reverse.initialRate)
+        if paired then
+            note(string.format("  -%d rpm half   %+.4f deg/s^2 per rpm",
+                plan.pulseRpm, minusHalf))
+            note(string.format("  REVERSE PAIR  %+.4f deg/s^2 per rpm", paired))
+            local spread = math.abs(plusHalf - minusHalf)
+            local mean = (math.abs(plusHalf) + math.abs(minusHalf)) / 2
+            if mean > 0 then
+                note(string.format("  the two halves are %.0f%% apart", spread / mean * 100))
+                if spread / mean > 0.5 then
+                    note("  ** THAT IS TOO FAR APART. The halves are not measuring the")
+                    note("  ** same response, so their difference is not one either.")
+                end
+            end
+            measured.authorityPerRpm = paired
+            signed = paired
+            magnitude = math.abs(paired)
+        else
+            note("  the reverse half produced nothing usable; using the +rpm half alone")
+            measured.authorityPerRpm = signed
+        end
+    else
+        note("  NO REVERSE HALF -- this is a single pulse, and a single pulse")
+        note("  measures the pulse PLUS whatever the craft was already doing.")
+        measured.authorityPerRpm = signed
+    end
+
+    note(string.format("  predicted     %+.4f  -- measured is %.0f%% of it",
         predicted, magnitude / predicted * 100))
     note("")
 
@@ -800,7 +854,22 @@ local function mainLoop()
         return
     end
 
-    local usable = analysePhaseA(off)
+    -- THE REVERSE HALF. Short, and only for the authority: the spring and the
+    -- classification came from the long window above. Settle first so it
+    -- starts from the same kind of quiet the +rpm half did.
+    note("")
+    note("== A2: the reverse pulse, for the authority ==")
+    settle("A2 settle")
+    local reverse, reverseStop = recordWindow("A2", false, {
+        pulseRpm = -plan.pulseRpm,
+        windowSeconds = plan.reverseWindowSeconds,
+    })
+    if reverseStop then
+        note("  the reverse half stopped early: " .. tostring(reverseStop))
+        reverse = nil
+    end
+
+    local usable = analysePhaseA(off, reverse)
 
     if measureOnly or not usable then
         if not usable then

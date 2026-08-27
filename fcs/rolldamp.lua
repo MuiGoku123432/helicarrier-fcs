@@ -270,9 +270,19 @@ end
 -- Default nil keeps the whole window, which is what the roll flight measured
 -- at and what its recorded numbers mean. Any caller with a window longer than
 -- a few seconds should pass a bound.
+--
+-- INITIALRATE IS SUBTRACTED, and without it the reverse pair below cannot
+-- work. What the pulse produced is a CHANGE in rate, not a rate: the craft was
+-- already doing something, and on this craft that something is comparable to
+-- the signal. Peak-of-magnitude is also a nonlinear operator -- it picks
+-- whichever feature happens to be largest -- so two halves of a reverse pair
+-- can end up measuring different features entirely and their difference
+-- cancels nothing. Subtracting the pre-pulse rate first makes the measurement
+-- linear, which is what makes differencing mean anything.
 function rolldamp.authorityFromPulse(samples, pulseRpm, pulseSeconds, field,
-    searchSeconds)
+    searchSeconds, initialRate)
     field = field or "rollRate"
+    initialRate = initialRate or 0
     if #samples == 0 or not pulseRpm or pulseRpm == 0 then return nil end
 
     -- SIGNED peak, because the pitch damper does not know its sign yet. The
@@ -282,7 +292,7 @@ function rolldamp.authorityFromPulse(samples, pulseRpm, pulseSeconds, field,
     local peak, peakAt, signedPeak = 0, 0, 0
     for _, sample in ipairs(samples) do
         if searchSeconds and sample.t and sample.t > searchSeconds then break end
-        local value = sample[field] or 0
+        local value = (sample[field] or 0) - initialRate
         local magnitude = math.abs(value)
         if magnitude > peak then
             peak, peakAt, signedPeak = magnitude, sample.t, value
@@ -300,6 +310,43 @@ function rolldamp.authorityFromPulse(samples, pulseRpm, pulseSeconds, field,
     local magnitude = (peak / effectiveSeconds) / math.abs(pulseRpm)
     local signed = (signedPeak / effectiveSeconds) / pulseRpm
     return magnitude, peak, effectiveSeconds, signed
+end
+
+-- REVERSE PAIRS, which is the technique that finally worked on the bearings.
+--
+-- A single pulse measures the pulse PLUS whatever the craft was already doing,
+-- and on this craft the second term is not small. Run 1 of the pitch flight
+-- pulsed straight out of the climb and read -0.0440 deg/s^2 per rpm; run 2 sat
+-- quiet for 12 s first and read +0.0237. OPPOSITE SIGNS, same command, same
+-- code. Run 1's "peak" was its very first sample -- residual climb motion,
+-- caught by a peak search that had nothing better to find yet.
+--
+-- A quiet baseline fixes most of it. Differencing a +P pulse against a -P one
+-- fixes the rest, and for the same reason trim.staticGain does it: any drift
+-- common to both halves appears with the SAME sign in each peak and cancels in
+-- the difference, while the response reverses and adds.
+--
+--     a = (peak(+P) - peak(-P)) / (2 * P * seconds)
+--
+-- Takes the two halves' SIGNED peaks and their effective durations. Returns the
+-- signed authority, and the two halves' individual values so a caller can see
+-- whether they agreed -- if they disagree wildly the difference is not
+-- measuring a response either.
+function rolldamp.authorityFromReversePair(plusSamples, minusSamples, pulseRpm,
+    pulseSeconds, field, searchSeconds, plusInitial, minusInitial)
+    if not pulseRpm or pulseRpm == 0 then return nil end
+
+    local _, _, plusSeconds, plusSigned = rolldamp.authorityFromPulse(
+        plusSamples, pulseRpm, pulseSeconds, field, searchSeconds, plusInitial)
+    local _, _, minusSeconds, minusSigned = rolldamp.authorityFromPulse(
+        minusSamples, -pulseRpm, pulseSeconds, field, searchSeconds, minusInitial)
+    if not plusSigned or not minusSigned then return nil end
+
+    -- Each half already divides its peak by its own duration and its own
+    -- signed rpm, so both are authorities in the same units and the same sign
+    -- convention. The pair average IS the difference, halved.
+    local combined = (plusSigned + minusSigned) / 2
+    return combined, plusSigned, minusSigned, plusSeconds, minusSeconds
 end
 
 -- ---------------------------------------------------------------------------

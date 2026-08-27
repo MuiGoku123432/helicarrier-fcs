@@ -1,9 +1,11 @@
 # Helicarrier FCS — session handoff
 
-Last updated: 2026-08-27 (later still). **PITCH IS NOT AN UNDAMPED AXIS, AND
-THE FORE/AFT SIGN IS BACKWARDS.** The pitch flight falsified the premise it was
-built on -- see **THE PITCH FLIGHT**, and read it before planning any more
-damping work. **THE BEARING LATERAL GAIN IS MEASURED AND THE ANSWER IS 4x.** It took a two-minute ground run, not a flight: it was live
+Last updated: 2026-08-27 (later still). **PITCH IS NOT AN UNDAMPED AXIS -- it
+is overdamped and it levels itself, so it wants no damper.** The pitch flight
+falsified the premise it was built on, and the drift curve now has no
+explanation. Read **THE PITCH FLIGHT** before planning any more damping work.
+**THE BEARING LATERAL GAIN IS MEASURED AND THE ANSWER IS 4x** -- a two-minute
+ground run, not a flight: it was live
 telemetry all along. A degree of common-mode tilt is worth **0.8165 blocks/s**,
 not the 0.205 two files store. See step 1 below and **NOTHING MAY BE A STORED
 CONSTANT**.
@@ -102,10 +104,9 @@ separation and the two loops chase each other.
    the hull's load changes.
    Cheapest thing here and it unblocks the rest.
 2. ~~PITCH DAMPING~~ **FLOWN 2026-08-27, AND IT KILLED ITS OWN PREMISE.**
-   Pitch does not ring. See **THE PITCH FLIGHT** below. What replaced this as
-   the open question: *what actually rotates the tilt vector*, since it is not
-   an undamped pitch axis -- and **why the fore/aft sign is backwards**, which
-   contradicts a measurement already in this file.
+   Pitch does not ring -- it is OVERDAMPED and it levels itself. No damper
+   wanted. See **THE PITCH FLIGHT**. What replaces this: *what actually
+   rotates the tilt vector*, since it is not an undamped pitch axis.
 3. **FLY VELOCITY HOLD** with the calibrated gain.
 4. Only then ask whether any standing trim is still wanted. Probably not.
 
@@ -155,7 +156,7 @@ design failed by asking one of them to do a job it is structurally incapable of.
 
 | job | actuator | authority | status |
 |---|---|---|---|
-| **damp** (fast, large) | differential prop RPM | roll **0.0941**; pitch **0.0440 MEASURED, sign NEGATIVE** | roll FLOWN; pitch measured, damper not needed |
+| **damp** (fast, large) | differential prop RPM | roll **0.0941**; pitch ~0.024 (unsettled), sign POSITIVE | roll FLOWN; pitch OVERDAMPED, no damper needed |
 | **translate** (drift) | bearing tilt, common mode | **0.8165 blocks/s per deg at 64 rpm** — measured | never flown |
 | **trim** (slow, tiny) | bearing tilt | roll -0.86, pitch +0.64 hull deg per deg | flown; drift-neutral |
 
@@ -192,80 +193,86 @@ design failed by asking one of them to do a job it is structurally incapable of.
   Steady-state pod-directed traffic is zero from any number of tabs.
 - **`/fcs-dev.lua` (the monitor hub) is still NOT deployed.**
 
-### THE PITCH FLIGHT -- 2026-08-27, and it falsified its own premise
+### THE PITCH FLIGHT -- 2026-08-27, two runs, and the second corrects the first
 
-`/fcs/pitchdampflight.lua`, phase A only. Log:
-`flight-logs/pitchdampflight_run1.txt`. Three results, in order of how much
-they change the plan.
+`/fcs/pitchdampflight.lua`. Logs: `flight-logs/pitchdampflight_run1.txt` and
+`_run2_measureonly.txt`. **Read run 2. Run 1's authority is void** -- see the
+sign section.
 
-#### 1. PITCH DOES NOT RING. The whole case for a pitch damper is gone.
+#### 1. PITCH DOES NOT RING, AND IT COMES HOME. No damper wanted.
 
-    pulse 3 rpm for 3 s  ->  peak rate 0.396 deg/s, peak pitch 1.80 deg
-    zero crossings in 120 s ................. 0
-    rate to 1/e ............................. 1.6 s
+    baseline +0.805  ->  peak +3.357  ->  settled +0.582 deg
+    gave back 109% of the excursion
+    zero crossings in 120 s ...... 1
+    rate to 1/e .................. 7.8 s
+    VERDICT ...................... OVERDAMPED
 
-Roll, for comparison, rings through 5 zero crossings over 105 s and takes 4.6 s
-to reach 1/e undamped. **Pitch arrests itself in under two seconds and never
-crosses zero.** A rate damper on an axis that already stops itself that fast
-buys nothing, and the tool now says so rather than damping because it was built
-to damp.
+Roll rings through 5 zero crossings over 105 s. Pitch crosses once, decays in
+under 8 s, and **returns to where it started**. There is a real restoring
+moment and enough damping that the axis creeps home without overshooting.
 
-**So the drift curve needs a new explanation.** "Roll and pitch oscillate out of
-phase, so the tilt vector rotates" was the story, and half of it just failed:
-pitch does not oscillate. Whatever sweeps the heading -225 degrees, it is not an
-undamped pitch axis. That is the open question now.
+**Pitch is the healthy axis, and a rate damper on it buys nothing.** The tool
+says so itself and refuses to run the A/B.
 
-**AND THE FOLLOW-UP THE FLIGHT COULD NOT ANSWER.** "It did not ring" splits two
-ways and they lead opposite directions: a restoring spring plus heavy damping
-(healthy axis, nothing to do) versus damping with NO SPRING, where the hull
-simply parks at whatever pitch it is left at. The second would be a much larger
-finding -- it would mean every standing pitch offset recorded here is a parked
-attitude rather than an equilibrium, and that pitch gives the velocity loop no
-self-levelling help at all. Run 1 never recorded where the axis started, so it
-cannot tell them apart. The tool now takes a 12 s baseline before the pulse and
-classifies the result; **re-fly `--measure-only` to settle it.**
+**The NO-SPRING worry is dead**, and that is the good news. "It did not ring"
+could have meant the hull simply parks at whatever pitch it is left at, which
+would have meant every standing pitch offset here is a parked attitude rather
+than an equilibrium, and that the velocity loop gets no self-levelling help on
+this axis. It gives back 109% of an excursion. It levels itself.
 
-#### 2. THE SIGN IS NEGATIVE, and that contradicts this file
+**But the drift curve now has no explanation.** "Roll and pitch oscillate out
+of phase, so the tilt vector rotates" was the story and half of it just failed.
+Whatever sweeps the heading -225 degrees, it is not an undamped pitch axis.
+**That is the open question in place of pitch damping.** The natural suspects
+are the roll axis alone plus a slow yaw, or the bearing coupling feeding roll
+back into itself -- both testable against the flight CSVs already in
+`flight-logs/`, without flying anything.
 
-    AUTHORITY  -0.0440 deg/s^2 per rpm
+#### 2. THE SIGN IS POSITIVE. The contradiction was mine, not the craft's.
 
-Raising the FORWARD corners **drops the bow**. Against `mixer_profile.lua`,
-which says the opposite in a comment block written around a flight measurement:
+Raising the FORWARD corners raises the bow, exactly as the geometry and
+`mixer_profile.lua` both say. **There is no contradiction with the 2026-08-26
+ion measurement.** An earlier draft of this section claimed there was; it was
+wrong, and the wrongness is worth keeping because of how it happened.
 
-> "THE PITCH SIGNS WERE INVERTED. This block gave the AFT corners +1, which
-> raises the stern and drops the bow... Measured 2026-08-26: a +0.3 pitch
-> demand produced -2.12 deg/s^2."
+Run 1 read **-0.0440** and run 2 read **+0.0237** -- opposite signs, same
+command, same code. Run 1 pulsed straight out of the climb with no quiet window
+first, and its "peak" was **the first sample after release**: it measured the
+craft's leftover climb motion, not the pulse. Run 2 sat quiet for 12 s first and
+its peak arrives 2.7 s after release, which is the propellers spinning down
+(the roll flight saw 1.4 s).
 
-Those two cannot both be right. Pre-fix, a positive demand pushed the AFT
-corners and the craft pitched negative -- stern up, bow down, ordinary physics.
-This flight pushed the FORWARD corners and the craft also pitched negative.
-Same reported sign for opposite commands.
+**A single pulse measures the pulse PLUS whatever the craft was already doing,
+and on this craft the second term is as large as the first.** Two fixes, both
+now in the tool:
 
-**Do not resolve this by argument.** The candidates are: the FL/FR vs RL/RR
-assignment is swapped somewhere between `config.podIds` and the physical hull;
-`attitude.lua`'s pitch sign is inverted; or the 2026-08-26 ion reading was taken
-before the axis transposition was fixed and is measuring roll. They have very
-different consequences -- under the second, every pitch angle in this document
-has the wrong sign, including the standing -0.638 and the bearing coupling
-+0.5588.
+- the pre-pulse rate is measured over a 12 s baseline window and SUBTRACTED,
+  which is what makes the measurement linear;
+- phase A now flies a REVERSE PAIR, +P then -P, and differences them. Drift
+  common to both halves cancels; the response reverses and adds. The same
+  technique, for the same reason, as `trim.staticGain` on the bearings.
 
-**The decisive experiment is one flight**: command a pitch demand through the
-ION mixer and a fore/aft PROP differential in the same window, with the axis
-convention untouched between them, and see whether the two actuators agree.
-Agreement points at `attitude.lua`; disagreement points at one of the two corner
-maps.
+Verified against synthetic drift: unsubtracted single pulses read -0.0333 and
++0.0484 for a craft whose true authority is +0.0234; the pair reads +0.0231
+whatever the drift.
 
-#### 3. THE RATIO PREDICTION WORKED, and that is a first here
+#### 3. THE AUTHORITY IS NOT SETTLED YET
 
-    predicted  0.0493 deg/s^2 per rpm   (measured roll / the unit-free 1.91)
-    measured   0.0440                    89% of it
+    predicted   0.0493 deg/s^2 per rpm   (measured roll / the unit-free 1.91)
+    run 2       0.0237                   48% of it, single pulse
+    run 1       void
 
-Every previous from-scratch prediction on this craft has been off by 2-3x. This
-one was not, because it is a RATIO -- (lateral arm / longitudinal arm) x
-(I_pitch / I_roll) -- in which the force, the mass and the density all cancel,
-taking the unexplained 2.9x in the propeller force chain with them. **Predict
-across axes by ratio, never from the thrust model.** It is the cheapest
-reliable prediction available on this craft.
+An earlier draft of this section said the ratio prediction landed at 89% and
+called it the first prediction on this craft to come in close. **That was run
+1's contaminated number and it should not have been quoted.** The honest state:
+the ratio route is still the best prediction available -- it cancels the
+unexplained 2.9x in the force chain, where the from-scratch thrust model does
+not -- but on the one clean reading it is 2x high, which is the same
+order of error the thrust model has. **Re-fly to get the reverse-pair value
+before believing either.**
+
+`pitchdamp.MEASURED` still ships every field **nil**. Two runs have disagreed by
+a factor of two and a sign; nothing here is safe to store yet.
 
 ### THE BEARING GAIN -- measured, 2026-08-27, on the ground
 
@@ -390,14 +397,14 @@ prints the per-corner thrust spread, which is where that check would start.
    **Measure it: hull level under the damper, a known tilt at 64 rpm, terminal
    net drift.**
 
-2. **THE FORE/AFT SIGN CONTRADICTS A MEASUREMENT ALREADY IN THIS FILE, and one
-   of the two is wrong.** See **THE PITCH FLIGHT**. This is the live blocker on
-   any pitch work, and it is not resolvable by argument -- both readings are in
-   `flight-logs/`.
+2. **WHAT ACTUALLY ROTATES THE TILT VECTOR?** Pitch was the assumed answer and
+   it is measured not to be -- see **THE PITCH FLIGHT**. The heading still
+   swept -225 degrees in 47 s and nothing now explains it. Start with the
+   flight CSVs already in `flight-logs/`; this needs analysis, not a flight.
 
-   `pitchdamp.MEASURED` still ships every field **nil** on purpose:
-   `differentialFor` returns 0 and a reason rather than commanding. Leave it
-   that way until the contradiction is settled.
+   Secondary: the pitch AUTHORITY is not settled (two runs, 2x apart, one of
+   them void). `pitchdamp.MEASURED` ships every field **nil** on purpose.
+   One `--measure-only` run with the reverse pair closes it.
 
 3. **THE STANDING OFFSETS ARE NOT CONSTANTS.** They have moved every flight:
    recorded +0.368/-0.638, then -0.490/+0.498, +0.205/+0.692, -0.244/+0.695.
@@ -431,6 +438,11 @@ prints the per-corner thrust spread, which is where that check would start.
   oscillation contributes even when the mean velocity is zero. Run 1 of the
   trim was judged on it and could not be. Use NET DISPLACEMENT over the window.
 - **Do not chase FR.** It answered 20 of 20. The per-pod hunt is over.
+- **Do not pulse an axis without a quiet window first, and subtract the
+  pre-pulse rate.** A pulse measures itself PLUS whatever the craft was already
+  doing, and here the second term is as large as the first: run 1 of the pitch
+  flight came straight out of the climb and read an authority of the WRONG SIGN
+  off its own leftover motion. Reverse pairs on top of that, always.
 - **Do not search a whole window for an impulse peak.** It works only while
   the window is short against the spring. The pitch tool's first harness run
   read an authority of -0.0015 -- 3% of prediction and BACKWARDS -- because on
