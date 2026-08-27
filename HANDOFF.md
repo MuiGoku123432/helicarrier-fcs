@@ -294,7 +294,27 @@ measurements, the actuator simply never moved.
 For contrast, the same 2 degree command on the same day in `trimflight` drove
 the craft to 6.3 and 4.3 blocks/s on the two halves of its pair.
 
-**Root cause not yet established.** A bearing only obeys a manual target while
+**THE PODS WERE DISARMING.** Found by comparing fault counts in the flight CSV
+against a ground run of the same length on the same day:
+
+    velocity flight   344 s   72 new COMMAND_TIMEOUTs   3.14 per pod per minute
+    ground sweep      371 s    0
+
+`COMMAND_TIMEOUT` means the pod was armed and no command reached it inside
+750 ms, so it **disarmed** and dropped to comms-loss power. Every number that
+flight produced came from a craft whose banks were dropping out several times a
+minute, and nothing in the report said so.
+
+The hull was also unnaturally rigid: **roll moved 0.366 degrees across the
+entire 344 s flight**, against +/-4 in the passive drift flight. Bearings
+reported `active` on all four corners with props at 64 the whole time.
+
+**And `set_tilt` is not the problem.** The ground sweep now sends the
+flight-shaped command -- all four corners, same angle, same mirror -- and all
+four answer 8.00 (`flight-logs/bearingsweep_run4_allcorners.txt`). The pods are
+not refusing anything.
+
+**Root cause of the starvation not yet established.** A bearing only obeys a manual target while
 it is ACTIVE -- "at 0 RPM the target is stored and completely ignored:
 getTiltAngle stays 0 and getThrustVector does not move" (`props.lua`) -- and
 this tool read neither `prop.active` nor the achieved `prop.tiltAngle`.
@@ -689,6 +709,10 @@ prints the per-corner thrust spread, which is where that check would start.
   LuaJIT ignores them on `%s`, CC:Tweaked rejects them. `tools/test_formats.lua`
   catches the class now. Every harness being green is not the same as the craft
   being able to load the file.
+- **Watch COMMAND_TIMEOUT, not just the numbers.** A flight whose pods disarm
+  three times a minute is not flying the way the measurement assumes, and the
+  fault counts are in the CSV the whole time. The velocity tool now reads them
+  per window and refuses a gain measured through a starved link.
 - **Do not measure a response without confirming the actuator moved.** Run 1 of
   the velocity tool measured a net gain of 0.002 blocks/s per degree from
   windows in which the bearings never tilted, and reported it as a physical

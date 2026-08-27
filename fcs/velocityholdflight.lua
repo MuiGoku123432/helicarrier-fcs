@@ -192,6 +192,39 @@ end
 -- either. bearingsweep does; five findings in HANDOFF died of not doing it.
 -- ---------------------------------------------------------------------------
 
+-- COMMAND_TIMEOUT means the pod was ARMED and no command reached it inside
+-- 750 ms, so it DISARMED and dropped to comms-loss power. It is the pods
+-- telling us the control loop is not keeping up.
+--
+-- Run 1 of this tool logged 72 of them across the four pods in 344 s -- three
+-- per pod per minute -- while a GROUND run of the same length on the same day
+-- logged zero. Every number that flight produced was taken from a craft whose
+-- banks were dropping out several times a minute, and nothing in the report
+-- said so. The tool measured a net gain instead and blamed three earlier
+-- measurements for disagreeing with it.
+local function podTimeouts()
+    local total = 0
+    for _, corner in ipairs(flight.CORNERS) do
+        local pod = banks.getState()[corner]
+        local faults = pod and pod.faults
+        if type(faults) == "table" then
+            for _, fault in ipairs(faults) do
+                local count = tostring(fault):match("COMMAND_TIMEOUT x(%d+)")
+                if count then
+                    total = total + tonumber(count)
+                elseif tostring(fault):find("COMMAND_TIMEOUT") then
+                    total = total + 1
+                end
+            end
+        elseif type(faults) == "string" then
+            local count = faults:match("COMMAND_TIMEOUT x(%d+)")
+            if count then total = total + tonumber(count)
+            elseif faults:find("COMMAND_TIMEOUT") then total = total + 1 end
+        end
+    end
+    return total
+end
+
 local function tiltReadback()
     local reported, missing = {}, {}
     for _, corner in ipairs(flight.CORNERS) do
@@ -294,12 +327,21 @@ local function measureWindow(label, seconds, starboard, bow, onCommand)
     local firstX, firstZ, firstAt, lastX, lastZ, lastAt
     local fastBow, fastStarboard, fastCount = 0, 0, 0
     local openedAt = os.epoch("utc")
+    local timeoutsAtOpen = podTimeouts()
+    local slowestLoop, previousAt = 0, openedAt
     session.cheapRead = true
 
     local stop = session:hold(seconds, function(state, now)
         session:trim(plan.holdGain, flight.MAX_CLIMB_RATE, 0, state)
         commandProps(feed(state, now))
         if onCommand then onCommand(state, now) else commandTilt(starboard, bow) end
+
+        -- THE LOOP PERIOD, because the watchdog is 750 ms and a loop that
+        -- misses it disarms the banks. Measured rather than assumed: the plan
+        -- says 0.15 s and run 1's pods say something took longer.
+        local elapsed = now - previousAt
+        if elapsed > slowestLoop then slowestLoop = elapsed end
+        previousAt = now
 
         local limit = limits(state)
         if limit then return limit end
@@ -343,6 +385,9 @@ local function measureWindow(label, seconds, starboard, bow, onCommand)
             (lastAt and firstAt) and ((lastAt - firstAt) / 1000) or nil),
     }
 
+    result.timeouts = podTimeouts() - timeoutsAtOpen
+    result.slowestLoop = slowestLoop
+
     -- The achieved tilt, from the pods, every window. A window whose commanded
     -- and reported tilt disagree is not a measurement of the commanded one.
     local reported = tiltReadback()
@@ -356,6 +401,16 @@ local function measureWindow(label, seconds, starboard, bow, onCommand)
         result.netDrift and string.format("%.3f", result.netDrift) or "?",
         result.reportedTilt and string.format("%.2f", result.reportedTilt) or "--",
         count))
+
+    -- THE BANKS DISARMED DURING THIS WINDOW. Said out loud, because everything
+    -- above was measured on a craft that kept losing its ions.
+    if result.timeouts > 0 then
+        note(string.format("    ** %d COMMAND_TIMEOUT%s in this window -- the pods"
+            .. " DISARMED. Slowest loop", result.timeouts,
+            result.timeouts == 1 and "" or "s"))
+        note(string.format("    ** %.0f ms against the pods' 750 ms watchdog. These"
+            .. " numbers are suspect.", result.slowestLoop))
+    end
     return result, stop
 end
 
@@ -419,6 +474,18 @@ local function probeAxis(axis)
         -plan.probeTilt, negative[field])
     if not gain then
         note("  no gain: the reverse pair did not produce usable samples")
+        return nil
+    end
+
+    -- A GAIN MEASURED THROUGH A STARVED LINK IS NOT A GAIN. If the banks were
+    -- disarming during either half, the craft was not in the state the
+    -- measurement assumes and the number should not be carried forward.
+    local starved = (positive.timeouts or 0) + (negative.timeouts or 0)
+    if starved > 0 then
+        note(string.format("  ** %d COMMAND_TIMEOUTs across the pair. The pods disarmed"
+            .. " while this was", starved))
+        note("  ** being measured, so the craft was not flying the way the")
+        note("  ** measurement assumes. NOT USING THIS GAIN.")
         return nil
     end
 
