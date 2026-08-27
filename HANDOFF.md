@@ -1,25 +1,25 @@
 # Helicarrier FCS — session handoff
 
-Last updated: 2026-08-27 (evening). **LAYER 2 IS BUILT:
-`/fcs/velocityholdflight.lua`.** And the reason every previous attempt at
-station keeping failed is now a measurement rather than a mystery -- **the
-actuator is INVERTED AND SLOW**; see **THE VELOCITY LOOP**.
-**THE CURVE IS SOLVED, AND IT IS ONE OSCILLATOR: ROLL.** Read **THE DRIFT ANALYSIS**. Also: **three archived flight
-logs have TRANSPOSED angle columns**, including the passive drift flight this
-document's standing offsets come from. **PITCH IS NOT AN UNDAMPED AXIS -- it
-is overdamped and it levels itself, so it wants no damper.** The pitch flight
-falsified the premise it was built on, and the drift curve now has no
-explanation. Read **THE PITCH FLIGHT** before planning any more damping work.
-**THE BEARING LATERAL GAIN IS MEASURED AND THE ANSWER IS 4x** -- a two-minute
-ground run, not a flight: it was live
-telemetry all along. A degree of common-mode tilt is worth **0.8165 blocks/s**,
-not the 0.205 two files store. See step 1 below and **NOTHING MAY BE A STORED
-CONSTANT**.
-THE ROLL DAMPER HAS FLOWN AND IT WORKS. The bearing
-coupling signs are measured at last -- and they DISAGREE between axes. Trim
-levels the craft and does NOT fix the drift, which is measured rather than
-argued and which changed the plan: **the drift fix is a closed loop on
-VELOCITY, not on tilt.** Read THE STRATEGY in START HERE before anything else.
+Last updated: 2026-08-27, end of session. **READ THE BLOCK BELOW, THEN
+`THE VELOCITY LOOP`.** In one line: station keeping works, and an intermittent
+fault that stops the bearings answering in flight is what blocks confirming it.
+
+What this session established, all of it measured:
+
+- **The velocity loop closed and held** -- net drift 1.409 -> 1.019 blocks/s,
+  against a design figure of 33%.
+- **The bearing actuator is INVERTED and SLOW.** A tilt commanded to push the
+  craft one way moves it the other once the hull catches up, after moving it
+  the right way for a few seconds. That sign change is the old 1.76 -> 11.5
+  blocks/s runaway, and it is now a measurement.
+- **The bearing lateral gain is 4x what two files store**, read off live
+  telemetry in a two-minute ground run rather than flown for.
+- **The drift curve is ONE oscillator: roll.** Pitch is overdamped and levels
+  itself, so it wants no damper -- which killed the premise the pitch tool was
+  built on.
+- **Three archived flight logs have TRANSPOSED angle columns**, including the
+  one this document's standing offsets came from.
+
 Written for a fresh session picking this up cold. Rewritten rather than
 patched: superseded findings are REMOVED, not annotated, except where the wrong
 answer is instructive. Keep it that way.
@@ -50,6 +50,58 @@ fixes.
 **Creative test world. The craft is expendable.** Prefer deploying a tool and
 gathering real data over perfecting the offline harness — but see
 **THE RULE** below, which is the hardest-won lesson here.
+
+---
+
+## WHERE THE 2026-08-27 SESSION LEFT OFF
+
+Read this block, then **THE VELOCITY LOOP**. Everything else in this file is
+background.
+
+### THE GOAL IS ESSENTIALLY MET, AND ONE FAULT BLOCKS CONFIRMING IT
+
+**Station keeping works.** Run 4 closed the velocity loop and cut net drift
+**1.409 -> 1.019 blocks/s (28%)** against a proportional loop under-relaxed by
+half, which is *designed* to remove 33%. The loop did what it was built to do.
+
+**The gains reproduce**, which no bearing number on this craft had managed
+before:
+
+    pitch  -2.8029, -2.7900, -2.7814   three flights, 0.8% spread
+    roll   -3.3601, -3.5603            two flights, 5.6% apart
+
+**THE BLOCKER: the bearings intermittently ignore `set_tilt` IN FLIGHT.** Five
+of five ground runs answer; two of six flights do not -- including one two
+minutes after a clean ground run. See **THE INTERMITTENT TILT FAULT**. Until
+that is understood, a flight can waste ten minutes or, worse, produce a number.
+
+### WHAT TO DO NEXT, in order
+
+1. **Isolate the tilt fault with a 90-second flight**: climb, confirm the tilt,
+   land. No measurement. Repeat a few times for a hit rate, with a ground sweep
+   either side. That is the one experiment that separates "airborne" from
+   "our code" and it has not been run.
+2. **Give `trimflight.lua` and `pitchdampflight.lua` the same treatment the
+   velocity tool got** -- the set-and-hold throttle, the tilt readback, the
+   stall guard. Both still re-send at the sample rate and neither confirms the
+   tilt. Their measured couplings (-0.8205 / +0.5588) were taken without a
+   readback and are 1.45x smaller than the confirmed-tilt flight measured, so
+   **they are probably wrong**.
+3. Only then, a clean velocity-hold run. And if more than a third of the drift
+   is wanted, the lever is `relaxation` in `velocityhold.DEFAULTS` (0.5).
+
+### THE THREE THINGS THAT WILL BITE A FRESH SESSION
+
+- **A loop that stops is more dangerous than a loop that is wrong.** Run 6
+  rolled to -15 degrees from a 1 degree command because the sample callback --
+  which holds every abort, every limit and the damper -- stopped executing for
+  six seconds. Guarded now; understand it before removing the guard.
+- **This craft was intermittently anomalous all day**: bearings ignoring tilt in
+  flight, lifting at 48 rpm where it had held to 64 three hours earlier, a
+  six-second stall. Between episodes it measures consistently. **A surprising
+  flight result is suspect until the craft has been shown to be behaving.**
+- **LuaJIT is not the craft's Lua.** A `%+5s` passed every harness and killed a
+  run on the carrier. `tools/test_formats.lua` catches that class now.
 
 ---
 
@@ -326,7 +378,14 @@ clean A/B on itself:
 
 Same craft, twenty minutes apart, same command shape.
 
-**THE LIKELY CAUSE IS TRAFFIC.** `set_tilt` and `set_rpm` have NO watchdog
+**TRAFFIC WAS *A* CAUSE, NOT *THE* CAUSE -- corrected by run 7.** The throttle
+below fixed the watchdog starvation outright (212 COMMAND_TIMEOUTs to 4) and
+the tilt answered on four flights running. Then run 7 failed the same way at
+**8 messages a second**. The flooding is real and worth fixing; it is not what
+stops the bearings answering. See **THE INTERMITTENT TILT FAULT**.
+
+The reasoning that led to the throttle, kept because the traffic problem it
+fixed was genuine: `set_tilt` and `set_rpm` have NO watchdog
 pod-side -- "it is set-and-hold" (`pod/main.lua`) -- so re-sending them every
 sample buys nothing but load: 4 corners x 2 command types x 6.7 Hz is about
 **107 messages a second** on top of the ion keepalive. One saturated link
@@ -477,6 +536,42 @@ had held to 64 three hours earlier, and now a six-second loop stall. Between
 episodes it measures consistently. **Treat a surprising flight result as
 suspect until the craft has been shown to be behaving**, and prefer ground runs.
 
+#### THE INTERMITTENT TILT FAULT -- the live blocker
+
+**In flight, the bearings sometimes ignore `set_tilt`. On the ground they never
+have.** Every tilt-confirm result from 2026-08-27:
+
+| run | conditions | all four corners report |
+|---|---|---|
+| 2 | no throttle | **0.00 FAILED** |
+| 3 | throttle | 2.00 ok |
+| 4 | throttle | 1.00 ok |
+| 5 | throttle | 1.00 ok |
+| 6 | throttle | 1.00 ok, then a 6 s loop stall |
+| 7 | throttle, **8 msg/s** | **0.00 FAILED** |
+
+Ground sweep tilt readback: **five runs, five successes** -- including one taken
+**two minutes before run 7 failed**
+(`flight-logs/bearingsweep_run5_postanomaly.txt` then
+`velocityholdflight_run7.txt`). That pair is the cleanest statement of the
+fault available: same craft, same command shape, two minutes apart, ground
+works and flight does not.
+
+What is ruled out: the command shape (all four corners answer it on the
+ground), the pods refusing it (no faults), `prop.active` being false (it reads
+true in flight), and message rate (run 7 failed at 8/s where runs 3-6 succeeded
+at 10-12/s).
+
+What is left, untested: something about being AIRBORNE, or a craft state that
+persists after an event -- run 7 followed run 6's stall and -15 degree roll by
+eleven minutes.
+
+**The next session should start here.** The cheapest discriminator that has not
+been run: a flight that climbs, confirms the tilt, and lands -- nothing else.
+Ninety seconds, no measurement, repeated a few times to get a hit rate. If it
+fails while a ground run either side of it succeeds, the fault is altitude or
+motion, not the code.
+
 #### AND THE PROBE IS NOW 1 DEGREE, NOT 2
 
 At -3.36 blocks/s per degree a 2 degree probe drove the craft to 6.9 blocks/s
@@ -621,13 +716,11 @@ would have meant every standing pitch offset here is a parked attitude rather
 than an equilibrium, and that the velocity loop gets no self-levelling help on
 this axis. It gives back 109% of an excursion. It levels itself.
 
-**But the drift curve now has no explanation.** "Roll and pitch oscillate out
-of phase, so the tilt vector rotates" was the story and half of it just failed.
-Whatever sweeps the heading -225 degrees, it is not an undamped pitch axis.
-**That is the open question in place of pitch damping.** The natural suspects
-are the roll axis alone plus a slow yaw, or the bearing coupling feeding roll
-back into itself -- both testable against the flight CSVs already in
-`flight-logs/`, without flying anything.
+**This left the drift curve without an explanation for about an hour, and then
+the CSVs supplied one** -- see **THE DRIFT ANALYSIS**. "Roll and pitch
+oscillate out of phase" was wrong, but only in its detail: roll oscillating at
+32.7 s against a slow pitch transient winds the tilt vector just as well, and
+the tilt steers the craft at r = 0.75.
 
 #### 2. THE SIGN IS POSITIVE. The contradiction was mine, not the craft's.
 
