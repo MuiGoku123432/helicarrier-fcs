@@ -437,6 +437,46 @@ second cannot stall a loop for two seconds. Most likely chunk loading as the
 craft drifts; `Session:hold` re-arms on its next keepalive, which is why four
 of them do no harm.
 
+#### RUN 6: THE LOOP STOPPED RUNNING, AND THE CRAFT ROLLED TO -15 DEGREES
+
+`flight-logs/velocityholdflight_run6_abort.txt` and
+`velocityhold_run6_settle_csv.csv`. **This is the most important safety finding
+in this document, and it is not about the control law.**
+
+From the CSV, during the first settle at a ONE degree command:
+
+    t=26.0  roll  -0.10   speed  0.18   props 64/64   normal
+    t=28.7  roll  -6.81   speed  1.58   props 64/64   PAST the 6 deg abort
+    t=32.3  roll -15.05   speed  8.49   props 64/64   past the speed abort
+    t=34.9  roll  -9.31   speed 12.5    props 60/64   damper acts, 9 s late
+
+**The props stayed symmetric while the hull rolled 15 degrees in six seconds,
+and the tilt abort never fired although the hull passed it at t=28.7.** Neither
+the roll damper nor `limits()` ran. The loop was not executing samples.
+
+Nothing was wrong with the control law, the gain, or the actuator. **The loop
+simply stopped**, and everything that keeps the craft safe lives inside it.
+This is the same stall that read 2155 ms in runs 4 and 5, longer -- and the
+throttle had already cut traffic tenfold, so it is not the command rate. The
+likeliest remaining cause is server-side: chunk loading as the craft drifts
+several hundred blocks during phase A.
+
+**WHAT CHANGED, and it is a rule for every flight tool here:**
+
+- **A late sample neutralises.** If a sample arrives more than 1.5 s after the
+  last one, the tilt is cleared and the window ends. The craft has been flying
+  on a standing command with nothing watching it, and carrying on with that
+  command is how run 6 reached 13.74 blocks/s.
+- Abort limits tightened to **5.0 blocks/s and 4.0 degrees** from 8.0 and 6.0.
+  The expected response at 1 degree is 3.5 blocks/s, so 5.0 is still well clear
+  of the signal and leaves far more room when the loop returns from a stall.
+
+**THE CRAFT HAS BEEN INTERMITTENTLY ANOMALOUS ALL DAY** -- bearings ignoring
+`set_tilt` in flight while answering on the ground, lifting at 48 rpm where it
+had held to 64 three hours earlier, and now a six-second loop stall. Between
+episodes it measures consistently. **Treat a surprising flight result as
+suspect until the craft has been shown to be behaving**, and prefer ground runs.
+
 #### AND THE PROBE IS NOW 1 DEGREE, NOT 2
 
 At -3.36 blocks/s per degree a 2 degree probe drove the craft to 6.9 blocks/s
@@ -838,6 +878,12 @@ prints the per-corner thrust spread, which is where that check would start.
   LuaJIT ignores them on `%s`, CC:Tweaked rejects them. `tools/test_formats.lua`
   catches the class now. Every harness being green is not the same as the craft
   being able to load the file.
+- **A loop that stops is more dangerous than a loop that is wrong.** Every
+  abort, every limit and the whole damper live inside the sample callback, so a
+  stalled loop is a craft flying a standing command with nothing watching it.
+  Run 6 rolled to -15 degrees and 13.7 blocks/s that way, from a 1 degree
+  command, with both abort limits already passed. Measure the gap between
+  samples and neutralise on a long one.
 - **Watch COMMAND_TIMEOUT, not just the numbers.** A flight whose pods disarm
   three times a minute is not flying the way the measurement assumes, and the
   fault counts are in the CSV the whole time. The velocity tool now reads them

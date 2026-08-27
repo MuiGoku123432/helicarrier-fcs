@@ -131,8 +131,32 @@ local plan = {
     -- craft was not flying the way the measurement assumes.
     maxWindowTimeouts = 6,
 
-    abortSpeed = velocityhold.DEFAULTS.abortSpeed,
-    abortTilt = velocityhold.DEFAULTS.abortTilt,
+    -- TIGHTENED AFTER RUN 6, which reached 13.74 blocks/s and -15 degrees of
+    -- roll from a ONE degree command. The limits were 8.0 and 6.0 and neither
+    -- fired in time, because the loop was not running -- see stallRecovery.
+    -- Expected response at 1 degree is 3.5 blocks/s, so 5.0 is still twice the
+    -- signal and leaves far more room when the loop comes back from a stall.
+    abortSpeed = 5.0,
+    abortTilt = 4.0,
+
+    -- A LOOP THAT STOPS IS THE DANGEROUS FAILURE, not a loop that computes the
+    -- wrong number.
+    --
+    -- Run 6, from the flight CSV: at t=26 the craft was level at 0.18 blocks/s
+    -- with a 1 degree tilt commanded. At t=32.3 it was at -15.05 degrees and
+    -- 8.49 blocks/s WITH THE PROPS STILL SYMMETRIC AT 64/64 -- the roll damper
+    -- had not commanded anything for 6 seconds, and the 6 degree tilt abort
+    -- never fired even though the hull passed it at t=28.7. limits() was not
+    -- being evaluated. The damper first acted at t=34.9, nine seconds after
+    -- the roll began.
+    --
+    -- Nothing in the control law was wrong. The loop simply did not run --
+    -- the same stalls that showed as 2155 ms in runs 4 and 5, longer.
+    --
+    -- So: when a sample arrives after a long gap, assume the craft has moved
+    -- and NEUTRALISE rather than carry on with the command that was standing
+    -- when the loop went away. A stall is not a reason to keep tilting.
+    stallSeconds = 1.5,
     groundedGain = 0.6,
 }
 
@@ -191,6 +215,7 @@ end
 -- Fire and forget, mirrored, re-sent every loop -- the link drops a few percent
 -- and set_tilt is set-and-hold, so the loop IS the retry. A blocking waiter
 -- here would be a full second of silence per corner.
+local stalls = 0
 local lastTiltSentAt, tiltMessages = 0, 0
 
 local function commandTilt(starboard, bow)
@@ -423,6 +448,16 @@ local function measureWindow(label, seconds, starboard, bow, onCommand)
         local elapsed = now - previousAt
         if elapsed > slowestLoop then slowestLoop = elapsed end
         previousAt = now
+
+        -- CAME BACK FROM A STALL: clear the tilt before anything else. The
+        -- craft has been flying on a standing command with nothing watching
+        -- it, and run 6 shows what that costs.
+        if elapsed > plan.stallSeconds * 1000 then
+            stalls = stalls + 1
+            commandTilt(0, 0)
+            return string.format("LOOP STALLED for %.1f s -- neutralised."
+                .. " Nothing was watching the craft for that long.", elapsed / 1000)
+        end
 
         local limit = limits(state)
         if limit then return limit end
