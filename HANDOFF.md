@@ -1,6 +1,9 @@
 # Helicarrier FCS — session handoff
 
-Last updated: 2026-08-27. THE ROLL DAMPER HAS FLOWN AND IT WORKS. The bearing
+Last updated: 2026-08-27 (later). THE BEARING LATERAL GAIN NO LONGER NEEDS A
+FLIGHT -- it is live telemetry, and the "uncertain by 4x" was never uncertain,
+it was unread. See step 1 below and **NOTHING MAY BE A STORED CONSTANT**.
+THE ROLL DAMPER HAS FLOWN AND IT WORKS. The bearing
 coupling signs are measured at last -- and they DISAGREE between axes. Trim
 levels the craft and does NOT fix the drift, which is measured rather than
 argued and which changed the plan: **the drift fix is a closed loop on
@@ -86,10 +89,23 @@ separation and the two loops chase each other.
 
 #### Do these in this order
 
-1. **CALIBRATE THE BEARING LATERAL GAIN AT FLIGHT RPM.** One window, ~2 min.
-   Hull held level by the damper, a known bearing tilt commanded at 64 rpm,
-   terminal net drift read off. Everything in layer 2 scales with this number
-   and it is currently uncertain **by a factor of four** -- see open item 1.
+1. **CALIBRATE THE BEARING LATERAL GAIN -- ON THE GROUND, `/fcs/bearingsweep.lua`.**
+   ~2 min, nothing armed, the craft never leaves the floor. Everything in
+   layer 2 scales with this number.
+
+   **It does not need a flight, and it never did.** The lateral force is built
+   out of `getThrust`, which the pods already push every second, and `getThrust`
+   is *exactly* linear in rpm -- r^2 = 1.000000 across 8 to 96 RPM, which
+   brackets both 16 and 64. So the flight-rpm figure is **4x** the stored
+   13960.98, a degree of tilt is worth about **0.82 blocks/s** rather than
+   0.205, and what was missing was never data: two files stored a number
+   instead of reading one. The sweep steps 16/32/48/64 rpm (64 is 52% of
+   weight; hover is 122-124) and reads it off, then re-checks at flight rpm
+   that the bearing pair still ADDS -- verified at 16 rpm and never above it.
+
+   That already explains the trim flights: a 1 degree trim was costed at 0.205
+   and really costs 0.82, so trim buys back what it removes, which is exactly
+   what flew.
    Cheapest thing here and it unblocks the rest.
 2. **PITCH DAMPING.** Measure the pitch spring first (never done -- only roll's
    42 s period was), then the fore/aft sign pattern on the same actuator.
@@ -181,9 +197,57 @@ design failed by asking one of them to do a job it is structurally incapable of.
   Steady-state pod-directed traffic is zero from any number of tabs.
 - **`/fcs-dev.lua` (the monitor hub) is still NOT deployed.**
 
+### NOTHING MAY BE A STORED CONSTANT -- the craft is going to change
+
+**The hull is going to gain machines, and every stored gain decays silently as
+it does.** Mass rises, the centre of mass shifts, the moment arms move. A
+number measured on 2026-08-27 and pasted into a control path is correct on
+exactly one craft, and this project has already been bitten by the milder
+version of that: `thrustPerBearing = 13960.98` is a real measurement of a real
+craft at 16 rpm on the ground, and using it at 64 rpm in flight is 4x wrong.
+
+So the rule, and it applies to everything built from here on:
+
+**Read the live value. The telemetry is already there.**
+
+| what | live source | who reads it |
+|---|---|---|
+| bearing thrust at the current rpm | `prop.perBearing[i].thrust`, pushed ~1 Hz | `fcs/bearinggain.lua` |
+| craft mass | `sublevel.getMass()` | `bearinggain.weightFromMass` |
+| moment arms / hull box | `sublevel.getInertiaTensor()` | `fcs/craftgeom.lua` |
+| standing tilt | a measured window, never a recorded pair | `fcs/trim.lua` reverse pairs |
+| coupling sign per axis | measured in flight, per axis | `trim.staticGain` |
+
+`fcs/bearinggain.lua` is the pattern to copy: it takes thrust, mass, pressure
+and bearing count as arguments, defaults them only to the calibration day for
+*comparison*, and has a `driftFromReference()` whose whole job is to say how
+far the craft has moved from the day the constants were written. Bolting a
+machine to the hull and re-running `/fcs/bearingsweep.lua` is then the entire
+recalibration procedure.
+
+**AND THIS IS WHY LEVELLING MUST BE A LOOP, NOT A TABLE.** A static trim
+computed once is a standing error the moment the load changes. The velocity
+loop is already the adaptive answer for drift -- holding velocity at zero does
+not care what the standing tilt is, or what caused it -- and the same argument
+applies to attitude: measure the offset in the window you are flying, correct
+from the residual, re-measure. `trimflight.lua` already does exactly that (it
+measures its own gains and its own baseline every flight, and its pass 2
+corrects from the residual rather than from a stored figure). Keep that
+property in anything that replaces it.
+
+The remaining static assumption worth naming: the four corners are assumed
+symmetric, and after a repair they were verified to be. A load bolted to one
+side breaks that, and nothing currently checks it -- `/fcs/bearingsweep.lua`
+prints the per-corner thrust spread, which is where that check would start.
+
 ### What is still open, in the order the strategy needs it
 
-1. **THE BEARING LATERAL GAIN IS UNCERTAIN BY 4x, and it blocks layer 2.**
+1. **THE BEARING LATERAL GAIN -- ANSWERED, PENDING ONE GROUND RUN.** Run
+   `/fcs/bearingsweep.lua`; it reads the gain off live telemetry in two
+   minutes without flying, and `fcs/bearinggain.lua` computes every drift
+   figure from live thrust and live mass. What follows is the state of the
+   question before that tool existed, kept because the reasoning is still how
+   the answer is checked:
    `2*T*sin(tilt)` uses **T = 13960.98, which is the bearing thrust at 16 RPM
    from a measurement taken ON THE GROUND** -- it reproduces vectorprobe's
    3886.3 at 8 degrees exactly, which is how we know. The craft flies at 64 rpm.
@@ -231,6 +295,10 @@ design failed by asking one of them to do a job it is structurally incapable of.
   oscillation contributes even when the mean velocity is zero. Run 1 of the
   trim was judged on it and could not be. Use NET DISPLACEMENT over the window.
 - **Do not chase FR.** It answered 20 of 20. The per-pod hunt is over.
+- **Do not store a gain, and do not fly to measure something the telemetry
+  already reports.** The bearing lateral gain cost two trim flights and was
+  sitting in `getThrust` the whole time. Before planning a flight, ask which
+  live reading would answer it on the ground.
 
 ### What is being measured, and why it kept failing
 

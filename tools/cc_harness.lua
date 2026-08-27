@@ -201,6 +201,14 @@ harness.model = {
     bearingTiltRollPerDegree = 0.011,
     bearingTiltPitchPerDegree = 0.011,
     bearingCouplingSign = 1,
+    -- DOES LATERAL FORCE SCALE WITH RPM? The reported thrust does -- exactly
+    -- linear, r^2 = 1.000000 from 8 to 96 RPM -- and the lateral force is
+    -- built out of that same reading. But fcs/trim.lua and
+    -- lateralhold.terminalSpeed both store the 16 rpm value, so the model
+    -- below defaults to NOT scaling: this flag exists so a runner can put the
+    -- craft's real behaviour up against the code's belief and watch the two
+    -- disagree by 4x. Turn it on for anything measuring a gain at flight rpm.
+    bearingLateralScalesWithRpm = false,
     -- Create's universal drag: a tilt-implied acceleration reaches terminal
     -- velocity rather than integrating. This is why the craft cruises instead
     -- of accelerating away.
@@ -226,6 +234,45 @@ local function bearingThrust(corner, index, rpm)
         and RR5_BEARING_16_PREREPAIR * scale or BASE_BEARING_16 * scale
     -- getThrust is signed by handedness: the pair reports +x and -x.
     return index == 1 and -magnitude or magnitude
+end
+
+-- Per-bearing thrust VECTORS, which is what any lateral measurement reads.
+--
+-- getThrustVector is the bearing's own axis, ARRAY-indexed {1,2,3}, and
+-- getThrust is signed by HANDEDNESS: bearing 1 reports negative thrust along a
+-- downward axis and therefore pushes UP, exactly like bearing 2 reporting
+-- positive thrust along an upward one.
+--
+-- WHY MIRROR DECIDES EVERYTHING. Force is thrust x vector. Flipping bearing 2
+-- flips its axis AND the sign of its thrust, so the two vertical components
+-- keep agreeing while the two LATERAL components come into agreement as well:
+-- the pair ADDS. Leave it unmirrored and the laterals cancel -- measured on the
+-- ground as exactly 0.0. That is the whole content of vectorprobe phase A.
+local function bearingVectors(pod, rpm, b1, b2)
+    -- Inactive bearings do not move, whatever was commanded.
+    local tilt = math.abs(rpm) > 0 and (pod.tiltAngle or 0) or 0
+    local azimuth = math.rad(pod.tiltAzimuth or 0)
+    local s, c = math.sin(math.rad(tilt)), math.cos(math.rad(tilt))
+    local lx, lz = s * math.cos(azimuth), s * math.sin(azimuth)
+    -- At rest the pair is {0,1,0} with +T and {0,-1,0} with -T, which
+    -- multiplies out to BOTH PUSHING UP -- vectorprobe's opening line. So
+    -- bearing_a, which reports NEGATIVE thrust here, carries the negated axis.
+    --
+    -- Tilting both to a common azimuth keeps the verticals agreeing and makes
+    -- the laterals oppose: measured as exactly 0.0 lateral force. MIRROR flips
+    -- the down-facing bearing's lateral component, and only then does the pair
+    -- add. That is the one bit of information vectorprobe phase A exists for.
+    --
+    -- AND THE DIRECTION IS PINNED TO THE MEASUREMENT, not to whichever sign
+    -- fell out of the algebra: AZIMUTH 0 PUSHES TO STARBOARD, measured on all
+    -- four corners, and starboard is -X because port is +X.
+    local lateral = pod.tiltMirror and 1 or -1
+    return {
+        { name = "bearing_a", thrust = b1, assembled = true,
+          vx = lx, vy = -c, vz = lz },
+        { name = "bearing_b", thrust = b2, assembled = true,
+          vx = -lateral * lx, vy = c, vz = -lateral * lz },
+    }
 end
 
 local function podTelemetry(corner, messageType)
@@ -272,10 +319,15 @@ local function podTelemetry(corner, messageType)
             sailPower = corner == "RR" and 532 or 534,
             airflow = corner == "RR" and 0.049051138064220012 or 0,
             bearingRpm = 0,
-            perBearing = {
-                { name = "bearing_a", thrust = b1, assembled = true },
-                { name = "bearing_b", thrust = b2, assembled = true },
-            },
+            -- THE RULE, modelled rather than described. props.lua: "At 0 RPM
+            -- the target is stored and completely ignored: getTiltAngle stays
+            -- 0 and getThrustVector does not move." Four separate findings in
+            -- HANDOFF were readings taken while this was false, so the harness
+            -- now reproduces the trap instead of handing out clean numbers.
+            active = math.abs(rpm) > 0 or nil,
+            bearingsAssembled = true,
+            tiltAngle = math.abs(rpm) > 0 and (pod.tiltAngle or 0) or 0,
+            perBearing = bearingVectors(pod, rpm, b1, b2),
             faults = {},
         },
     }
@@ -527,11 +579,20 @@ local function stepHorizontal(dt)
     local tiltStarboard, tiltBow = commandedTilt()
     local weight = craft.mass * g
     local function bearingAccel(tiltDegrees)
-        -- BASE_BEARING_16 unscaled: this is the constant the craft's MEASURED
-        -- lateral force uses (2*T*sin(tilt) per corner), the same one
-        -- lateralhold.terminalSpeed and fcs/trim.lua take. Scaling it by rpm
-        -- the way vertical thrust is scaled would make lateral force 4x.
-        local force = 4 * 2 * BASE_BEARING_16 * math.sin(math.rad(tiltDegrees))
+        -- BASE_BEARING_16 unscaled by default: that is the constant
+        -- lateralhold.terminalSpeed and fcs/trim.lua take, and holding the
+        -- harness to it is what lets a runner show the code is using a ground
+        -- reading for a flight manoeuvre. With bearingLateralScalesWithRpm the
+        -- lateral force follows the thrust telemetry instead -- 4x at 64 rpm.
+        local thrust = BASE_BEARING_16
+        if harness.model.bearingLateralScalesWithRpm then
+            local rpm = 0
+            for _, pod in pairs(pods) do
+                rpm = math.max(rpm, math.abs(achievedRpm(pod.targetRpm)))
+            end
+            thrust = BASE_BEARING_16 * (rpm / 16) ^ harness.model.exponent
+        end
+        local force = 4 * 2 * thrust * math.sin(math.rad(tiltDegrees))
         return (force / weight) * g
     end
     aStarboard = aStarboard + bearingAccel(tiltStarboard)
@@ -846,8 +907,13 @@ function harness.install(env)
                     -- Set-and-hold, no arm gate, no watchdog -- like the pod.
                     pod.tiltAngle = message.angle
                     pod.tiltAzimuth = message.azimuth or 0
+                    -- MIRROR IS PART OF THE COMMAND, not a detail. An
+                    -- unmirrored pair's laterals CANCEL -- measured exactly
+                    -- 0.0 -- so a harness that ignores this flag reports
+                    -- lateral force for a command that makes none.
+                    pod.tiltMirror = message.mirror and true or false
                 elseif pod.id == recipient and message.type == "clear_tilt" then
-                    pod.tiltAngle, pod.tiltAzimuth = 0, 0
+                    pod.tiltAngle, pod.tiltAzimuth, pod.tiltMirror = 0, 0, false
                 elseif pod.id == recipient and message.type ~= "status_request" then
                     -- other command types are ignored by this model
                 end

@@ -67,9 +67,18 @@ trim.MEASURED = {
     -- Differencing the +/-2 degree pairs brackets it at 0.23 (roll) to 0.47
     -- (pitch) per degree -- not clean, because the hull tilt moves too.
     --
-    -- DO NOT build a gain on this number until it is measured at flight rpm:
-    -- hull level under the damper, a known tilt commanded, terminal net drift
-    -- read off. One window settles it.
+    -- SUPERSEDED FOR ANY GAIN: use `fcs/bearinggain.lua`, which computes the
+    -- same force from the LIVE getThrust the pods already push and the LIVE
+    -- getMass, and /fcs/bearingsweep.lua, which reads it across 16-64 rpm on
+    -- the ground in two minutes. getThrust is exactly linear in rpm (r^2 =
+    -- 1.000000, 8 to 96 RPM, which brackets both), so the flight-rpm figure is
+    -- 4x this one and a degree of tilt costs about 0.82 blocks/s, not 0.205.
+    --
+    -- Kept here because the numbers in this file's header were derived at it
+    -- and re-deriving them would make the comparison with the flown result
+    -- meaningless. Nothing in a control path should read it: the craft gains
+    -- mass every time a machine is bolted to the hull, and a stored gain
+    -- silently decays as it does.
     thrustPerBearing = 13960.98,
 
     -- The hull's self-levelling spring, from the 42 s oscillation period.
