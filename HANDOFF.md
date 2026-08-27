@@ -415,6 +415,28 @@ the bearings resolve.
 So run 4's phase B numbers are real but taken through a starved link, and the
 next run is the clean one.
 
+#### RUN 5: THE THROTTLE FIX HELD, AND THE GUARD WAS TOO STRICT
+
+`flight-logs/velocityholdflight_run5_rollrefused.txt`.
+
+    run 4 phase B, throttle hole    212 timeouts / 120 s = 1.77 per second
+    run 5 roll pair, after the fix    4 timeouts /  60 s = 0.07
+
+**A factor of 26.** The change deadband did its job. But the refusal rule was
+`any timeout at all`, so four hiccups threw away a roll gain and phase B never
+ran. The rule is now **six per 30 s window** -- one every five seconds -- with
+anything less reported and used.
+
+**THE GAINS ARE NOW WELL REPRODUCED:**
+
+    pitch   -2.8029, -2.7900, -2.7814   three flights, 0.8% spread
+    roll    -3.3601, -3.5603            two flights, 5.6% apart
+
+The residual 2155 ms loop stalls are not the command rate -- 12 messages a
+second cannot stall a loop for two seconds. Most likely chunk loading as the
+craft drifts; `Session:hold` re-arms on its next keepalive, which is why four
+of them do no harm.
+
 #### AND THE PROBE IS NOW 1 DEGREE, NOT 2
 
 At -3.36 blocks/s per degree a 2 degree probe drove the craft to 6.9 blocks/s

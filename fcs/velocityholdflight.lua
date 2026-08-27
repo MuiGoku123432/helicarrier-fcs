@@ -117,6 +117,19 @@ local plan = {
     -- against a 750 ms watchdog -- while phase A, holding a fixed tilt, was
     -- clean. A twentieth of a degree is below anything the bearings resolve.
     resendDeadbandDegrees = 0.05,
+    -- HOW MANY WATCHDOG TIMEOUTS MAKE A WINDOW UNUSABLE.
+    --
+    -- Not "any", which is what the first version said and what threw away a
+    -- perfectly good roll gain on run 5. The two cases are 26x apart in rate:
+    --
+    --     run 4 phase B, the throttle hole   212 over 120 s   1.77 per second
+    --     run 5 roll pair, after the fix       4 over  60 s   0.07
+    --
+    -- 212 is systemic -- the link never kept up. Four is the craft hiccupping,
+    -- probably chunk loading as it drifts, and Session:hold re-arms on its
+    -- next send. Six per 30 s window is one every five seconds: past that the
+    -- craft was not flying the way the measurement assumes.
+    maxWindowTimeouts = 6,
 
     abortSpeed = velocityhold.DEFAULTS.abortSpeed,
     abortTilt = velocityhold.DEFAULTS.abortTilt,
@@ -548,13 +561,19 @@ local function probeAxis(axis)
     -- A GAIN MEASURED THROUGH A STARVED LINK IS NOT A GAIN. If the banks were
     -- disarming during either half, the craft was not in the state the
     -- measurement assumes and the number should not be carried forward.
+    local worst = math.max(positive.timeouts or 0, negative.timeouts or 0)
     local starved = (positive.timeouts or 0) + (negative.timeouts or 0)
-    if starved > 0 then
-        note(string.format("  ** %d COMMAND_TIMEOUTs across the pair. The pods disarmed"
-            .. " while this was", starved))
-        note("  ** being measured, so the craft was not flying the way the")
-        note("  ** measurement assumes. NOT USING THIS GAIN.")
+    if worst > plan.maxWindowTimeouts then
+        note(string.format("  ** %d COMMAND_TIMEOUTs in one window (%d across the pair),"
+            .. " past the %d that", worst, starved, plan.maxWindowTimeouts))
+        note("  ** a hiccup accounts for. The pods were disarming systematically, so")
+        note("  ** the craft was not flying the way the measurement assumes.")
+        note("  ** NOT USING THIS GAIN.")
         return nil
+    elseif starved > 0 then
+        note(string.format("  (%d COMMAND_TIMEOUT%s across the pair -- brief, and the"
+            .. " banks re-arm on the", starved, starved == 1 and "" or "s"))
+        note("  next keepalive. Using the gain, but a run with none is cleaner.)")
     end
 
     -- DID THE ACTUATOR ACTUALLY REVERSE? The reported tilt is a magnitude, so
