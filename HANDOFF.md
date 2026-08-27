@@ -378,6 +378,43 @@ inherits that, including this section's original -0.934 / -0.376 prediction.
 **SO GIVE `trimflight.lua` AND `pitchdampflight.lua` THE SAME THROTTLE** before
 trusting another number from either. Both still re-send at the sample rate.
 
+#### RUN 4: THE LOOP CLOSED, AND IT WORKED AS DESIGNED
+
+`flight-logs/velocityholdflight_run4_loopclosed.txt`, the full run at 1 degree.
+
+**Phase A reproduced across probe amplitudes**, which is the first time any
+bearing number on this craft has:
+
+    roll    -3.3601 (2 deg probe)  vs  -3.5603 (1 deg)   5.6% apart
+    pitch   -2.8029                vs  -2.7900           0.5% apart
+
+**Phase B:**
+
+    NET drift    1.409  ->  1.019 blocks/s     28% less
+    loop reached +0.134 starboard, -0.547 bow
+
+**That is the loop working, not falling short.** A proportional loop
+under-relaxed by half settles at `v/(1+0.5)` of the disturbance -- it is BUILT
+to remove 33%, and it removed 28%. The measured gain says 0.396 degrees cancels
+a 1.409 blocks/s drift, half of that is 0.198, and the loop averaged 0.173.
+
+**The report said INCONCLUSIVE, and the report was wrong.** The attribution
+floor was a fixed 0.25 degrees, written when the gain was expected to be four
+times smaller. With a gain of -3.56 the correct command IS small. The floor now
+scales with the measured gain, and the verdict is stated against the design
+rather than against zero.
+
+**AND THE THROTTLE HAD A HOLE.** Phase B logged **212 COMMAND_TIMEOUTs and a
+slowest loop of 2419 ms** against a 750 ms watchdog, where phase A -- holding a
+fixed tilt -- was clean. The throttle only suppressed an UNCHANGED command, and
+the loop is rate-limited to 0.05 deg/s, so at a 0.15 s sample it moves the
+command 0.0075 degrees every iteration and "changed" was always true. It sent
+at full rate again. There is a 0.05 degree change deadband now, below anything
+the bearings resolve.
+
+So run 4's phase B numbers are real but taken through a starved link, and the
+next run is the clean one.
+
 #### AND THE PROBE IS NOW 1 DEGREE, NOT 2
 
 At -3.36 blocks/s per degree a 2 degree probe drove the craft to 6.9 blocks/s

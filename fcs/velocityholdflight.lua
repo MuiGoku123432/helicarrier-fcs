@@ -109,6 +109,14 @@ local plan = {
     -- A dropped set-and-hold command still needs re-sending; it does not need
     -- re-sending seven times a second. Any CHANGE goes out immediately.
     resendPeriodMs = 1000,
+    -- HOW BIG A CHANGE IS WORTH A MESSAGE. Exact inequality is not enough: the
+    -- loop is rate-limited to 0.05 deg/s, so at a 0.15 s sample it moves the
+    -- command by 0.0075 degrees EVERY iteration and "changed" is always true.
+    -- The throttle then never engages, which is how phase B of run 4 sent at
+    -- full rate again -- 212 COMMAND_TIMEOUTs and a slowest loop of 2419 ms
+    -- against a 750 ms watchdog -- while phase A, holding a fixed tilt, was
+    -- clean. A twentieth of a degree is below anything the bearings resolve.
+    resendDeadbandDegrees = 0.05,
 
     abortSpeed = velocityhold.DEFAULTS.abortSpeed,
     abortTilt = velocityhold.DEFAULTS.abortTilt,
@@ -174,8 +182,11 @@ local lastTiltSentAt, tiltMessages = 0, 0
 
 local function commandTilt(starboard, bow)
     local now = os.epoch("utc")
-    local changed = math.abs(starboard - applied.starboard) > 1e-6
-        or math.abs(bow - applied.bow) > 1e-6
+    local changed = math.abs(starboard - applied.starboard) >= plan.resendDeadbandDegrees
+        or math.abs(bow - applied.bow) >= plan.resendDeadbandDegrees
+        -- Going to zero always goes out: it is the command that stops things.
+        or (starboard == 0 and bow == 0
+            and (applied.starboard ~= 0 or applied.bow ~= 0))
     -- Unchanged and recently sent: nothing to say. The pods hold it.
     if not changed and (now - lastTiltSentAt) < plan.resendPeriodMs then
         return
@@ -789,7 +800,26 @@ local function report(before, after)
     --
     -- If the loop did not act, the A/B says nothing about the loop -- whatever
     -- the two numbers did.
-    local MINIMUM_EFFORT = 0.25
+    -- WHAT COUNTS AS ACTING DEPENDS ON THE GAIN, and a fixed threshold got
+    -- this wrong on run 4. With a net gain of -3.56 blocks/s per degree, the
+    -- tilt that cancels a 1.4 blocks/s drift is 0.40 degrees, and half of that
+    -- after relaxation. The loop commanded 0.173 and was told it had not
+    -- acted, against an absolute 0.25 floor written when the gain was expected
+    -- to be four times smaller. The floor has to scale with the plant.
+    local gain = measured.starboard
+    local wanted = nil
+    if gain and math.abs(gain) > 1e-6 and before.netDrift then
+        wanted = math.abs(before.netDrift / gain) * velocityhold.DEFAULTS.relaxation
+    end
+    local MINIMUM_EFFORT = wanted and math.max(0.02, wanted * 0.5) or 0.25
+    if wanted then
+        note(string.format("  the measured gain says %.3f deg would cancel the baseline"
+            .. " drift;", math.abs(before.netDrift / gain)))
+        note(string.format("  at relaxation %.1f the loop should ask for %.3f, and it"
+            .. " averaged %.3f.",
+            velocityhold.DEFAULTS.relaxation, wanted, after.effort or 0))
+        note("")
+    end
     if (after.effort or 0) < MINIMUM_EFFORT then
         note(string.format("  INCONCLUSIVE. The loop averaged %.3f deg of commanded tilt,",
             after.effort or 0))
@@ -812,6 +842,15 @@ local function report(before, after)
         elseif change > 25 then
             note(string.format("  HELD. Net drift %.3f -> %.3f blocks/s, %.0f%% less.",
                 before.netDrift, after.netDrift, change))
+            -- AGAINST THE DESIGN, not against zero. A proportional loop
+            -- under-relaxed by half settles at v/(1+0.5) of the disturbance,
+            -- so 33% is what it is BUILT to remove -- not a shortfall.
+            local expected = (1 - 1 / (1 + velocityhold.DEFAULTS.relaxation)) * 100
+            note(string.format("  A proportional loop at relaxation %.1f is designed to"
+                .. " remove %.0f%%,", velocityhold.DEFAULTS.relaxation, expected))
+            note(string.format("  so %.0f%% is the loop working as built. Raising the"
+                .. " relaxation toward 1.0", change))
+            note("  removes more, at the cost of overshoot on a plant that inverts.")
             note("  Compare the trim flights, which cut the standing tilt by 74% and")
             note("  did not reduce the drift at all: this loop does not care what the")
             note("  standing tilt is, only where the craft ends up.")
