@@ -342,11 +342,47 @@ a second, and immediately on any CHANGE -- so the damper still gets every
 command the instant it asks. 107 messages/s down to about 9. The tool reports
 the achieved rate during the confirmation.
 
-**NOT YET DONE, and worth doing:** `trimflight.lua` and `pitchdampflight.lua`
-re-send at the sample rate too. trimflight's probe worked at 09:49 and the
-velocity tool failed at 13:43 and 15:08 on the same pattern, so the margin is
-thin rather than absent. Give them the same throttle before trusting a long
-window from either.
+**CONFIRMED BY RUN 3.** With the throttle in, all four corners answered 2.00 at
+11 messages/s and phase A ran properly for the first time
+(`flight-logs/velocityholdflight_run3_gains.txt`). The traffic was the fault.
+
+#### THE NET GAINS, MEASURED AT LAST
+
+    roll axis    -3.3601 blocks/s per commanded degree
+    pitch axis   -2.8029
+
+**INVERTED on both axes, as predicted -- and 3.6x and 7.6x LARGER than
+predicted.** The direction was right; the magnitude was not. The fast/slow sign
+flip was measured directly on the same flight: reversing to -2 degrees gave
+v_stbd -5.573 in the first 6 s against +6.946 at steady state.
+
+**AND THE PARTS DO NOT ADD UP, which is now the open question on this axis.**
+Working backwards from the measured net and this flight's own hull angles:
+
+    roll   net -3.360 = direct +0.823 + coupling -1.218 x H  ->  H = 3.44
+    pitch  net -2.803 = direct +0.823 + coupling +0.803 x H  ->  H = 4.52
+
+against a modelled 2.13 blocks/s per hull degree -- and the two axes do not
+agree with each other either. Either the hull-tilt drift law is wrong, or
+something else is pushing. **The loop does not care** -- it divides by the
+measured net -- but the model in `velocityhold.predictNet` is not describing
+this craft and should not be trusted for anything but a sanity check.
+
+**THE TRIMFLIGHT COUPLINGS ARE SUSPECT.** This flight measured -1.2175 and
++0.8025 hull deg per commanded deg, against the probe's -0.8205 and +0.5588 --
+larger by 1.48x and 1.44x, a consistent factor. trimflight flew through the
+command flood with no tilt readback, so **the tilt it actually applied is
+unknown** and its couplings read low. Anything built on -0.8205 / +0.5588
+inherits that, including this section's original -0.934 / -0.376 prediction.
+
+**SO GIVE `trimflight.lua` AND `pitchdampflight.lua` THE SAME THROTTLE** before
+trusting another number from either. Both still re-send at the sample rate.
+
+#### AND THE PROBE IS NOW 1 DEGREE, NOT 2
+
+At -3.36 blocks/s per degree a 2 degree probe drove the craft to 6.9 blocks/s
+against an 8.0 abort. trimflight flew 2 degrees twice "without incident" -- but
+through the flood, so that is not the reassurance it looks like.
 
  A bearing only obeys a manual target while
 it is ACTIVE -- "at 0 RPM the target is stored and completely ignored:

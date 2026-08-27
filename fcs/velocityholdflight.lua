@@ -61,10 +61,17 @@ local plan = {
     climbTimeout = 90,
     loopSeconds = 0.15,
 
-    -- 2 degrees, the same probe trimflight flew twice without incident. Large
-    -- enough to move the craft well clear of its own drift, small enough that
-    -- a surprise is a nuisance.
-    probeTilt = 2.0,
+    -- ONE degree, lowered from two after the first flight that actually
+    -- reached the bearings. The net gain measured -3.36 blocks/s per degree on
+    -- the roll axis, so a 2 degree probe drove the craft to 6.9 blocks/s
+    -- against an 8.0 abort -- 86% of the limit, on a number nobody had
+    -- measured before that flight. At 1 degree the same probe is about
+    -- 3.4 blocks/s.
+    --
+    -- trimflight flew 2 degrees twice "without incident", and that is not the
+    -- reassurance it looks like: it flew them through the command flood, so
+    -- the tilt it actually applied is unknown. See THE VELOCITY LOOP.
+    probeTilt = 1.0,
 
     -- LONG ENOUGH FOR THE HULL TO HAVE FINISHED. The net gain is a
     -- steady-state quantity and the hull is the slow half: roll rings at
