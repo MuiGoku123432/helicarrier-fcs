@@ -224,6 +224,8 @@ harness.model = {
     -- A constant added to every bearing's reported thrust. Zero here; the
     -- craft measures about -442.6. See bearingThrust.
     bearingThrustOffset = 0,
+    -- Bearings that report active and do not answer a manual target.
+    bearingsIgnoreTilt = false,
     -- Create's universal drag: a tilt-implied acceleration reaches terminal
     -- velocity rather than integrating. This is why the craft cruises instead
     -- of accelerating away.
@@ -272,8 +274,12 @@ end
 -- the pair ADDS. Leave it unmirrored and the laterals cancel -- measured on the
 -- ground as exactly 0.0. That is the whole content of vectorprobe phase A.
 local function bearingVectors(pod, rpm, b1, b2)
-    -- Inactive bearings do not move, whatever was commanded.
-    local tilt = math.abs(rpm) > 0 and (pod.tiltAngle or 0) or 0
+    -- Inactive bearings do not move, whatever was commanded. bearingsIgnoreTilt
+    -- models the same outcome from a different cause -- a bearing that reports
+    -- active and still does not answer -- which is what the velocity tool's
+    -- first flight appears to have hit.
+    local tilt = (math.abs(rpm) > 0 and not harness.model.bearingsIgnoreTilt)
+        and (pod.tiltAngle or 0) or 0
     local azimuth = math.rad(pod.tiltAzimuth or 0)
     local s, c = math.sin(math.rad(tilt)), math.cos(math.rad(tilt))
     local lx, lz = s * math.cos(azimuth), s * math.sin(azimuth)
@@ -358,7 +364,8 @@ local function podTelemetry(corner, messageType)
             -- now reproduces the trap instead of handing out clean numbers.
             active = math.abs(rpm) > 0 or nil,
             bearingsAssembled = true,
-            tiltAngle = math.abs(rpm) > 0 and (pod.tiltAngle or 0) or 0,
+            tiltAngle = (math.abs(rpm) > 0 and not harness.model.bearingsIgnoreTilt)
+                and (pod.tiltAngle or 0) or 0,
             perBearing = bearingVectors(pod, rpm, b1, b2),
             faults = {},
         },
@@ -438,6 +445,7 @@ harness.snapPower = snapPower
 -- heading 0 = bow and 90 = starboard -- MEASURED on all four corners, and not
 -- what either the old props.lua comment or a naive reading of the axes said.
 local function commandedTilt()
+    if harness.model.bearingsIgnoreTilt then return 0, 0 end
     local starboard, bow, n = 0, 0, 0
     for _, pod in pairs(pods) do
         local tilt = pod.tiltAngle or 0

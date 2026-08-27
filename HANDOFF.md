@@ -208,7 +208,8 @@ design failed by asking one of them to do a job it is structurally incapable of.
 ### THE VELOCITY LOOP -- the actuator is INVERTED and SLOW
 
 Built 2026-08-27: `fcs/velocityhold.lua` and `/fcs/velocityholdflight.lua`.
-Not yet flown.
+**Flown once, and the flight measured nothing -- see RUN 1 at the end of this
+section. The bearings did not move.**
 
 #### THE PLANT, and why every previous attempt ran away
 
@@ -269,6 +270,48 @@ the craft's mass, both of which move when the hull is loaded.
   **Attribution requires action**: if the loop did not act, the A/B says
   nothing about the loop, whatever the two numbers did. There is a guard for
   that now.
+
+#### RUN 1, 2026-08-27: THE BEARINGS DID NOT MOVE
+
+`flight-logs/velocityholdflight_run1_noresponse.txt`, `--measure-only`.
+
+    at +2.0 deg   v_bow -1.342  v_stbd +0.455  roll +0.20  pitch +0.58
+    at -2.0 deg   v_bow -1.345  v_stbd +0.447  roll +0.20  pitch +0.58
+
+    NET GAIN  +0.0020 (roll axis)   -0.0069 (pitch axis)
+
+**Reversing a 2 degree command changed nothing.** Not the velocity, not the
+hull attitude, on either axis. The craft flew and drifted at 1.417 blocks/s,
+which is its ordinary standing drift, and sat at roll +0.20 / pitch +0.58,
+which is its ordinary standing offset.
+
+That is not a small gain. **That is no response at all**, and the tool reported
+it as a measurement -- then correctly refused to close the loop on it, and
+told the reader that one of three earlier measurements must be wrong. The
+refusal was right. The framing was not: nothing was wrong with the earlier
+measurements, the actuator simply never moved.
+
+For contrast, the same 2 degree command on the same day in `trimflight` drove
+the craft to 6.3 and 4.3 blocks/s on the two halves of its pair.
+
+**Root cause not yet established.** A bearing only obeys a manual target while
+it is ACTIVE -- "at 0 RPM the target is stored and completely ignored:
+getTiltAngle stays 0 and getThrustVector does not move" (`props.lua`) -- and
+this tool read neither `prop.active` nor the achieved `prop.tiltAngle`.
+`bearingsweep` does; five findings in this document died of not doing it.
+
+**FIXED, and this is THE RULE again.** Phase A now commands the probe tilt for
+6 s and reads every corner's `tiltAngle` back before measuring anything. If the
+four corners do not answer it aborts in ten seconds with the diagnosis instead
+of flying four minutes of nothing. Every measurement window also reports the
+achieved tilt, and a reverse pair whose halves did not reach the commanded
+angle is refused rather than reported as a gain.
+
+**THE CHEAP NEXT STEP IS ON THE GROUND.** `/fcs/bearingsweep.lua` tilts FL to
+8 degrees at 64 rpm and reads the angle back -- two minutes, nothing armed. It
+returned `reported tilt 8.00` on 2026-08-27. If it still does, `set_tilt` works
+and the problem is specific to this tool or to flight; if it does not,
+something on the craft has changed since that run.
 
 #### WHAT THIS SUPERSEDES
 
@@ -613,6 +656,10 @@ prints the per-corner thrust spread, which is where that check would start.
   oscillation contributes even when the mean velocity is zero. Run 1 of the
   trim was judged on it and could not be. Use NET DISPLACEMENT over the window.
 - **Do not chase FR.** It answered 20 of 20. The per-pod hunt is over.
+- **Do not measure a response without confirming the actuator moved.** Run 1 of
+  the velocity tool measured a net gain of 0.002 blocks/s per degree from
+  windows in which the bearings never tilted, and reported it as a physical
+  result contradicting three earlier measurements. Read `prop.tiltAngle` back.
 - **Do not close a fast loop on the bearings.** The actuator's fast half has
   the OPPOSITE sign to its slow half. That is the runaway, measured. Rate-limit
   the command and feed the loop a mean, not a reading.

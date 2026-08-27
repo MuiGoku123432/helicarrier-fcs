@@ -5,6 +5,7 @@
 --   luajit tools/run_velocityholdflight_harness.lua direct     hull and force AGREE
 --   luajit tools/run_velocityholdflight_harness.lua cancelling the two halves
 --                                                              nearly cancel
+--   luajit tools/run_velocityholdflight_harness.lua deadbearings  they never move
 --   luajit tools/run_velocityholdflight_harness.lua all
 --
 -- WHAT THIS CAN AND CANNOT PROVE. The harness's coupling and drag are numbers
@@ -42,7 +43,7 @@
 package.path = "./?.lua;./?/init.lua;" .. package.path
 local harness = require("tools.cc_harness")
 
-local MODES = { "inverted", "direct", "cancelling" }
+local MODES = { "inverted", "direct", "cancelling", "deadbearings" }
 local mode = arg[1] or "inverted"
 
 if mode == "all" then
@@ -97,6 +98,13 @@ elseif mode == "cancelling" then
     harness.model.bearingTiltPitchPerDegree = 0.3857 * 0.0223
     harness.model.bearingCouplingSign = -1
     harness.model.bearingCouplingSignPitch = 1
+elseif mode == "deadbearings" then
+    -- THE CASE RUN 1 ACTUALLY HIT. The bearings never move, so every window
+    -- reads the same velocity at +2 and -2 degrees and the gain comes out at
+    -- a few thousandths. The tool must call that NO MEASUREMENT and abort, not
+    -- report it as a small response and go looking for which earlier
+    -- measurement was wrong -- which is what the first version did.
+    harness.model.bearingsIgnoreTilt = true
 elseif mode ~= "inverted" and mode ~= "ground" then
     error("unknown mode " .. tostring(mode))
 end

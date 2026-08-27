@@ -175,6 +175,84 @@ local function commandProps(rollRate)
     return differential
 end
 
+-- ---------------------------------------------------------------------------
+-- CONFIRM THE TILT FROM TELEMETRY. THE RULE, and run 1 is why it is here.
+--
+-- Phase A of the first flight measured a net gain of +0.0020 blocks/s per
+-- degree on the roll axis and -0.0069 on pitch, off windows in which the
+-- velocity and the hull attitude were IDENTICAL at +2 and -2 degrees. That is
+-- not a small response. That is no response: the bearings never moved, and the
+-- tool reported it as a measurement and went looking for which of three
+-- earlier measurements was wrong.
+--
+-- A bearing only obeys a manual target while it is ACTIVE -- "at 0 RPM the
+-- target is stored and completely ignored: getTiltAngle stays 0 and
+-- getThrustVector does not move" (props.lua). The pods report both `active`
+-- and the achieved `tiltAngle` every second, and this tool was not reading
+-- either. bearingsweep does; five findings in HANDOFF died of not doing it.
+-- ---------------------------------------------------------------------------
+
+local function tiltReadback()
+    local reported, missing = {}, {}
+    for _, corner in ipairs(flight.CORNERS) do
+        local pod = banks.getState()[corner]
+        local prop = pod and pod.prop
+        if not prop then
+            missing[#missing + 1] = corner .. ": no telemetry"
+        elseif not prop.active then
+            missing[#missing + 1] = corner .. ": bearings NOT ACTIVE"
+        elseif type(prop.tiltAngle) ~= "number" then
+            missing[#missing + 1] = corner .. ": no tiltAngle reported"
+        else
+            reported[corner] = prop.tiltAngle
+        end
+    end
+    return reported, missing
+end
+
+-- Command a tilt, wait, and refuse to go on unless every corner confirms it.
+local function confirmTilt(magnitude)
+    note("")
+    note(string.format("  confirming the bearings answer a %.1f deg command", magnitude))
+    session.cheapRead = true
+    session:hold(6, function(state, now)
+        session:trim(plan.holdGain, flight.MAX_CLIMB_RATE, 0, state)
+        commandProps(feed(state, now))
+        commandTilt(magnitude, 0)
+    end)
+
+    local reported, missing = tiltReadback()
+    local shown, confirmed = {}, 0
+    for _, corner in ipairs(flight.CORNERS) do
+        local angle = reported[corner]
+        shown[#shown + 1] = string.format("%s %s", corner,
+            angle and string.format("%.2f", angle) or "--")
+        if angle and math.abs(angle) >= magnitude * 0.5 then confirmed = confirmed + 1 end
+    end
+    note("    reported tilt: " .. table.concat(shown, "  "))
+    for _, reason in ipairs(missing) do note("    " .. reason) end
+
+    commandTilt(0, 0)
+    if confirmed == #flight.CORNERS then
+        note("    all four corners answered. The actuator is live.")
+        return true
+    end
+
+    note("")
+    note(string.format("  ** ONLY %d OF %d CORNERS ANSWERED. NOT MEASURING.",
+        confirmed, #flight.CORNERS))
+    note("  ** A gain measured while the bearings are not moving is not a small")
+    note("  ** gain, it is no measurement at all -- and run 1 of this tool")
+    note("  ** reported exactly that and blamed three earlier measurements.")
+    note("  **")
+    note("  ** Check, in this order: are the props actually turning (a bearing")
+    note("  ** at 0 rpm stores a manual target and ignores it)? Do the pods")
+    note("  ** report prop.active? Does /fcs/bearingsweep.lua still get a tilt")
+    note("  ** readback of 8.00 on FL -- that is the same command on the ground")
+    note("  ** and takes two minutes.")
+    return false
+end
+
 local function limits(state)
     if not (state and state.valid) then return nil end
     local speed = 0
@@ -265,10 +343,19 @@ local function measureWindow(label, seconds, starboard, bow, onCommand)
             (lastAt and firstAt) and ((lastAt - firstAt) / 1000) or nil),
     }
 
+    -- The achieved tilt, from the pods, every window. A window whose commanded
+    -- and reported tilt disagree is not a measurement of the commanded one.
+    local reported = tiltReadback()
+    local sum, seen = 0, 0
+    for _, angle in pairs(reported) do sum = sum + angle seen = seen + 1 end
+    result.reportedTilt = seen > 0 and (sum / seen) or nil
+
     note(string.format("  %-20s v_bow %+6.3f  v_stbd %+6.3f  roll %+5.2f  pitch %+5.2f"
-        .. "  net %5s  (%d)",
+        .. "  net %5s  tilt %5s  (%d)",
         label, result.bow, result.starboard, result.roll, result.pitch,
-        result.netDrift and string.format("%.3f", result.netDrift) or "?", count))
+        result.netDrift and string.format("%.3f", result.netDrift) or "?",
+        result.reportedTilt and string.format("%.2f", result.reportedTilt) or "--",
+        count))
     return result, stop
 end
 
@@ -333,6 +420,22 @@ local function probeAxis(axis)
     if not gain then
         note("  no gain: the reverse pair did not produce usable samples")
         return nil
+    end
+
+    -- DID THE ACTUATOR ACTUALLY REVERSE? The reported tilt is a magnitude, so
+    -- both halves read about +2; what says the command took is that it is near
+    -- the commanded size in BOTH. A pair measured at zero tilt produces a
+    -- gain of zero and looks exactly like a craft the bearings cannot move.
+    for _, half in ipairs({ { "+", positive }, { "-", negative } }) do
+        local angle = half[2].reportedTilt
+        if not angle or math.abs(angle) < plan.probeTilt * 0.5 then
+            note(string.format("  ** THE %s HALF REPORTED %s deg AGAINST %.1f COMMANDED.",
+                half[1], angle and string.format("%.2f", angle) or "nothing",
+                plan.probeTilt))
+            note("  ** The bearings did not move, so this is not a measurement of")
+            note("  ** anything. Do not read the gain below as a small response.")
+            return nil
+        end
     end
 
     local direct = bearinggain.perDegree({
@@ -650,6 +753,14 @@ local function mainLoop()
     note("== A: the NET gain per axis, by reverse pairs at steady state ==")
     note("  (the roll damper runs throughout; windows are long enough for the")
     note("   hull to have finished moving, which is what makes it the NET)")
+
+    if not confirmTilt(plan.probeTilt) then
+        clearTilt()
+        note("")
+        note("== descend and land ==")
+        session:descend()
+        return
+    end
 
     if onlyAxis ~= "pitch" then
         local gain, stop = probeAxis("starboard")
