@@ -682,6 +682,13 @@ prints the per-corner thrust spread, which is where that check would start.
   oscillation contributes even when the mean velocity is zero. Run 1 of the
   trim was judged on it and could not be. Use NET DISPLACEMENT over the window.
 - **Do not chase FR.** It answered 20 of 20. The per-pod hunt is over.
+- **LuaJIT is not the craft's Lua, and format strings are where they differ.**
+  A `%+5s` shipped and killed a ground run on its second line -- "invalid
+  conversion specification" -- after the harness had run the same line minutes
+  earlier without complaint. The `+`, space and `#` flags are numeric-only;
+  LuaJIT ignores them on `%s`, CC:Tweaked rejects them. `tools/test_formats.lua`
+  catches the class now. Every harness being green is not the same as the craft
+  being able to load the file.
 - **Do not measure a response without confirming the actuator moved.** Run 1 of
   the velocity tool measured a net gain of 0.002 blocks/s per degree from
   windows in which the bearings never tilted, and reported it as a physical

@@ -260,9 +260,9 @@ local function measureRpm(rpm)
     local gain = (nowY and baseY) and (nowY - baseY) or nil
 
     note(string.format("  %3d rpm  thrust/bearing %10.1f   per rpm %7.2f"
-        .. "   corners %d  spread %4.1f%%  y %+5s",
+        .. "   corners %d  spread %4.1f%%  y %5s",
         rpm, mean, mean / rpm, cornerCount, spread * 100,
-        gain and string.format("%.2f", gain) or "?"))
+        gain and string.format("%+.2f", gain) or "?"))
 
     return {
         rpm = rpm,
