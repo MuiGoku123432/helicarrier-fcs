@@ -1,7 +1,9 @@
 # Helicarrier FCS — session handoff
 
-Last updated: 2026-08-27 (later). **THE BEARING LATERAL GAIN IS MEASURED AND
-THE ANSWER IS 4x.** It took a two-minute ground run, not a flight: it was live
+Last updated: 2026-08-27 (later still). **PITCH IS NOT AN UNDAMPED AXIS, AND
+THE FORE/AFT SIGN IS BACKWARDS.** The pitch flight falsified the premise it was
+built on -- see **THE PITCH FLIGHT**, and read it before planning any more
+damping work. **THE BEARING LATERAL GAIN IS MEASURED AND THE ANSWER IS 4x.** It took a two-minute ground run, not a flight: it was live
 telemetry all along. A degree of common-mode tilt is worth **0.8165 blocks/s**,
 not the 0.205 two files store. See step 1 below and **NOTHING MAY BE A STORED
 CONSTANT**.
@@ -71,7 +73,7 @@ oscillation, seen from above.
 #### Three layers, separated by TIMESCALE
 
     layer 1   RATE DAMPING       ~0.15 s   differential prop RPM
-              roll: FLOWN AND WORKING.  pitch: BUILT, NOT YET FLOWN.
+              roll: FLOWN AND WORKING.  pitch: DOES NOT NEED IT (measured).
 
     layer 2   VELOCITY HOLD      seconds   bearing common-mode tilt
               never flown. fcs/lateralhold.lua implements it, 73 assertions.
@@ -99,18 +101,11 @@ separation and the two loops chase each other.
    sending all along. Numbers in **THE BEARING GAIN** below. Re-run it whenever
    the hull's load changes.
    Cheapest thing here and it unblocks the rest.
-2. **PITCH DAMPING -- `/fcs/pitchdampflight.lua` IS BUILT AND WAITING TO FLY.**
-   The largest single win available: half the oscillation that makes the curve
-   is undamped. One flight measures all three unknowns from one pulse --
-   authority, SIGN, and the spring nobody has ever measured -- and then damps
-   with them. Roughly 6 minutes. `--measure-only` stops after phase A.
-
-   Expect authority near **0.0493** (measured roll over the unit-free
-   geometric ratio 1.91 -- that route cancels the unexplained 2.9x in the
-   force chain, so it is a real prediction). The spring is genuinely open: if
-   the restoring torque per degree matches roll's it is 0.00497, an **89 s**
-   period; if the hull levels both axes at the same rate it is roll's own
-   0.0223, **42 s**. The tool reads back whichever it is and names it.
+2. ~~PITCH DAMPING~~ **FLOWN 2026-08-27, AND IT KILLED ITS OWN PREMISE.**
+   Pitch does not ring. See **THE PITCH FLIGHT** below. What replaced this as
+   the open question: *what actually rotates the tilt vector*, since it is not
+   an undamped pitch axis -- and **why the fore/aft sign is backwards**, which
+   contradicts a measurement already in this file.
 3. **FLY VELOCITY HOLD** with the calibrated gain.
 4. Only then ask whether any standing trim is still wanted. Probably not.
 
@@ -160,7 +155,7 @@ design failed by asking one of them to do a job it is structurally incapable of.
 
 | job | actuator | authority | status |
 |---|---|---|---|
-| **damp** (fast, large) | differential prop RPM | **0.0941 deg/s^2 per rpm** (roll); pitch predicted 0.0493 | roll FLOWN; pitch BUILT, unflown |
+| **damp** (fast, large) | differential prop RPM | roll **0.0941**; pitch **0.0440 MEASURED, sign NEGATIVE** | roll FLOWN; pitch measured, damper not needed |
 | **translate** (drift) | bearing tilt, common mode | **0.8165 blocks/s per deg at 64 rpm** — measured | never flown |
 | **trim** (slow, tiny) | bearing tilt | roll -0.86, pitch +0.64 hull deg per deg | flown; drift-neutral |
 
@@ -196,6 +191,81 @@ design failed by asking one of them to do a job it is structurally incapable of.
 - **Pods push full telemetry at ~1 Hz and are never polled while healthy.**
   Steady-state pod-directed traffic is zero from any number of tabs.
 - **`/fcs-dev.lua` (the monitor hub) is still NOT deployed.**
+
+### THE PITCH FLIGHT -- 2026-08-27, and it falsified its own premise
+
+`/fcs/pitchdampflight.lua`, phase A only. Log:
+`flight-logs/pitchdampflight_run1.txt`. Three results, in order of how much
+they change the plan.
+
+#### 1. PITCH DOES NOT RING. The whole case for a pitch damper is gone.
+
+    pulse 3 rpm for 3 s  ->  peak rate 0.396 deg/s, peak pitch 1.80 deg
+    zero crossings in 120 s ................. 0
+    rate to 1/e ............................. 1.6 s
+
+Roll, for comparison, rings through 5 zero crossings over 105 s and takes 4.6 s
+to reach 1/e undamped. **Pitch arrests itself in under two seconds and never
+crosses zero.** A rate damper on an axis that already stops itself that fast
+buys nothing, and the tool now says so rather than damping because it was built
+to damp.
+
+**So the drift curve needs a new explanation.** "Roll and pitch oscillate out of
+phase, so the tilt vector rotates" was the story, and half of it just failed:
+pitch does not oscillate. Whatever sweeps the heading -225 degrees, it is not an
+undamped pitch axis. That is the open question now.
+
+**AND THE FOLLOW-UP THE FLIGHT COULD NOT ANSWER.** "It did not ring" splits two
+ways and they lead opposite directions: a restoring spring plus heavy damping
+(healthy axis, nothing to do) versus damping with NO SPRING, where the hull
+simply parks at whatever pitch it is left at. The second would be a much larger
+finding -- it would mean every standing pitch offset recorded here is a parked
+attitude rather than an equilibrium, and that pitch gives the velocity loop no
+self-levelling help at all. Run 1 never recorded where the axis started, so it
+cannot tell them apart. The tool now takes a 12 s baseline before the pulse and
+classifies the result; **re-fly `--measure-only` to settle it.**
+
+#### 2. THE SIGN IS NEGATIVE, and that contradicts this file
+
+    AUTHORITY  -0.0440 deg/s^2 per rpm
+
+Raising the FORWARD corners **drops the bow**. Against `mixer_profile.lua`,
+which says the opposite in a comment block written around a flight measurement:
+
+> "THE PITCH SIGNS WERE INVERTED. This block gave the AFT corners +1, which
+> raises the stern and drops the bow... Measured 2026-08-26: a +0.3 pitch
+> demand produced -2.12 deg/s^2."
+
+Those two cannot both be right. Pre-fix, a positive demand pushed the AFT
+corners and the craft pitched negative -- stern up, bow down, ordinary physics.
+This flight pushed the FORWARD corners and the craft also pitched negative.
+Same reported sign for opposite commands.
+
+**Do not resolve this by argument.** The candidates are: the FL/FR vs RL/RR
+assignment is swapped somewhere between `config.podIds` and the physical hull;
+`attitude.lua`'s pitch sign is inverted; or the 2026-08-26 ion reading was taken
+before the axis transposition was fixed and is measuring roll. They have very
+different consequences -- under the second, every pitch angle in this document
+has the wrong sign, including the standing -0.638 and the bearing coupling
++0.5588.
+
+**The decisive experiment is one flight**: command a pitch demand through the
+ION mixer and a fore/aft PROP differential in the same window, with the axis
+convention untouched between them, and see whether the two actuators agree.
+Agreement points at `attitude.lua`; disagreement points at one of the two corner
+maps.
+
+#### 3. THE RATIO PREDICTION WORKED, and that is a first here
+
+    predicted  0.0493 deg/s^2 per rpm   (measured roll / the unit-free 1.91)
+    measured   0.0440                    89% of it
+
+Every previous from-scratch prediction on this craft has been off by 2-3x. This
+one was not, because it is a RATIO -- (lateral arm / longitudinal arm) x
+(I_pitch / I_roll) -- in which the force, the mass and the density all cancel,
+taking the unexplained 2.9x in the propeller force chain with them. **Predict
+across axes by ratio, never from the thrust model.** It is the cheapest
+reliable prediction available on this craft.
 
 ### THE BEARING GAIN -- measured, 2026-08-27, on the ground
 
@@ -320,19 +390,14 @@ prints the per-corner thrust spread, which is where that check would start.
    **Measure it: hull level under the damper, a known tilt at 64 rpm, terminal
    net drift.**
 
-2. **PITCH DAMPING IS BUILT BUT HAS NOT FLOWN.** `fcs/pitchdamp.lua` and
-   `/fcs/pitchdampflight.lua`, 2026-08-27. Three quantities are still
-   UNMEASURED on the craft -- the authority, the sign, and the spring -- and
-   `pitchdamp.MEASURED` ships all of them **nil** on purpose:
-   `differentialFor` returns 0 and a reason rather than commanding from a
-   prediction. The flight measures them and only then damps.
+2. **THE FORE/AFT SIGN CONTRADICTS A MEASUREMENT ALREADY IN THIS FILE, and one
+   of the two is wrong.** See **THE PITCH FLIGHT**. This is the live blocker on
+   any pitch work, and it is not resolvable by argument -- both readings are in
+   `flight-logs/`.
 
-   The sign is the one to watch. Raising the FORWARD corners *should* raise
-   the bow; the same reasoning had roll and pitch transposed for weeks, and
-   the bearing coupling came back opposite to prediction on one axis and not
-   the other. The tool measures a SIGNED authority and divides by it, so it
-   damps either way -- proven in the harness, where the `wrongsign` craft is
-   damped exactly as well as the right-signed one.
+   `pitchdamp.MEASURED` still ships every field **nil** on purpose:
+   `differentialFor` returns 0 and a reason rather than commanding. Leave it
+   that way until the contradiction is settled.
 
 3. **THE STANDING OFFSETS ARE NOT CONSTANTS.** They have moved every flight:
    recorded +0.368/-0.638, then -0.490/+0.498, +0.205/+0.692, -0.244/+0.695.

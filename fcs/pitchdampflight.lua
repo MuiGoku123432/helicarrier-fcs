@@ -83,6 +83,12 @@ local plan = {
     -- has shown enough crossings to time.
     windowSeconds = 120,
     crossingsWanted = 4,
+    -- A QUIET WINDOW BEFORE THE PULSE, so "did the angle come back" has
+    -- something to come back TO. Run 1 could not answer the most important
+    -- question it raised -- whether the hull returns to level in pitch or
+    -- simply parks at whatever attitude it is left in -- because it never
+    -- recorded where the axis started.
+    baselineSeconds = 12,
 
     settleRate = 0.05,
     settleTimeout = 120,
@@ -326,6 +332,23 @@ local function recordWindow(label, damped)
     local samples = {}
     session.cheapRead = true
 
+    -- WHERE THE AXIS SAT BEFORE ANYTHING WAS COMMANDED. A mean over a quiet
+    -- window, not a reading: the standing pitch offset is a few tenths and the
+    -- hull moves either side of it.
+    local baselineTotal, baselineCount = 0, 0
+    session:hold(plan.baselineSeconds, function(state, now)
+        session:trim(plan.holdGain, flight.MAX_CLIMB_RATE, 0, state)
+        local roll = feed(state, now)
+        commandDifferentials(rollCommand(roll), 0)
+        if state and state.valid and state.pitch then
+            baselineTotal = baselineTotal + state.pitch
+            baselineCount = baselineCount + 1
+        end
+    end)
+    local baselinePitch = baselineCount > 0 and (baselineTotal / baselineCount) or nil
+    note(string.format("  %s: baseline pitch %s deg over %d samples", label,
+        baselinePitch and string.format("%+.3f", baselinePitch) or "?", baselineCount))
+
     note(string.format("  %s: pulsing %+d rpm fore/aft for %.1f s",
         label, plan.pulseRpm, plan.pulseSeconds))
 
@@ -397,6 +420,7 @@ local function recordWindow(label, damped)
             label, plan.crossingsWanted,
             samples[#samples] and samples[#samples].t or 0))
     end
+    samples.baselinePitch = baselinePitch
     return samples, (stop ~= "measured") and stop or nil
 end
 
@@ -551,12 +575,8 @@ local function analysePhaseA(samples)
             note("  ** frequency ringing down -- treat the period as provisional.")
         end
     else
-        note(string.format("  NO PERIOD. %d crossing%s in the window -- not enough to time.",
-            crossings, crossings == 1 and "" or "s"))
-        note("  The pitch axis is either slower than the window or it is not")
-        note("  oscillating at all. Re-run with --window 240 before concluding")
-        note("  anything; a spring cannot be derived from this and phase B")
-        note("  therefore has no critical damping to aim at.")
+        note(string.format("  NO PERIOD. %d crossing%s in the window -- the axis did"
+            .. " not ring.", crossings, crossings == 1 and "" or "s"))
     end
     note("")
 
@@ -565,7 +585,80 @@ local function analysePhaseA(samples)
         peakAbsPitch(samples),
         decay and string.format("%.1f s", decay) or "never", crossings))
 
+    -- ---------------------------------------------------------------------
+    -- WHAT KIND OF AXIS IS THIS? Run 1 made this the important question.
+    --
+    -- The premise of this tool was that pitch is underdamped like roll. The
+    -- craft said otherwise: 0 crossings in 120 s and the rate down to 1/e in
+    -- 1.6 s. An axis that arrests itself in under two seconds does not want a
+    -- rate damper. But "it did not oscillate" splits two ways, and the split
+    -- is the whole finding -- so it is measured rather than argued.
+    -- ---------------------------------------------------------------------
+    local baseline = samples.baselinePitch
+    local peakSigned, finalPitch = nil, nil
+    for _, sample in ipairs(samples) do
+        if sample.pitch then
+            if not peakSigned
+                or math.abs(sample.pitch - (baseline or 0))
+                    > math.abs(peakSigned - (baseline or 0)) then
+                peakSigned = sample.pitch
+            end
+        end
+    end
+    -- The FINAL attitude is a mean over the last stretch, not the last
+    -- reading: a single sample carries whatever the hull was doing at that
+    -- instant, and the number being computed is a difference of tenths.
+    local tailTotal, tailCount = 0, 0
+    local lastAt = samples[#samples] and samples[#samples].t or 0
+    for _, sample in ipairs(samples) do
+        if sample.pitch and sample.t >= lastAt - 20 then
+            tailTotal = tailTotal + sample.pitch
+            tailCount = tailCount + 1
+        end
+    end
+    if tailCount > 0 then finalPitch = tailTotal / tailCount end
+
+    local verdict, returned = pitchdamp.classify({
+        crossings = crossings, baseline = baseline,
+        peak = peakSigned, final = finalPitch,
+    })
+
+    note("")
+    note(string.format("  baseline %s -> peak %s -> settled %s deg",
+        baseline and string.format("%+.3f", baseline) or "?",
+        peakSigned and string.format("%+.3f", peakSigned) or "?",
+        finalPitch and string.format("%+.3f", finalPitch) or "?"))
+    if returned then
+        note(string.format("  the hull gave back %.0f%% of the excursion", returned * 100))
+    end
+    note(string.format("  VERDICT: %s", verdict))
+
+    if verdict == pitchdamp.OVERDAMPED then
+        note("  There IS a restoring moment and enough damping that the axis")
+        note("  creeps home without overshooting. Pitch is the healthy axis.")
+    elseif verdict == pitchdamp.NO_SPRING then
+        note("  ** THE HULL DID NOT COME BACK. Pitch has damping but little or no")
+        note("  ** restoring moment -- it STAYS where it is left. That is a bigger")
+        note("  ** finding than a missing damper: it means every standing pitch")
+        note("  ** offset in this project is a PARKED ATTITUDE, not an equilibrium,")
+        note("  ** and the velocity loop gets no self-levelling help on this axis.")
+    elseif verdict == pitchdamp.UNCLEAR then
+        note("  Neither clearly home nor clearly parked. Re-fly with a larger")
+        note("  pulse before drawing anything from it.")
+    end
+
+    if not pitchdamp.worthDamping(verdict, decay) then
+        note("")
+        note(string.format("  A RATE DAMPER IS NOT WORTH ADDING HERE. The axis arrests"
+            .. " itself in %s,", decay and string.format("%.1f s", decay) or "?"))
+        note("  against roll's 4.6 s and 5 zero crossings. The premise this tool was")
+        note("  built on -- that half the drift curve's oscillation is undamped pitch")
+        note("  -- does not survive this measurement. Whatever rotates the tilt")
+        note("  vector, it is not an undamped pitch axis.")
+    end
+
     return measured.authorityPerRpm ~= nil and measured.springPerDegree ~= nil
+        and pitchdamp.worthDamping(verdict, decay)
 end
 
 -- ---------------------------------------------------------------------------
@@ -712,10 +805,10 @@ local function mainLoop()
     if measureOnly or not usable then
         if not usable then
             note("")
-            note("  NOT DAMPING. Phase A did not produce both an authority and a")
-            note("  spring, and a damper built on half of them is a gain derived")
-            note("  from a guess -- which is the failure this whole file is shaped")
-            note("  to avoid.")
+            note("  NOT RUNNING THE A/B. Either phase A did not produce both an")
+            note("  authority and a spring -- a damper built on half of them is a")
+            note("  gain derived from a guess -- or it measured an axis that does")
+            note("  not need damping. The verdict above says which.")
         else
             note("")
             note("  --measure-only: not running the A/B.")

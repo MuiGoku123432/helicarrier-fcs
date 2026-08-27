@@ -134,6 +134,83 @@ function pitchdamp.springIfTorqueMatchesRoll(options)
     return rollSpring * (rollInertia / pitchInertia)
 end
 
+-- ---------------------------------------------------------------------------
+-- WHAT KIND OF AXIS IS THIS?
+--
+-- Written after run 1, which answered a question nobody had asked and left the
+-- one everybody had assumed. The premise of this whole file was that pitch is
+-- underdamped like roll -- roll rings through 5 zero crossings over 105 s -- and
+-- that damping it would arrest half the oscillation that makes the drift curve.
+--
+-- THE CRAFT DISAGREED. A 3 rpm pulse produced 0.396 deg/s and 1.80 degrees of
+-- pitch, and then: ZERO zero crossings in 120 seconds, rate down to 1/e in
+-- 1.6 s. That is not an underdamped oscillator. Something arrests pitch rate
+-- hard and fast, and a rate damper added to an axis that already stops itself
+-- in under two seconds buys nothing.
+--
+-- But "it did not oscillate" has TWO very different explanations and they lead
+-- opposite ways:
+--
+--   OVERDAMPED   there is a restoring spring, and enough damping that the hull
+--                creeps back to level without overshooting. The axis is
+--                healthy and needs no damper.
+--
+--   NO SPRING    there is damping but little or no restoring moment, so the
+--                hull STAYS at whatever pitch it is left at. That is a much
+--                bigger finding than a missing damper: it means pitch has no
+--                self-levelling to help the velocity loop, and every standing
+--                pitch offset in this project's history is a parked attitude
+--                rather than an equilibrium.
+--
+-- They are told apart by ONE number: did the angle come back? Hence the
+-- baseline window in the flight tool, and this classifier.
+-- ---------------------------------------------------------------------------
+
+pitchdamp.UNDERDAMPED = "UNDERDAMPED"
+pitchdamp.OVERDAMPED = "OVERDAMPED"
+pitchdamp.NO_SPRING = "NO SPRING"
+pitchdamp.UNCLEAR = "UNCLEAR"
+
+-- Returns verdict, returnedFraction.
+--
+-- `returned` is how much of the excursion the hull gave back: 1.0 is all the
+-- way home, 0.0 is parked where the pulse left it. The thresholds are wide
+-- because the standing offset drifts between flights and the measurement is a
+-- difference of angles a few tenths of a degree apart.
+function pitchdamp.classify(options)
+    options = options or {}
+    local crossings = options.crossings or 0
+    local baseline, peak, final = options.baseline, options.peak, options.final
+
+    if crossings >= 2 then return pitchdamp.UNDERDAMPED, nil end
+    if not baseline or not peak or not final then
+        return pitchdamp.UNCLEAR, nil
+    end
+
+    local excursion = peak - baseline
+    -- An excursion smaller than the noise cannot be divided by. The pulse is
+    -- supposed to move the craft more than a tenth of a degree; if it did not,
+    -- the disturbance check upstream should already have said so.
+    if math.abs(excursion) < 0.15 then return pitchdamp.UNCLEAR, nil end
+
+    local returned = (peak - final) / excursion
+    if returned >= 0.6 then return pitchdamp.OVERDAMPED, returned end
+    if returned <= 0.25 then return pitchdamp.NO_SPRING, returned end
+    return pitchdamp.UNCLEAR, returned
+end
+
+-- Is a rate damper worth adding to this axis at all?
+--
+-- The honest answer for an axis that arrests itself in 1.6 s is NO, and this
+-- file should say so rather than damping because it was built to damp.
+function pitchdamp.worthDamping(verdict, decaySeconds)
+    if verdict == pitchdamp.UNDERDAMPED then return true end
+    if decaySeconds and decaySeconds <= 5.0 then return false end
+    -- NO SPRING with a slow decay still wants damping -- the hull will wander
+    -- otherwise -- even though there is no oscillation to arrest.
+    return verdict == pitchdamp.NO_SPRING
+end
+
 function pitchdamp.criticalDamping(springPerDegree)
     if type(springPerDegree) ~= "number" or springPerDegree <= 0 then return nil end
     return 2 * math.sqrt(springPerDegree)

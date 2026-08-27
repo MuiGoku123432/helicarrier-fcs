@@ -240,5 +240,61 @@ checkTrue("and does not cry clip when it did not", not quiet)
 local floored = pitchdamp.combinedCornerRpm(9, 0, 4, { minimumRpm = 8 })
 checkEqual("the corner floor holds", floored.RL, 8)
 
+-- --------------------------------------------------------------------------
+-- 7. WHAT KIND OF AXIS IS IT? Pinned to run 1, which falsified the premise.
+--
+-- The tool was built believing pitch is underdamped like roll. The craft flew
+-- on 2026-08-27 and produced ZERO zero crossings in 120 s with the rate down
+-- to 1/e in 1.6 s. So the classifier exists to tell apart the two ways an axis
+-- can fail to ring, because they lead opposite ways: a spring plus heavy
+-- damping is a HEALTHY axis, while damping with no spring means the hull parks
+-- wherever it is left and never levels itself.
+-- --------------------------------------------------------------------------
+
+checkEqual("two crossings is an oscillator",
+    (pitchdamp.classify({ crossings = 3, baseline = 0, peak = 2.9, final = 2.7 })),
+    pitchdamp.UNDERDAMPED)
+
+checkEqual("came home = OVERDAMPED",
+    (pitchdamp.classify({ crossings = 0, baseline = 0, peak = 1.8, final = 0.3 })),
+    pitchdamp.OVERDAMPED)
+
+checkEqual("parked = NO SPRING",
+    (pitchdamp.classify({ crossings = 0, baseline = 0, peak = 1.8, final = 1.8 })),
+    pitchdamp.NO_SPRING)
+
+checkEqual("halfway home is not a finding",
+    (pitchdamp.classify({ crossings = 0, baseline = 0, peak = 1.8, final = 1.0 })),
+    pitchdamp.UNCLEAR)
+
+-- The standing offset is a few tenths and it moves between flights, so the
+-- classifier works on the DIFFERENCE from baseline rather than from zero.
+checkEqual("a standing offset does not fool it",
+    (pitchdamp.classify({ crossings = 0, baseline = -0.638, peak = 1.16,
+        final = -0.5 })), pitchdamp.OVERDAMPED)
+
+-- An excursion inside the noise cannot be divided by.
+checkEqual("a pulse that did nothing is UNCLEAR, not a verdict",
+    (pitchdamp.classify({ crossings = 0, baseline = 0, peak = 0.05, final = 0.0 })),
+    pitchdamp.UNCLEAR)
+checkEqual("missing numbers are UNCLEAR", (pitchdamp.classify({ crossings = 0 })),
+    pitchdamp.UNCLEAR)
+
+local _, returned = pitchdamp.classify({ crossings = 0, baseline = 0,
+    peak = 2.0, final = 0.5 })
+check("returned fraction is reported", returned, 0.75, 1e-9)
+
+-- IS IT WORTH DAMPING AT ALL? The honest answer for an axis that arrests
+-- itself in 1.6 s is no, and the tool has to be able to say so rather than
+-- damping because it was built to damp.
+checkTrue("an oscillator is worth damping",
+    pitchdamp.worthDamping(pitchdamp.UNDERDAMPED, 15.9))
+checkTrue("run 1's axis is NOT worth damping",
+    not pitchdamp.worthDamping(pitchdamp.OVERDAMPED, 1.6))
+checkTrue("...nor is a fast-arresting unsprung one",
+    not pitchdamp.worthDamping(pitchdamp.NO_SPRING, 1.6))
+checkTrue("but an unsprung axis that wanders IS",
+    pitchdamp.worthDamping(pitchdamp.NO_SPRING, 40))
+
 print(string.format("%d passed, %d failed", passed, failed))
 os.exit(failed == 0 and 0 or 1)

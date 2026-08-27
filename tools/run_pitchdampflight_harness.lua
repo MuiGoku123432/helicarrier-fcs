@@ -3,6 +3,8 @@
 --   luajit tools/run_pitchdampflight_harness.lua ground      the maths, no flight
 --   luajit tools/run_pitchdampflight_harness.lua slow        89 s pitch period
 --   luajit tools/run_pitchdampflight_harness.lua stiff       42 s, like roll
+--   luajit tools/run_pitchdampflight_harness.lua overdamped  springs home, no ring
+--   luajit tools/run_pitchdampflight_harness.lua nospring    parks where it is left
 --   luajit tools/run_pitchdampflight_harness.lua wrongsign   the craft responds
 --                                                            opposite to the map
 --   luajit tools/run_pitchdampflight_harness.lua noresponse  pitch does not move
@@ -40,7 +42,7 @@
 package.path = "./?.lua;./?/init.lua;" .. package.path
 local harness = require("tools.cc_harness")
 
-local MODES = { "slow", "stiff", "wrongsign", "noresponse" }
+local MODES = { "slow", "stiff", "overdamped", "nospring", "wrongsign", "noresponse" }
 local mode = arg[1] or "slow"
 
 if mode == "all" then
@@ -78,8 +80,19 @@ harness.model.propPitchScale = 0.347
 harness.model.pitchRestoring = 0.00497
 harness.model.pitchDamping = 0
 
+-- THE TWO MODES RUN 1 MADE NECESSARY. The craft did not ring at all: 0
+-- crossings in 120 s, rate down to 1/e in 1.6 s. Neither of the spring
+-- hypotheses describes that, and "it did not oscillate" splits two ways --
+-- home again (a spring plus damping) or parked (damping, no spring). The tool
+-- has to tell them apart, so the harness has to be able to be either.
 if mode == "stiff" then
     harness.model.pitchRestoring = 0.0223
+elseif mode == "overdamped" then
+    harness.model.pitchRestoring = 0.00497
+    harness.model.pitchDamping = 0.5
+elseif mode == "nospring" then
+    harness.model.pitchRestoring = 0
+    harness.model.pitchDamping = 0.5
 elseif mode == "wrongsign" then
     harness.model.propPitchScale = -0.347
 elseif mode == "noresponse" then
