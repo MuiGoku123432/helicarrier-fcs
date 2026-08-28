@@ -16,6 +16,15 @@
 --                                                       reads nothing back
 --   luajit tools/run_tiltcheck_harness.lua once         --once, the shape
 --                                                       bearingsweep sends
+--   luajit tools/run_tiltcheck_harness.lua slew         bearings take seconds
+--                                                       to reach the angle --
+--                                                       must still PASS and
+--                                                       report the time
+--   luajit tools/run_tiltcheck_harness.lua shortsettle  the same craft read
+--                                                       too early: must FAIL
+--                                                       and say the settle was
+--                                                       short, not blame the
+--                                                       bearings
 --   luajit tools/run_tiltcheck_harness.lua lostinair    the ground confirm
 --                                                       succeeds, then the link
 --                                                       eats every airborne
@@ -37,9 +46,9 @@
 package.path = "./?.lua;./?/init.lua;" .. package.path
 local harness = require("tools.cc_harness")
 
-local ONCE = false
+local ONCE, SLEW = false, nil
 local MODES = { "works", "ground", "deadbearings", "lost", "rejected",
-    "airborne", "lostinair", "notarget", "once" }
+    "airborne", "lostinair", "notarget", "once", "slew", "shortsettle" }
 local mode = arg[1] or "works"
 
 if mode == "all" then
@@ -89,6 +98,13 @@ elseif mode == "airborne" then
     -- must fail, and the report must say the fault is being airborne rather
     -- than shrugging at five failed corners.
     harness.model.tiltFailsAboveY = harness.craft.y + 2.0
+elseif mode == "slew" or mode == "shortsettle" then
+    -- 2.0 deg/s quoted at 32 rpm, so 8 degrees takes 4 s there and 6.7 s at 48
+    -- -- which is the shape the 2026-08-28 ground evidence implies. Nothing
+    -- about the craft is broken in either mode; only the settle differs.
+    harness.model.bearingSlewDegPerSecond = 2.0
+    harness.model.bearingSlewRpmReference = 32
+    SLEW = mode
 elseif mode == "notarget" then
     -- The mod refuses the target outright. Distinct from deadbearings, where
     -- the target IS stored and the bearing still does not move -- and no tool
@@ -129,6 +145,10 @@ local ok, err = pcall(function()
         local chunk = assert(loadfile("fcs/tiltcheck.lua"))
         if mode == "ground" then chunk("--ground-only")
         elseif ONCE then chunk("--ground-only", "--once", "--tilt", "8")
+        elseif SLEW == "slew" then
+            chunk("--ground-only", "--tilt", "8", "--rpm", "48", "--settle", "12")
+        elseif SLEW == "shortsettle" then
+            chunk("--ground-only", "--tilt", "8", "--rpm", "48", "--settle", "3")
         else chunk() end
     end }, true)
 end)

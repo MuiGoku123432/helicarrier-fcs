@@ -169,6 +169,15 @@ local plan = {
     -- watchdog is 750 ms.
     sendSpacingMs = 0,
     maxSendSpacingMs = 200,
+
+    -- WHAT COUNTS AS ARRIVED, for the slew measurement. 90% of the commanded
+    -- angle, which is well clear of the 50% the pass/fail gate uses -- a slew
+    -- number taken at the pass threshold would report the bearing arriving
+    -- when it is half way there.
+    arrivedFraction = 0.90,
+    -- Most readings kept per corner. 6 s at the pod's ~1 Hz sampler is about
+    -- six; the cap is a runaway guard, not a budget.
+    maxTrace = 16,
 }
 
 local args = { ... }
@@ -184,6 +193,8 @@ for index = 1, #args do
         plan.tiltDegrees = tonumber(args[index + 1]) or plan.tiltDegrees
     elseif argument == "--rpm" then
         plan.propRpm = tonumber(args[index + 1]) or plan.propRpm
+    elseif argument == "--settle" then
+        plan.confirmSeconds = tonumber(args[index + 1]) or plan.confirmSeconds
     elseif argument == "--once" then sendOnceRequested = true
     elseif argument == "--spacing" then
         local ms = tonumber(args[index + 1]) or 0
@@ -484,10 +495,125 @@ local function bearingRows(corner, pod, magnitude)
     return rows, stored, moved, seen
 end
 
+-- ---------------------------------------------------------------------------
+-- HOW LONG A BEARING TAKES TO REACH A COMMANDED ANGLE.
+--
+-- Nothing in this project has ever measured this, and every tool assumes it is
+-- instant. The 2026-08-28 ground evidence says it is not:
+--
+--     32 rpm, 3 s settle, 8 deg   4/4      (bearingsweep runs 4 and 5)
+--     48 rpm, 3 s settle, 8 deg   1 of 4   (bearingsweep, and the one corner
+--                                           that "answered" never had to move)
+--     48 rpm, 6 s hold,   8 deg   4/4      (this tool, twice)
+--
+-- These are GYROSCOPIC bearings. A spinning gyro resists reorientation in
+-- proportion to its angular momentum, so the slew should get SLOWER as rpm
+-- rises -- which is the direction that table shows.
+--
+-- IT IS NOT ONLY A DIAGNOSTIC. velocityhold rate-limits its command to
+-- 0.05 deg/s because the HULL is assumed to be the slow element. If the
+-- bearing takes seconds to reach the angle it was told, there is a lag in the
+-- plant that nothing models.
+--
+-- THE RESOLUTION FLOOR, stated because it bounds every number below: the pod's
+-- sampler is one 160-getter read per cycle, measured at about 1 s, and it
+-- pushes telemetry once per cycle. So tiltAngle is quantised to ~1 s and a
+-- slew faster than that reads as "arrived by the first sample". Readings are
+-- stamped with the POD's own sampleAt, not with receipt time, so transport lag
+-- does not smear them.
+-- ---------------------------------------------------------------------------
+
+local function newTrace()
+    local trace = {}
+    for _, corner in ipairs(flight.CORNERS) do
+        trace[corner] = { readings = {}, lastAt = nil, arrivedAt = nil }
+    end
+    return trace
+end
+
+-- One sample. Keeps a reading only when the POD's sample clock has advanced,
+-- so re-reading the same cached telemetry six times does not become six points.
+local function traceSample(trace, commandedAt, magnitude, now)
+    for _, corner in ipairs(flight.CORNERS) do
+        local pod = banks.getState()[corner]
+        local prop = pod and pod.prop
+        local angle = prop and tonumber(prop.tiltAngle)
+        local at = pod and tonumber(pod.sampleAt)
+        local entry = trace[corner]
+        -- Fall back to the FCS clock where a pod does not stamp its sample;
+        -- then a reading counts as new only when the ANGLE moved.
+        local stamp = at or now
+        local isNew = (at and entry.lastAt ~= at)
+            or (not at and (#entry.readings == 0
+                or entry.readings[#entry.readings].angle ~= angle))
+        if angle and isNew and stamp >= commandedAt then
+            entry.lastAt = at
+            if #entry.readings < plan.maxTrace then
+                entry.readings[#entry.readings + 1] = { at = stamp, angle = angle }
+            end
+            if not entry.arrivedAt
+                and math.abs(angle) >= magnitude * plan.arrivedFraction then
+                entry.arrivedAt = stamp - commandedAt
+            end
+        end
+    end
+end
+
+-- IS THE BEARING MOVING, even though it has not arrived?
+--
+-- Without this the short-settle case diagnoses itself as "the mod stored the
+-- target and the bearings did not move" while the trace plainly shows them
+-- travelling. A tool that says a moving bearing is stuck is worse than one
+-- that says nothing -- it is the shape of every wrong finding in HANDOFF.
+local function traceMoving(trace, magnitude)
+    local moved = 0
+    for _, corner in ipairs(flight.CORNERS) do
+        local readings = trace[corner].readings
+        if #readings >= 2 then
+            local first = math.abs(readings[1].angle)
+            local last = math.abs(readings[#readings].angle)
+            -- Travelled a real distance, and is not just noise about zero.
+            if last - first >= magnitude * 0.1 and last >= magnitude * 0.1 then
+                moved = moved + 1
+            end
+        end
+    end
+    return moved
+end
+
+local function reportTrace(trace, magnitude)
+    local anyArrived, anySamples = false, false
+    local rows = {}
+    for _, corner in ipairs(flight.CORNERS) do
+        local entry = trace[corner]
+        if #entry.readings > 0 then anySamples = true end
+        if entry.arrivedAt then anyArrived = true end
+        local seen = {}
+        for _, reading in ipairs(entry.readings) do
+            seen[#seen + 1] = string.format("%.2f", reading.angle)
+        end
+        rows[#rows + 1] = string.format("%s %7s  %s", corner,
+            entry.arrivedAt and string.format("%.1fs", entry.arrivedAt / 1000)
+                or "not yet",
+            table.concat(seen, " "))
+    end
+    if not anySamples then return end
+
+    note(string.format("    slew to %.0f%% of %.2f deg, by the pods' own sample clock:",
+        plan.arrivedFraction * 100, magnitude))
+    for _, row in ipairs(rows) do note("      " .. row) end
+    if not anyArrived then
+        note("      NO CORNER ARRIVED inside the window. That is a settle too")
+        note("      short for this rpm, not necessarily a bearing that refuses.")
+    end
+    note("      (the pod sampler is ~1 s, so this cannot resolve faster than that)")
+end
+
 local function confirm(label, starboard, airborne)
     local magnitude = math.abs(starboard)
     local azimuth = azimuthFor(starboard, 0)
     windowTiltSends = 0
+    local trace, commandedAt = newTrace(), nil
     local before = snapshot()
 
     local slowestLoop, previousAt = 0, os.epoch("utc")
@@ -506,6 +632,10 @@ local function confirm(label, starboard, airborne)
         end
         commandProps(feed(state, now))
         commandTilt(starboard, 0)
+        -- The instant the command first went out. Everything the slew number
+        -- means is measured from here.
+        if not commandedAt and windowTiltSends > 0 then commandedAt = now end
+        if commandedAt then traceSample(trace, commandedAt, magnitude, now) end
 
         local elapsed = now - previousAt
         if elapsed > slowestLoop then slowestLoop = elapsed end
@@ -599,6 +729,7 @@ local function confirm(label, starboard, airborne)
         endGain and string.format("%+.1f", endGain) or "?",
         endDrift and string.format("%.0f", endDrift) or "?", peakSpeed))
     note(string.format("    roll %+.2f  pitch %+.2f", endRoll or 0, endPitch or 0))
+    reportTrace(trace, magnitude)
 
     -- The per-bearing rows, printed whenever they disagree with each other or
     -- with the command. A pair that answers together needs no explanation.
@@ -657,6 +788,17 @@ local function confirm(label, starboard, airborne)
         note(string.format("    -> %d corner(s) report prop.active FALSE. At 0 rpm"
             .. " a bearing", inactive))
         note("       STORES the target and ignores it. Check the props are turning.")
+    elseif traceMoving(trace, magnitude) > 0 then
+        verdict = "STILL SLEWING"
+        note("    -> THE BEARINGS ARE MOVING AND THE WINDOW ENDED FIRST.")
+        note("       The trace above shows them travelling toward the commanded")
+        note("       angle and not reaching it. THIS IS NOT A FAULT -- it is a")
+        note(string.format("       settle too short for %d rpm at %.2f deg. Re-run with a",
+            plan.propRpm, magnitude))
+        note("       longer --settle before concluding anything about the craft.")
+        note("       These are GYROSCOPIC bearings: the faster the props turn,")
+        note("       the more angular momentum resists reorientation, so the")
+        note("       settle that worked at a lower rpm will not work here.")
     elseif bearingsSeen > 0 and storedTotal == 0 then
         verdict = "TARGET NEVER STORED"
         note("    -> setManualTarget DID NOT TAKE. The pod accepted the command")

@@ -258,6 +258,21 @@ harness.model = {
     -- Default false: targets are stored, which is the documented behaviour
     -- even at 0 rpm ("the target is stored and completely ignored").
     bearingsRefuseTarget = false,
+    -- HOW FAST A BEARING SLEWS TO A NEW MANUAL TARGET, degrees per second.
+    -- nil means instant, which is what this harness assumed for its whole
+    -- history and what made a 3 s settle look sufficient at every rpm.
+    --
+    -- These are GYROSCOPIC propeller bearings: a spinning gyro resists
+    -- reorientation in proportion to its angular momentum, so the slew should
+    -- get SLOWER as rpm rises. bearingSlewRpmReference is the rpm the rate
+    -- below is quoted at; the modelled rate scales as reference/rpm.
+    bearingSlewDegPerSecond = nil,
+    bearingSlewRpmReference = 32,
+    -- How often the pod's sampler refreshes -- measured at about 1 s on the
+    -- craft, because refreshSample is a 160-getter read. Every tiltAngle the
+    -- FCS sees is quantised to this, which is the floor on any slew number
+    -- read through telemetry.
+    samplerPeriodMs = 1000,
     -- Create's universal drag: a tilt-implied acceleration reaches terminal
     -- velocity rather than integrating. This is why the craft cruises instead
     -- of accelerating away.
@@ -267,11 +282,28 @@ harness.model = {
 -- The tilt each of a corner's two bearings reports. Both answer together in
 -- this model -- the craft has never shown a split pair -- but the SHAPE is
 -- real, so a tool that reads per-bearing rows can be tested.
+-- The angle a corner's bearings have actually REACHED, given the slew model.
+-- Instant when no rate is set, which is every pre-existing runner.
+function harness.achievedTilt(pod, rpm)
+    local target = pod.tiltAngle or 0
+    local rate = harness.model.bearingSlewDegPerSecond
+    if not rate or not pod.tiltCommandedAt then return target end
+    local reference = harness.model.bearingSlewRpmReference or 32
+    local speed = math.abs(rpm) > 0 and math.abs(rpm) or reference
+    -- Gyroscopic: angular momentum rises with rpm, so the slew slows.
+    local effective = rate * (reference / speed)
+    local elapsed = (harness.now() - pod.tiltCommandedAt) / 1000
+    local from = pod.tiltFrom or 0
+    local travel = effective * elapsed
+    if math.abs(target - from) <= travel then return target end
+    return from + (target > from and travel or -travel)
+end
+
 function harness.perBearingTilt(pod, rpm)
     local moved = math.abs(rpm) > 0
         and not harness.model.bearingsIgnoreTilt
         and not harness.tiltSuppressedByAltitude()
-    local angle = moved and (pod.tiltAngle or 0) or 0
+    local angle = moved and harness.achievedTilt(pod, rpm) or 0
     return { angle, angle }
 end
 
@@ -350,7 +382,7 @@ local function bearingVectors(pod, rpm, b1, b2)
     -- first flight appears to have hit.
     local tilt = (math.abs(rpm) > 0 and not harness.model.bearingsIgnoreTilt
         and not harness.tiltSuppressedByAltitude())
-        and (pod.tiltAngle or 0) or 0
+        and harness.achievedTilt(pod, rpm) or 0
     local azimuth = math.rad(pod.tiltAzimuth or 0)
     local s, c = math.sin(math.rad(tilt)), math.cos(math.rad(tilt))
     local lx, lz = s * math.cos(azimuth), s * math.sin(azimuth)
@@ -402,6 +434,12 @@ local function podTelemetry(corner, messageType)
         commandsApplied = pod.commandsApplied or 0,
         commandsRejected = pod.commandsRejected or 0,
         lastReject = pod.lastReject,
+        -- The POD's sample clock, quantised to the sampler period. Every
+        -- tiltAngle the FCS sees was read at this instant, not at receipt --
+        -- which is what makes a slew measurable across the transport at all.
+        sampleAt = math.floor(now / harness.model.samplerPeriodMs)
+            * harness.model.samplerPeriodMs,
+        sampleAgeMs = now % harness.model.samplerPeriodMs,
         -- state.lastTilt on the real pod: the angle the POD believes it
         -- applied, written only by a set_tilt it ACCEPTED. Distinct from
         -- prop.tiltAngle, which is what the BEARING actually did -- and the
@@ -444,7 +482,7 @@ local function podTelemetry(corner, messageType)
             bearingsAssembled = true,
             tiltAngle = (math.abs(rpm) > 0 and not harness.model.bearingsIgnoreTilt
                 and not harness.tiltSuppressedByAltitude())
-                and (pod.tiltAngle or 0) or 0,
+                and harness.achievedTilt(pod, rpm) or 0,
             perBearing = bearingVectors(pod, rpm, b1, b2),
             -- PER BEARING, not per corner. A corner aggregate cannot show one
             -- bearing of a pair answering while the other does not, and the
@@ -1077,6 +1115,14 @@ function harness.install(env)
                     -- and throws the per-bearing setManualTarget result away.
                     pod.commandedTilt = message.angle
                     pod.commandedTiltAzimuth = message.azimuth or 0
+                    -- Where the slew starts from, and when. Re-commanding the
+                    -- SAME angle must not restart the clock -- the velocity
+                    -- tool re-sends every second and that would freeze the
+                    -- bearing at its starting angle forever.
+                    if pod.tiltAngle ~= message.angle then
+                        pod.tiltFrom = harness.achievedTilt(pod, pod.targetRpm or 0)
+                        pod.tiltCommandedAt = now
+                    end
                     pod.tiltAngle = message.angle
                     pod.tiltAzimuth = message.azimuth or 0
                     -- MIRROR IS PART OF THE COMMAND, not a detail. An
@@ -1086,6 +1132,10 @@ function harness.install(env)
                     pod.tiltMirror = message.mirror and true or false
                     end
                 elseif pod.id == recipient and message.type == "clear_tilt" then
+                    if pod.tiltAngle ~= 0 then
+                        pod.tiltFrom = harness.achievedTilt(pod, pod.targetRpm or 0)
+                        pod.tiltCommandedAt = now
+                    end
                     pod.tiltAngle, pod.tiltAzimuth, pod.tiltMirror = 0, 0, false
                     pod.commandedTilt, pod.commandedTiltAzimuth = nil, nil
                 elseif pod.id == recipient and message.type ~= "status_request" then
