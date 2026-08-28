@@ -16,6 +16,10 @@ return {
     -- the transport A/B for the 2026-08-28 six-second command blackout. Exactly
     -- one modem is opened, so a wired corner has NO radio fallback: verify with
     -- /fcs/tiltcheck.lua --ground-only before flying it.
+    -- Accepts "wired" or "wireless" to pick the first modem of that KIND, or a
+    -- literal side ("top", "back", ...). Which side a pod's wired modem sits on
+    -- is a fact about how the hull was built; asking for the kind avoids
+    -- having to know it.
     modemName = nil,
     -- Legacy name, still honoured. Prefer modemName; it is no longer wireless-only.
     wirelessModemName = nil,

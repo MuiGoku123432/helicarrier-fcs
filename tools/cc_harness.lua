@@ -255,6 +255,7 @@ harness.model = {
     -- Routing by transport is NOT modelled: every pod still hears every send.
     -- This exists so tools that ENUMERATE modems can be run at all.
     modems = { { name = "top", wireless = true } },
+    computerLabel = "FCS-DEV",
     -- rejected: the pod refuses it -- isNewCommand's sequence gate -- and
     -- answers with rejectReply, which increments commandsRejected and RECORDS
     -- NO FAULT. Row 2, and the row HANDOFF believed was ruled out by "no
@@ -928,6 +929,10 @@ function harness.install(env)
     local realOs = os
     env.os.epoch = function() return now end
     env.os.getComputerID = function() return 1 end
+    -- Real CC API, and it was missing: netdiag called it and died at line one.
+    -- A harness that lacks a function the craft HAS fails safe, but only if
+    -- something notices -- see the RUN ERROR check in the netdiag runner.
+    env.os.getComputerLabel = function() return harness.model.computerLabel end
     env.os.clock = function() return now / 1000 end
     env.os.time = realOs.time
     env.os.date = realOs.date

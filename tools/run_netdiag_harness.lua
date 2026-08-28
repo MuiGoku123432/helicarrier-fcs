@@ -71,6 +71,21 @@ package.path = "./?.lua;./?/init.lua;" .. package.path
 print(("harness: mode=%s"):format(mode))
 print(("-"):rep(72))
 
+-- CAPTURE THE OUTPUT. netdiag wraps its own main loop in a pcall and prints
+-- "RUN ERROR" rather than propagating -- which is right on the craft, where an
+-- abort must still save its log and reopen the modems, and WRONG here: the
+-- runner saw a clean exit code on a tool that had died at its first line.
+local captured = {}
+local realPrint = print
+_G.print = function(...)
+    local parts = {}
+    for index = 1, select("#", ...) do
+        parts[#parts + 1] = tostring((select(index, ...)))
+    end
+    captured[#captured + 1] = table.concat(parts, "\t")
+    realPrint(...)
+end
+
 local ok, err = pcall(function()
     harness.run({ function()
         local chunk = assert(loadfile("fcs/netdiag.lua"))
@@ -78,10 +93,20 @@ local ok, err = pcall(function()
     end }, true)
 end)
 
+_G.print = realPrint
+
 print(("-"):rep(72))
 if not ok then
     print("raised: " .. tostring(err))
     os.exit(1)
+end
+
+for _, line in ipairs(captured) do
+    if line:find("RUN ERROR", 1, true) then
+        print("FAIL: netdiag reported a run error:")
+        print("  " .. line)
+        os.exit(1)
+    end
 end
 
 -- EVERY MODEM MUST BE BACK OPEN. The tool closes them one at a time to isolate

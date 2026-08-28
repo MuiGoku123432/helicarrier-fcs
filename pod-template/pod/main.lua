@@ -62,8 +62,37 @@ end
 -- Set `modemName` in pod/config.lua to pick the side. `wirelessModemName` is
 -- still honoured so existing pod configs keep working.
 -- ---------------------------------------------------------------------------
+local function modemsPresent()
+    local found = {}
+    for _, name in ipairs(peripheral.getNames()) do
+        if peripheral.hasType(name, "modem") then
+            local modem = peripheral.wrap(name)
+            local wireless = nil
+            if type(modem.isWireless) == "function" then
+                local ok, value = pcall(modem.isWireless)
+                if ok then wireless = value and true or false end
+            end
+            found[#found + 1] = { name = name, wireless = wireless }
+        end
+    end
+    return found
+end
+
 local function findModem()
     local configured = config.modemName or config.wirelessModemName
+
+    -- "wired" / "wireless" pick the first modem OF THAT KIND rather than
+    -- naming a side. Which side a pod's wired modem sits on is a fact about
+    -- how the hull was built, and having to look it up per corner is one more
+    -- thing to get wrong -- so the config says what it wants, not where it is.
+    if configured == "wired" or configured == "wireless" then
+        local want = (configured == "wireless")
+        for _, entry in ipairs(modemsPresent()) do
+            if entry.wireless == want then return entry.name end
+        end
+        error("no " .. configured .. " modem on this pod", 0)
+    end
+
     if configured then
         if not peripheral.isPresent(configured) then
             error("configured modem is missing: " .. tostring(configured), 0)
@@ -675,6 +704,17 @@ local function displayLoop()
                 "modem_wireless=" .. tostring(modemWireless),
                 "transport=" .. (modemWireless == false and "WIRED"
                     or modemWireless == true and "wireless" or "unknown"),
+                -- EVERY modem this pod has, so which sides exist is a reading
+                -- rather than something to be looked up on the hull.
+                "modems_present=" .. (function()
+                    local parts = {}
+                    for _, entry in ipairs(modemsPresent()) do
+                        parts[#parts + 1] = entry.name .. ":"
+                            .. (entry.wireless == false and "wired"
+                                or entry.wireless == true and "wireless" or "?")
+                    end
+                    return #parts > 0 and table.concat(parts, ",") or "none"
+                end)(),
                 "rednet_open=" .. tostring(rednet.isOpen(wirelessModem)),
                 "telemetry_sends=" .. tostring(state.telemetrySends),
                 "replies_sent=" .. tostring(state.repliesSent),
