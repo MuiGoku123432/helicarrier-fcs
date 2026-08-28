@@ -441,10 +441,18 @@ local function typicalFrameMs(entry)
     for index = 1, count do sorted[index] = entry.intervals[index] end
     table.sort(sorted)
     local middle = math.floor(count / 2) + 1
+    local median
     if count % 2 == 0 then
-        return (sorted[middle - 1] + sorted[middle]) / 2
+        median = (sorted[middle - 1] + sorted[middle]) / 2
+    else
+        median = sorted[middle]
     end
-    return sorted[middle]
+    -- SPREAD, not just the middle. The threshold is a multiple of the median,
+    -- so how safe that multiple is depends entirely on how far the slowest
+    -- normal frame sits from it -- and a median alone cannot say. If the max
+    -- approaches the threshold on a healthy run, the multiple is too tight and
+    -- the next gap reported will be the cadence, not the link.
+    return median, sorted[1], sorted[count]
 end
 
 local function gapThresholdMs(entry)
@@ -552,6 +560,7 @@ local function observe(now, state)
                 -- The denominator starts HERE, not at process start: counted
                 -- is a delta from firstSeen, so sent has to be one too.
                 entry.sentAtStart = commandsSentTo[corner]
+                entry.sentAtLastAdvance = commandsSentTo[corner]
             elseif seen > entry.lastSeen then
                 if entry.openGap then
                     local gap = entry.openGap
@@ -564,6 +573,17 @@ local function observe(now, state)
                 entry.lastSeen = seen
                 entry.lastAdvanceAt = now
                 entry.probesAtLastAdvance = probesSent[corner]
+                -- THE DENOMINATOR STOPS HERE TOO, and this is the whole fix.
+                --
+                -- counted can only include what the pod has REPORTED, and at
+                -- the craft's measured 1200 ms cadence that lags the send by
+                -- up to a full frame. Running `sent` to the end of the watch
+                -- while `counted` stops at the last frame charged every
+                -- command still in flight to packet loss: the first ground run
+                -- read 6.6% on all four corners across BOTH transports, which
+                -- is not a thing radio loss can do. Same span on both sides,
+                -- or the ratio is measuring the cadence instead of the link.
+                entry.sentAtLastAdvance = commandsSentTo[corner]
                 entry.freshFrames = 0
             elseif seen < entry.lastSeen then
                 -- The pod rebooted: its counters reset. Not an outage, and
@@ -574,6 +594,7 @@ local function observe(now, state)
                 entry.lastAdvanceAt = now
                 entry.probesAtLastAdvance = probesSent[corner]
                 entry.sentAtStart = commandsSentTo[corner]
+                entry.sentAtLastAdvance = commandsSentTo[corner]
                 entry.freshFrames = 0
                 if entry.openGap then entry.openGap = nil end
             end
@@ -764,7 +785,7 @@ local function report()
         local entry = watch[corner]
         local counted = (entry.firstSeen and entry.lastSeen)
             and (entry.lastSeen - entry.firstSeen) or 0
-        local sent = commandsSentTo[corner] - (entry.sentAtStart or 0)
+        local sent = (entry.sentAtLastAdvance or 0) - (entry.sentAtStart or 0)
         local loss = (sent > 0) and (100 * (sent - counted) / sent) or 0
         if loss < 0 then loss = 0 end
         local outage, longest = totalOutage(entry)
@@ -792,10 +813,12 @@ local function report()
     note("  measured telemetry cadence and the gap threshold it produced:")
     for _, corner in ipairs(flight.CORNERS) do
         local entry = watch[corner]
-        local frame = typicalFrameMs(entry)
-        note(string.format("    %-6s frames %4d   interval %s   uplink gap > %.0f ms   source %s",
+        local frame, low, high = typicalFrameMs(entry)
+        note(string.format("    %-6s frames %4d   interval %s (%s..%s)   uplink gap > %.0f ms   source %s",
             corner, entry.framesSeen,
-            frame and string.format("%6.0f ms", frame) or "    -- ",
+            frame and string.format("%.0f ms", frame) or "--",
+            low and string.format("%.0f", low) or "--",
+            high and string.format("%.0f", high) or "--",
             gapThresholdMs(entry), entry.frameSource or "--"))
     end
 
