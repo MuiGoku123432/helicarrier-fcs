@@ -200,8 +200,31 @@ local function openAll()
     return network.open()
 end
 
-local function probeAll()
+-- ANOTHER TAB WILL REOPEN THE MODEMS UNDERNEATH THIS.
+--
+-- CC tabs are separate Lua environments, so replacing network.open in THIS one
+-- does nothing to the telemetry tab's own copy of fcs.network. When that tab
+-- calls network.open() and finds the modem it remembers closed, it re-opens
+-- EVERY modem -- in the middle of a probe burst.
+--
+-- That is what the partial counts were: FR and RR, radio-deaf and reporting
+-- modems_open=top, still counted 4 of 5 probes during the wireless-only phase.
+-- Not because they were listening to the radio, but because the FCS's WIRED
+-- modem came back for part of the burst.
+--
+-- So re-assert before every round instead of trusting one close, and report
+-- how often something had to be shut again.
+local function probeAll(modems, pinnedName)
+    local reopened = {}
     for _ = 1, plan.probesPerCorner do
+        for _, entry in ipairs(modems) do
+            if entry.name ~= pinnedName and rednet.isOpen(entry.name) then
+                reopened[entry.name] = (reopened[entry.name] or 0) + 1
+                pcall(rednet.close, entry.name)
+            end
+        end
+        if not rednet.isOpen(pinnedName) then pcall(rednet.open, pinnedName) end
+
         for _, corner in ipairs(flight.CORNERS) do
             -- ANGLE ZERO. The bearings are already there, so this moves
             -- nothing -- and the pod counts it.
@@ -210,6 +233,7 @@ local function probeAll()
         end
         wait(plan.probeSpacing)
     end
+    return reopened
 end
 
 -- ---------------------------------------------------------------------------
@@ -425,7 +449,17 @@ local function mainLoop()
             end
 
             local during = podSnapshot()
-            probeAll()
+            local reopened = probeAll(modems, entry.name)
+            local intruders = {}
+            for name, count in pairs(reopened) do
+                intruders[#intruders + 1] = string.format("%s x%d", name, count)
+            end
+            if #intruders > 0 then
+                note("     ** ANOTHER TAB REOPENED: " .. table.concat(intruders, " "))
+                note("     ** Closed again each round, but probes may have travelled")
+                note("     ** on it before that. Close the telemetry tab and re-run")
+                note("     ** for a clean matrix -- the POD side is unaffected.")
+            end
             wait(plan.listenSeconds)
             local after = podSnapshot()
 
