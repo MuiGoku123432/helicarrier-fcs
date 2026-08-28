@@ -328,6 +328,12 @@ end
 local function mainLoop()
     note("NET DIAG -- which pod is on which wire")
     note("utc_ms=" .. tostring(os.epoch("utc")))
+    -- Stated because the first run could not be read without it: a wired modem
+    -- reported this computer's network name as "computer_4" while listing
+    -- "computer_1" among its remotes, and nothing in the output said which
+    -- computer was doing the reporting.
+    note("this computer: id=" .. tostring(os.getComputerID())
+        .. "  label=" .. tostring(os.getComputerLabel()))
     note("")
 
     if not network.open() then
