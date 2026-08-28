@@ -10,6 +10,14 @@ return {
     mainComputerId = nil,
 
     -- Leave nil to use the first attached wireless modem.
+    -- WHICH MODEM THIS POD LISTENS ON. nil auto-selects, preferring wireless.
+    --
+    -- Set this to a wired modem's side to put the corner on the WIRED bus --
+    -- the transport A/B for the 2026-08-28 six-second command blackout. Exactly
+    -- one modem is opened, so a wired corner has NO radio fallback: verify with
+    -- /fcs/tiltcheck.lua --ground-only before flying it.
+    modemName = nil,
+    -- Legacy name, still honoured. Prefer modemName; it is no longer wireless-only.
     wirelessModemName = nil,
 
     -- Propellers for this corner, relayed to FCS-DEV over the wireless link.

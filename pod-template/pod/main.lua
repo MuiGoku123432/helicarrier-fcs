@@ -38,18 +38,44 @@ if config.maximumChangePerCommand <= 0 then
     error("maximumChangePerCommand must be greater than zero", 0)
 end
 
-local function findWirelessModem()
-    if config.wirelessModemName then
-        if not peripheral.isPresent(config.wirelessModemName) then
-            error("configured wireless modem is missing", 0)
+-- ---------------------------------------------------------------------------
+-- ONE MODEM, WIRED OR WIRELESS, AND THE POD SAYS WHICH.
+--
+-- This used to REJECT any modem that was not wireless, which made a wired bus
+-- impossible to try. It is now the transport under test.
+--
+-- WHY, measured 2026-08-28: in flight, commands FCS->pod stopped arriving for
+-- about six seconds on ALL FOUR pods at once while pod->FCS telemetry kept
+-- flowing and the FCS loop stayed healthy. The craft runs Ender modems, which
+-- are interdimensional and skip CC:Tweaked's distance check entirely, so no
+-- distance can explain it -- what is left is the receiver not being in the set
+-- the transmit iterated, which is Sable sublevel/registration state. A wired
+-- network is a connected graph rather than a spatial query and does not go
+-- through that code at all.
+--
+-- EXACTLY ONE MODEM IS OPENED, deliberately. rednet.receive cannot say which
+-- modem a message arrived on, so a pod listening on both transports that
+-- survives an outage proves nothing about which one delivered. One pod, one
+-- transport, or there is no A/B. Redundant delivery with sequence-gate dedup
+-- is the right PRODUCTION design and the wrong experiment.
+--
+-- Set `modemName` in pod/config.lua to pick the side. `wirelessModemName` is
+-- still honoured so existing pod configs keep working.
+-- ---------------------------------------------------------------------------
+local function findModem()
+    local configured = config.modemName or config.wirelessModemName
+    if configured then
+        if not peripheral.isPresent(configured) then
+            error("configured modem is missing: " .. tostring(configured), 0)
         end
-        local modem = peripheral.wrap(config.wirelessModemName)
-        if type(modem.isWireless) ~= "function" or not modem.isWireless() then
-            error("configured modem is not wireless", 0)
+        if not peripheral.hasType(configured, "modem") then
+            error("configured peripheral is not a modem: " .. tostring(configured), 0)
         end
-        return config.wirelessModemName
+        return configured
     end
 
+    -- Nothing configured: prefer wireless, which is what every pod did before
+    -- and what an un-wired corner still needs. A wired bus is opt-in per pod.
     for _, name in ipairs(peripheral.getNames()) do
         if peripheral.hasType(name, "modem") then
             local modem = peripheral.wrap(name)
@@ -58,7 +84,21 @@ local function findWirelessModem()
             end
         end
     end
-    error("no wireless modem is attached", 0)
+    for _, name in ipairs(peripheral.getNames()) do
+        if peripheral.hasType(name, "modem") then return name end
+    end
+    error("no modem is attached", 0)
+end
+
+-- Wireless, wired, or a modem that will not say. Reported rather than assumed:
+-- the whole point of the A/B is that the log states the transport instead of
+-- relying on anyone remembering which corners were wired.
+local function modemIsWireless(name)
+    local modem = peripheral.wrap(name)
+    if not modem or type(modem.isWireless) ~= "function" then return nil end
+    local ok, wireless = pcall(modem.isWireless)
+    if not ok then return nil end
+    return wireless and true or false
 end
 
 thrusters.load()
@@ -67,7 +107,8 @@ thrusters.applyExact(config.fallbackPower)
 -- Degrades instead of erroring: a broken prop must not stop the ion bank.
 props.load()
 
-local wirelessModem = findWirelessModem()
+local wirelessModem = findModem()
+local modemWireless = modemIsWireless(wirelessModem)
 rednet.open(wirelessModem)
 pcall(rednet.unhost, config.protocol, config.hostname)
 rednet.host(config.protocol, config.hostname)
@@ -273,6 +314,8 @@ local function statusMessage(messageType)
         state = state,
         config = config,
         computerId = os.getComputerID(),
+        modemName = wirelessModem,
+        modemWireless = modemWireless,
         now = os.epoch("utc"),
     }))
 end
@@ -628,7 +671,10 @@ local function displayLoop()
                 "tilt_accepted=" .. tostring(state.lastTiltAccepted),
                 "last_tilt_error=" .. tostring(state.lastTiltError),
                 "untrusted_msgs=" .. tostring(state.untrusted),
-                "wireless_modem=" .. tostring(wirelessModem),
+                "modem=" .. tostring(wirelessModem),
+                "modem_wireless=" .. tostring(modemWireless),
+                "transport=" .. (modemWireless == false and "WIRED"
+                    or modemWireless == true and "wireless" or "unknown"),
                 "rednet_open=" .. tostring(rednet.isOpen(wirelessModem)),
                 "telemetry_sends=" .. tostring(state.telemetrySends),
                 "replies_sent=" .. tostring(state.repliesSent),

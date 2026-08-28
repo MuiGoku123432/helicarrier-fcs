@@ -25,6 +25,11 @@
 --                                                       and say the settle was
 --                                                       short, not blame the
 --                                                       bearings
+--   luajit tools/run_tiltcheck_harness.lua wiredbus     FR and RR on the wired
+--                                                       bus, uplink dies in the
+--                                                       air -- the wired pair
+--                                                       must survive and the
+--                                                       report must SAY SO
 --   luajit tools/run_tiltcheck_harness.lua lostinair    the ground confirm
 --                                                       succeeds, then the link
 --                                                       eats every airborne
@@ -48,7 +53,8 @@ local harness = require("tools.cc_harness")
 
 local ONCE, SLEW = false, nil
 local MODES = { "works", "ground", "deadbearings", "lost", "rejected",
-    "airborne", "lostinair", "notarget", "once", "slew", "shortsettle" }
+    "airborne", "lostinair", "notarget", "once", "slew", "shortsettle",
+    "wiredbus" }
 local mode = arg[1] or "works"
 
 if mode == "all" then
@@ -116,6 +122,12 @@ elseif mode == "once" then
     -- pass -- if --once fails on a healthy harness the flag is broken, not the
     -- craft, and that would poison the whole ground matrix.
     ONCE = true
+elseif mode == "wiredbus" then
+    -- THE EXPERIMENT, offline. Every airborne set_tilt is eaten on the radio
+    -- and delivered on the wire. The tool must report 2/4 with the split
+    -- attributed to the transport rather than to the corners.
+    harness.model.wiredCorners = { FR = true, RR = true }
+    harness.model.tiltCommandsLostAboveY = harness.craft.y + 2.0
 elseif mode == "lostinair" then
     -- THE CASE THE AZIMUTH CHECK EXISTS FOR. The ground confirm succeeds and
     -- leaves commandedTilt = 1.00 on all four pods. Every airborne set_tilt is

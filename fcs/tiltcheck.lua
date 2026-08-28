@@ -377,6 +377,9 @@ local function snapshot()
             -- set_tilt the pod accepted.
             commandedTilt = pod and pod.commandedTilt or nil,
             commandedTiltAzimuth = pod and pod.commandedTiltAzimuth or nil,
+            -- WHICH TRANSPORT THIS CORNER IS ON, from the pod itself.
+            modemWireless = pod and pod.modemWireless,
+            modemName = pod and pod.modemName or nil,
             rejected = (pod and tonumber(pod.commandsRejected)) or 0,
             lastReject = pod and pod.lastReject or nil,
             timeouts = timeoutsIn(pod and pod.faults),
@@ -417,6 +420,13 @@ local function targetAngle(vector)
         return nil
     end
     return math.deg(math.atan2(math.sqrt(x * x + z * z), math.abs(y)))
+end
+
+-- "wired" / "wireless" / "?" for one corner, as the POD reports it.
+local function transportOf(pod)
+    if pod.modemWireless == false then return "wired" end
+    if pod.modemWireless == true then return "wireless" end
+    return "?"
 end
 
 local function speedOf(state)
@@ -723,6 +733,47 @@ local function confirm(label, starboard, airborne)
     note(string.format("    %d/%d answered   pod accepted %d/%d   rejects %+d"
         .. "   timeouts %+d", answered, #flight.CORNERS, podSaw,
         #flight.CORNERS, rejects, timeouts))
+
+    -- THE TRANSPORT A/B, said out loud on every confirm. A wired corner
+    -- answering while a wireless one does not is the whole experiment, and it
+    -- must not depend on anyone remembering which corners were wired.
+    local byTransport = {}
+    for _, corner in ipairs(flight.CORNERS) do
+        local kind = transportOf(after[corner])
+        byTransport[kind] = byTransport[kind] or { ok = 0, total = 0, corners = {} }
+        local entry = byTransport[kind]
+        entry.total = entry.total + 1
+        local angle = after[corner].tiltAngle
+        if angle and math.abs(angle) >= magnitude * plan.answeredFraction then
+            entry.ok = entry.ok + 1
+        end
+        entry.corners[#entry.corners + 1] = corner
+    end
+    -- A CLEAN SPLIT: one transport answered on every corner and another
+    -- answered on none. That is the experiment's headline and it must not be
+    -- reported as a bearing fault, which is what the first version did.
+    local wonKind, lostKind
+    for kind, entry in pairs(byTransport) do
+        if entry.total > 0 and entry.ok == entry.total then wonKind = kind end
+        if entry.total > 0 and entry.ok == 0 then lostKind = kind end
+    end
+    local transportSplit = (wonKind and lostKind and wonKind ~= lostKind)
+        and { won = wonKind, lost = lostKind,
+              wonCorners = table.concat(byTransport[wonKind].corners, " "),
+              lostCorners = table.concat(byTransport[lostKind].corners, " ") }
+        or nil
+
+    local kinds = {}
+    for _, kind in ipairs({ "wired", "wireless", "?" }) do
+        local entry = byTransport[kind]
+        if entry then
+            kinds[#kinds + 1] = string.format("%s %d/%d (%s)", kind, entry.ok,
+                entry.total, table.concat(entry.corners, " "))
+        end
+    end
+    if #kinds > 1 then
+        note("    by transport:  " .. table.concat(kinds, "   "))
+    end
     note(string.format("    %.1f msg/s   slowest loop %.0f ms   alt %s"
         .. "   drift %s   peak %.2f blocks/s",
         messages / math.max(seconds, 0.001), slowestLoop,
@@ -758,6 +809,17 @@ local function confirm(label, starboard, airborne)
         note(string.format("    -> %d corner(s) sent no prop telemetry at all."
             .. " Nothing can be concluded", noTelemetry))
         note("       about the bearings from this confirm.")
+    elseif transportSplit then
+        verdict = string.format("%s OK, %s DEAD", string.upper(transportSplit.won),
+            string.upper(transportSplit.lost))
+        note(string.format("    -> SPLIT BY TRANSPORT. Every %s corner answered (%s) and",
+            transportSplit.won, transportSplit.wonCorners))
+        note(string.format("       no %s corner did (%s).",
+            transportSplit.lost, transportSplit.lostCorners))
+        note("       Same FCS, same loop, same command, same instant -- the only")
+        note("       thing that differs is how the command travelled. That is the")
+        note("       experiment answering: the failure is in the transport, not in")
+        note("       the flight code, the pods, or the bearings.")
     elseif rejects > 0 then
         verdict = "POD REFUSED"
         note("    -> THE POD REFUSED THE COMMAND. commandsRejected rose during")
@@ -888,6 +950,19 @@ local function report()
     note("")
     note(string.format("  ground %d/%d answered      air %d/%d answered",
         groundOk, ground, airOk, air))
+
+    local splits = 0
+    for _, entry in ipairs(results) do
+        if entry.verdict:find("DEAD") then splits = splits + 1 end
+    end
+    if splits > 0 then
+        note("")
+        note(string.format("  %d of %d confirms SPLIT BY TRANSPORT. That is the answer to the",
+            splits, #results))
+        note("  2026-08-28 blackout: the command reaches one bus and not the other,")
+        note("  on the same craft at the same instant. Nothing about the bearings,")
+        note("  the pods or the control loop distinguishes those corners.")
+    end
     note("")
 
     if ground > 0 and air > 0 and groundOk == ground and airOk == 0 then

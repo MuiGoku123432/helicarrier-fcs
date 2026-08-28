@@ -240,6 +240,12 @@ harness.model = {
     -- angle: the angle is the same 1.00 every confirm and cannot tell this
     -- command from the last one.
     tiltCommandsLostAboveY = nil,
+    -- CORNERS ON THE WIRED BUS, as a set: { FR = true, RR = true }. A wired
+    -- corner is exempt from the uplink losses above, because a wired network
+    -- is a connected graph and does not go through the spatial-query path that
+    -- the 2026-08-28 blackout is suspected to live in. This is what makes the
+    -- transport A/B testable offline.
+    wiredCorners = {},
     -- rejected: the pod refuses it -- isNewCommand's sequence gate -- and
     -- answers with rejectReply, which increments commandsRejected and RECORDS
     -- NO FAULT. Row 2, and the row HANDOFF believed was ruled out by "no
@@ -446,6 +452,11 @@ local function podTelemetry(corner, messageType)
         -- difference between the two is the whole of tiltcheck's diagnosis.
         commandedTilt = pod.commandedTilt,
         commandedTiltAzimuth = pod.commandedTiltAzimuth,
+        -- The transport this corner reports itself to be on.
+        modemName = (harness.model.wiredCorners
+            and harness.model.wiredCorners[corner]) and "top" or "back",
+        modemWireless = not (harness.model.wiredCorners
+            and harness.model.wiredCorners[corner]),
         armed = pod.armed,
         -- currentPower is the pod's own unsnapped target; averagePower comes
         -- from getPower() on the hardware and is therefore SNAPPED. They are
@@ -1097,9 +1108,12 @@ function harness.install(env)
                 elseif pod.id == recipient and message.type == "set_tilt" then
                     -- Set-and-hold, no arm gate, no watchdog -- like the pod.
                     pod.commandsSeen = (pod.commandsSeen or 0) + 1
-                    local lostHere = harness.model.tiltCommandsLost
-                        or (harness.model.tiltCommandsLostAboveY
-                            and harness.craft.y > harness.model.tiltCommandsLostAboveY)
+                    local wired = harness.model.wiredCorners
+                        and harness.model.wiredCorners[corner]
+                    local lostHere = not wired
+                        and (harness.model.tiltCommandsLost
+                            or (harness.model.tiltCommandsLostAboveY
+                                and harness.craft.y > harness.model.tiltCommandsLostAboveY))
                     if lostHere then
                         -- Never arrived. Not applied, not rejected, and the
                         -- pod's own commandedTilt does not move.

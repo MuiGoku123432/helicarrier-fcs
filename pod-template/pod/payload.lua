@@ -99,6 +99,10 @@ function payload.status(messageType, ctx)
     telemetry.tiltBearings = state.lastTiltBearings
     telemetry.tiltAccepted = state.lastTiltAccepted
     telemetry.lastTiltError = state.lastTiltError
+    -- WHICH TRANSPORT THIS CORNER IS ON. So a report can state it rather than
+    -- depending on anyone remembering which pods were wired.
+    telemetry.modemName = ctx.modemName
+    telemetry.modemWireless = ctx.modemWireless
 
     telemetry.type = messageType or "status"
     return telemetry
