@@ -832,6 +832,38 @@ local function report()
             #entry.gaps, outage, longest, timeouts))
     end
 
+    -- --- LOAD AND LOSS PER SECOND ------------------------------------------
+    --
+    -- THE ONLY NUMBERS THAT COMPARE TWO FLIGHTS. Runs differ in duration and
+    -- in achieved rate -- flight 1 watched 313 s at 2.53 Hz, flight 2 watched
+    -- 133 s at 0.50 Hz -- so totals cannot be set against each other and loss%
+    -- alone is misleading: halving the send rate halves the losses and
+    -- LENGTHENS the silence between sends, which moves loss% and the timeout
+    -- rate in OPPOSITE directions. Both per-second figures, side by side, are
+    -- what showed the loss was not driven by this tool's own traffic.
+    local watchedSeconds = (firstObserveAt and lastObserveAt)
+        and (lastObserveAt - firstObserveAt) / 1000 or 0
+    if watchedSeconds > 0 then
+        note("")
+        note(string.format("  per second of the %.0f s watched -- compare THESE across flights,", watchedSeconds))
+        note("  never the totals:")
+        note("")
+        note("    corner  sent/s  lost/s  timeouts/s")
+        for _, corner in ipairs(flight.CORNERS) do
+            local entry = watch[corner]
+            local counted = (entry.firstSeen and entry.lastSeen)
+                and (entry.lastSeen - entry.firstSeen) or 0
+            local sent = (entry.sentAtLastAdvance or 0) - (entry.sentAtStart or 0)
+            local lost = sent - counted
+            if lost < 0 then lost = 0 end
+            local timeouts = (entry.lastTimeouts and entry.firstTimeouts)
+                and (entry.lastTimeouts - entry.firstTimeouts) or 0
+            note(string.format("    %-6s  %6.2f  %6.2f  %10.3f", corner,
+                sent / watchedSeconds, lost / watchedSeconds,
+                timeouts / watchedSeconds))
+        end
+    end
+
     -- --- CADENCE, so the thresholds can be checked rather than trusted -----
     note("")
     note("  measured telemetry cadence and the gap threshold it produced:")
@@ -972,9 +1004,11 @@ local function report()
             note(string.format("  wireless %d. Both paths, the same rate. That leaves this", wirelessT))
             note("  computer's sending, the pods' receiving, or THIS TOOL'S OWN LOAD.")
             note("")
-            note("  Re-fly at --rate 1. If the loss falls with the probe rate, the")
-            note("  instrument was the fault and the probe rate has to come down")
-            note("  before anything it reports means anything.")
+            note("  Fly it again at a DIFFERENT --rate and compare the per-second")
+            note("  table above, not the totals. If timeouts/s tracks sent/s, this")
+            note("  tool's traffic is manufacturing the loss. If timeouts/s holds")
+            note("  or RISES as sent/s falls, the loss is the craft's and sparser")
+            note("  sends merely let each burst cross the pod's 750 ms watchdog.")
         end
         note("")
     end
@@ -1113,6 +1147,21 @@ local function report()
         endGain and string.format("%+.1f", endGain) or "--"))
     if session.aborted then
         note("  ABORTED: " .. tostring(session.aborted))
+    end
+    -- A RUNAWAY ON A ZERO COMMAND IS A FINDING, not a footnote in the run
+    -- block. Commanded tilt is zero for this whole flight, so any large ground
+    -- speed is the craft's own standing trim integrating with nothing opposing
+    -- it -- and every drift figure on record is 1.0-1.4 blocks/s, measured
+    -- over far shorter windows or with control active.
+    if peakSpeed > plan.abortSpeed then
+        note("")
+        note(string.format("  ** THE CRAFT RAN AWAY TO %.1f blocks/s ON A ZERO TILT COMMAND,", peakSpeed))
+        note(string.format("  ** drifting %s blocks. Nothing was commanding lateral force: this",
+            endDrift and string.format("%.0f", endDrift) or "?"))
+        note("  ** is the hull's own trim offset accelerating unopposed. It is a")
+        note("  ** SEPARATE fault from the link, it is why the watch ended early,")
+        note("  ** and no drift figure on record is within an order of magnitude")
+        note("  ** of it.")
     end
 end
 
