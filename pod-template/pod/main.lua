@@ -678,7 +678,152 @@ local function samplerLoop()
     end
 end
 
+-- ---------------------------------------------------------------------------
+-- THE QUIET FLAG: /pod/quiet
+--
+-- displayLoop is the only loop on this pod that does UNYIELDING work. The
+-- sampler's ~160 Sable getters are main-thread peripheral calls and every one
+-- of them yields, so networkLoop runs between them. term.* and fs.* do not
+-- yield at all -- so everything from one sleep(0.25) to the next is a single
+-- uninterruptible block, and every eighth pass that block contains a fifty
+-- field synchronous write of heartbeat.txt.
+--
+-- WHAT THAT PREDICTS, and why it is worth a flag rather than an argument.
+-- Two linkwatch flights measured a COMMAND_TIMEOUT per corner every 3.5 s and
+-- every 2.7 s. This loop's heartbeat period is 8 x 0.25 s ~= 2 s. The pod's
+-- watchdog fires on 750 ms of wall-clock silence whether the commands are lost
+-- or merely QUEUED behind a block -- and the pods' last_reject is `not_armed`,
+-- which is what a watchdog disarm followed by the next set_power looks like.
+--
+-- A deaf window of fixed duration at fixed frequency also does not care how
+-- fast the FCS sends, and halving the send rate did NOT reduce the timeout
+-- rate -- it rose slightly, 0.288/s to 0.376/s. Load-induced loss cannot do
+-- that; a fixed periodic block can.
+--
+-- So: an A/B, not a rewrite. Touch /pod/quiet and this loop stops rendering
+-- and stops writing. Delete it and the pod is exactly what it was. Nothing
+-- else in this file changes, so the experiment has ONE variable.
+--
+-- A MARKER FILE RATHER THAN A CONFIG FIELD, deliberately: all four pods'
+-- config.lua differ from each other and from the repo -- each carries its own
+-- corner and hostname -- so pod/config.lua is as undeployable as fcs/config.lua
+-- and must never be overwritten to set a flag.
+-- ---------------------------------------------------------------------------
+
+local quiet = false
+do
+    local ok, exists = pcall(fs.exists, "/pod/quiet")
+    quiet = (ok and exists) and true or false
+end
+
+-- Extracted from displayLoop so the quiet path can write exactly ONE heartbeat
+-- at boot -- proof the flag took, without any periodic work to contaminate the
+-- measurement. A stale heartbeat.txt from a previous run reads as a live one,
+-- so "wrote nothing at all" would be indistinguishable from "flag ignored".
+local function writeHeartbeat()
+    writeReport("/pod/heartbeat.txt", {
+        "utc_ms=" .. tostring(os.epoch("utc")),
+        -- WHETHER /pod/quiet WAS PRESENT AT BOOT. Read this before trusting an
+        -- A/B: a quiet pod writes exactly one heartbeat and then stops, so a
+        -- stale file from the previous run is indistinguishable from a flag
+        -- that was ignored -- except by this field and the utc_ms beside it.
+        "quiet=" .. tostring(quiet),
+        "computer_id=" .. tostring(os.getComputerID()),
+        "corner=" .. tostring(config.corner),
+        "hostname=" .. tostring(config.hostname),
+        "armed=" .. tostring(state.armed),
+        "current_power=" .. tostring(state.currentPower),
+        "trusted_main_id=" .. tostring(state.trustedMainId),
+        "booted_at=" .. tostring(state.bootedAt),
+        "commands_seen=" .. tostring(state.commandsSeen),
+        "commands_applied=" .. tostring(state.commandsApplied),
+        "commands_rejected=" .. tostring(state.commandsRejected),
+        "last_reject=" .. tostring(state.lastReject),
+        "last_tilt=" .. tostring(state.lastTilt),
+        "tilt_bearings=" .. tostring(state.lastTiltBearings),
+        "tilt_accepted=" .. tostring(state.lastTiltAccepted),
+        "last_tilt_error=" .. tostring(state.lastTiltError),
+        "untrusted_msgs=" .. tostring(state.untrusted),
+        "modem=" .. tostring(wirelessModem),
+        "modem_wireless=" .. tostring(modemWireless),
+        "transport=" .. (modemWireless == false and "WIRED"
+            or modemWireless == true and "wireless" or "unknown"),
+        -- EVERY modem this pod has, so which sides exist is a reading
+        -- rather than something to be looked up on the hull.
+        -- WHICH MODEMS THIS POD ACTUALLY HAS OPEN. rednet's open set is
+        -- per COMPUTER, not per tab, so any other tab calling
+        -- rednet.open puts this pod on a transport main.lua never
+        -- chose -- and that silently destroys the wired/wireless A/B.
+        -- Reported rather than reasoned about.
+        "modems_open=" .. (function()
+            local parts = {}
+            for _, entry in ipairs(modemsPresent()) do
+                if rednet.isOpen(entry.name) then
+                    parts[#parts + 1] = entry.name
+                end
+            end
+            return #parts > 0 and table.concat(parts, ",") or "none"
+        end)(),
+        "modems_present=" .. (function()
+            local parts = {}
+            for _, entry in ipairs(modemsPresent()) do
+                parts[#parts + 1] = entry.name .. ":"
+                    .. (entry.wireless == false and "wired"
+                        or entry.wireless == true and "wireless" or "?")
+            end
+            return #parts > 0 and table.concat(parts, ",") or "none"
+        end)(),
+        "rednet_open=" .. tostring(rednet.isOpen(wirelessModem)),
+        "telemetry_sends=" .. tostring(state.telemetrySends),
+        "replies_sent=" .. tostring(state.repliesSent),
+        "last_send_at=" .. tostring(state.lastSendAt),
+        "thrusters=" .. tostring(#thrusters.devices),
+        "prop_controller=" .. tostring(props.controllerName),
+        "prop_bearings=" .. tostring(props.bearingName),
+        "sample_at=" .. tostring(sample.at),
+        "sample_age_ms=" .. tostring(sample.at and (os.epoch("utc") - sample.at)),
+        "sample_count=" .. tostring(sample.count),
+        "sample_healthy=" .. tostring(sample.healthy),
+        "pending_status=" .. tostring(#pendingStatus),
+        -- Read from the SAMPLE, not from the hardware. This used to
+        -- call props.telemetry() twice per heartbeat, which is a
+        -- second sampler nobody declared and a second answer that
+        -- could disagree with the one being transmitted.
+        "prop_diag=" .. (function()
+            local t = sample.props or {}
+            return string.format(
+                "bearings=%d assembled=%s thrust=%s rot=%s angular=%s kinetic=%s airflow=%s sail=%s",
+                t.bearingCount or 0, tostring(t.bearingsAssembled),
+                tostring(t.thrust), tostring(t.bearingRpm),
+                tostring(t.bearingAngularSpeed), tostring(t.bearingKineticSpeed),
+                tostring(t.airflow), tostring(t.sailPower))
+        end)(),
+        "prop_per_bearing=" .. (function()
+            local t, out = sample.props or {}, {}
+            for i, b in ipairs(t.perBearing or {}) do
+                out[#out + 1] = string.format(
+                    "[%d %s thrust=%s asm=%s hand=%s vec=%s,%s,%s]",
+                    i, tostring(b.name), tostring(b.thrust), tostring(b.assembled),
+                    tostring(b.handedness), tostring(b.vx), tostring(b.vy), tostring(b.vz))
+            end
+            return table.concat(out, " ")
+        end)(),
+        "faults=" .. table.concat(state.faults, " | "),
+    })
+end
+
 local function displayLoop()
+    -- QUIET: one heartbeat so the flag is verifiable, then no terminal work
+    -- and no file writes for the rest of the run. The coroutine stays in the
+    -- parallel set -- removing it would change the scheduler's shape, which is
+    -- a second variable.
+    if quiet then
+        writeHeartbeat()
+        while true do
+            sleep(5)
+        end
+    end
+
     while true do
         term.clear()
         term.setCursorPos(1, 1)
@@ -698,90 +843,7 @@ local function displayLoop()
 
         beat = beat + 1
         if beat % 8 == 1 then
-            writeReport("/pod/heartbeat.txt", {
-                "utc_ms=" .. tostring(os.epoch("utc")),
-                "computer_id=" .. tostring(os.getComputerID()),
-                "corner=" .. tostring(config.corner),
-                "hostname=" .. tostring(config.hostname),
-                "armed=" .. tostring(state.armed),
-                "current_power=" .. tostring(state.currentPower),
-                "trusted_main_id=" .. tostring(state.trustedMainId),
-                "booted_at=" .. tostring(state.bootedAt),
-                "commands_seen=" .. tostring(state.commandsSeen),
-                "commands_applied=" .. tostring(state.commandsApplied),
-                "commands_rejected=" .. tostring(state.commandsRejected),
-                "last_reject=" .. tostring(state.lastReject),
-                "last_tilt=" .. tostring(state.lastTilt),
-                "tilt_bearings=" .. tostring(state.lastTiltBearings),
-                "tilt_accepted=" .. tostring(state.lastTiltAccepted),
-                "last_tilt_error=" .. tostring(state.lastTiltError),
-                "untrusted_msgs=" .. tostring(state.untrusted),
-                "modem=" .. tostring(wirelessModem),
-                "modem_wireless=" .. tostring(modemWireless),
-                "transport=" .. (modemWireless == false and "WIRED"
-                    or modemWireless == true and "wireless" or "unknown"),
-                -- EVERY modem this pod has, so which sides exist is a reading
-                -- rather than something to be looked up on the hull.
-                -- WHICH MODEMS THIS POD ACTUALLY HAS OPEN. rednet's open set is
-                -- per COMPUTER, not per tab, so any other tab calling
-                -- rednet.open puts this pod on a transport main.lua never
-                -- chose -- and that silently destroys the wired/wireless A/B.
-                -- Reported rather than reasoned about.
-                "modems_open=" .. (function()
-                    local parts = {}
-                    for _, entry in ipairs(modemsPresent()) do
-                        if rednet.isOpen(entry.name) then
-                            parts[#parts + 1] = entry.name
-                        end
-                    end
-                    return #parts > 0 and table.concat(parts, ",") or "none"
-                end)(),
-                "modems_present=" .. (function()
-                    local parts = {}
-                    for _, entry in ipairs(modemsPresent()) do
-                        parts[#parts + 1] = entry.name .. ":"
-                            .. (entry.wireless == false and "wired"
-                                or entry.wireless == true and "wireless" or "?")
-                    end
-                    return #parts > 0 and table.concat(parts, ",") or "none"
-                end)(),
-                "rednet_open=" .. tostring(rednet.isOpen(wirelessModem)),
-                "telemetry_sends=" .. tostring(state.telemetrySends),
-                "replies_sent=" .. tostring(state.repliesSent),
-                "last_send_at=" .. tostring(state.lastSendAt),
-                "thrusters=" .. tostring(#thrusters.devices),
-                "prop_controller=" .. tostring(props.controllerName),
-                "prop_bearings=" .. tostring(props.bearingName),
-                "sample_at=" .. tostring(sample.at),
-                "sample_age_ms=" .. tostring(sample.at and (os.epoch("utc") - sample.at)),
-                "sample_count=" .. tostring(sample.count),
-                "sample_healthy=" .. tostring(sample.healthy),
-                "pending_status=" .. tostring(#pendingStatus),
-                -- Read from the SAMPLE, not from the hardware. This used to
-                -- call props.telemetry() twice per heartbeat, which is a
-                -- second sampler nobody declared and a second answer that
-                -- could disagree with the one being transmitted.
-                "prop_diag=" .. (function()
-                    local t = sample.props or {}
-                    return string.format(
-                        "bearings=%d assembled=%s thrust=%s rot=%s angular=%s kinetic=%s airflow=%s sail=%s",
-                        t.bearingCount or 0, tostring(t.bearingsAssembled),
-                        tostring(t.thrust), tostring(t.bearingRpm),
-                        tostring(t.bearingAngularSpeed), tostring(t.bearingKineticSpeed),
-                        tostring(t.airflow), tostring(t.sailPower))
-                end)(),
-                "prop_per_bearing=" .. (function()
-                    local t, out = sample.props or {}, {}
-                    for i, b in ipairs(t.perBearing or {}) do
-                        out[#out + 1] = string.format(
-                            "[%d %s thrust=%s asm=%s hand=%s vec=%s,%s,%s]",
-                            i, tostring(b.name), tostring(b.thrust), tostring(b.assembled),
-                            tostring(b.handedness), tostring(b.vx), tostring(b.vy), tostring(b.vz))
-                    end
-                    return table.concat(out, " ")
-                end)(),
-                "faults=" .. table.concat(state.faults, " | "),
-            })
+            writeHeartbeat()
         end
 
         sleep(0.25)

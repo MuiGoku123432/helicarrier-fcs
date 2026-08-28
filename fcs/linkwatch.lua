@@ -418,6 +418,17 @@ for _, corner in ipairs(flight.CORNERS) do
         downGaps = {},
         firstTimeouts = nil,
         lastTimeouts = nil,
+        -- REFUSALS, which are not losses and not timeouts.
+        --
+        -- rejectReply records NO fault, so a refused command is invisible to
+        -- everything except this counter -- HANDOFF says so, and the first two
+        -- linkwatch flights proved it by missing 98 refusals per pod that were
+        -- sitting in heartbeat.txt the whole time. A tool that partitions the
+        -- fault into "arrived" and "did not" without a REFUSED column is
+        -- offering a false dichotomy.
+        firstRejects = nil,
+        lastRejects = nil,
+        lastReject = nil,
         framesSeen = 0,
         droppedGaps = 0,
         noCounter = false,
@@ -516,6 +527,13 @@ local function observe(now, state)
             local timeouts = timeoutsIn(pod.faults)
             if entry.firstTimeouts == nil then entry.firstTimeouts = timeouts end
             entry.lastTimeouts = timeouts
+
+            local rejects = tonumber(pod.commandsRejected)
+            if rejects then
+                if entry.firstRejects == nil then entry.firstRejects = rejects end
+                entry.lastRejects = rejects
+            end
+            if pod.lastReject then entry.lastReject = pod.lastReject end
         end
 
         local seen = pod and tonumber(pod.commandsSeen) or nil
@@ -802,7 +820,7 @@ local function report()
     note("  set_power, arm -- so `sent` below is every command this computer")
     note("  sent that corner, not just the probes. loss% is sent against counted.")
     note("")
-    note("  corner  transport  modem  probes    sent  counted  loss%  gaps  outage_s  longest_s  timeouts")
+    note("  corner  transport  modem  probes    sent  counted  loss%  gaps  outage_s  longest_s  timeouts  rejects")
 
     local byTransport = {}
     for _, corner in ipairs(flight.CORNERS) do
@@ -826,10 +844,12 @@ local function report()
         bucket.timeouts = bucket.timeouts + timeouts
         bucket.corners[#bucket.corners + 1] = corner
 
-        note(string.format("  %-6s  %-9s  %-5s  %6d  %6d  %7d  %5.1f  %4d  %8.1f  %9.1f  %8d",
+        local rejects = (entry.lastRejects and entry.firstRejects)
+            and (entry.lastRejects - entry.firstRejects) or 0
+        note(string.format("  %-6s  %-9s  %-5s  %6d  %6d  %7d  %5.1f  %4d  %8.1f  %9.1f  %8d  %7d",
             corner, entry.transport, entry.modemName or "--",
             probesSent[corner], sent, counted, loss,
-            #entry.gaps, outage, longest, timeouts))
+            #entry.gaps, outage, longest, timeouts, rejects))
     end
 
     -- --- LOAD AND LOSS PER SECOND ------------------------------------------
@@ -1096,6 +1116,19 @@ local function report()
         if entry.rebooted then
             note(string.format("  %s: counters reset %d time(s) -- the pod REBOOTED mid-watch."
                 .. " Loss%% is measured from the reset.", corner, entry.rebooted))
+        end
+        local rejects = (entry.lastRejects and entry.firstRejects)
+            and (entry.lastRejects - entry.firstRejects) or 0
+        if rejects > 0 then
+            note(string.format("  %s: %d commands REFUSED (last: %s). Refused is not lost --",
+                corner, rejects, tostring(entry.lastReject)))
+            note("     the command arrived and the pod declined it, and rejectReply")
+            note("     records no fault, so this counter is the only witness.")
+            if tostring(entry.lastReject) == "not_armed" then
+                note("     `not_armed` is DOWNSTREAM of a timeout: the watchdog disarms")
+                note("     on 750 ms of silence, then the next set_power is refused.")
+                note("     Count it as evidence of the silence, not a separate fault.")
+            end
         end
         local down = totalDownlink(entry)
         if down > 0 then

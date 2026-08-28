@@ -23,6 +23,16 @@
 --                                                     COMMAND_TIMEOUTs, and
 --                                                     the verdict must REFUSE
 --                                                     to call it clean
+--   luajit tools/run_linkwatch_harness.lua refused    the pod RECEIVES every
+--                                                     command and declines it.
+--                                                     Not loss and not a gap --
+--                                                     commandsSeen still moves.
+--                                                     The report must show it
+--                                                     in the rejects column,
+--                                                     because rejectReply
+--                                                     records no fault and that
+--                                                     counter is the only
+--                                                     witness there is
 --   luajit tools/run_linkwatch_harness.lua flight     climb, hold, land
 --   luajit tools/run_linkwatch_harness.lua all
 --
@@ -46,7 +56,8 @@
 package.path = "./?.lua;./?/init.lua;" .. package.path
 local harness = require("tools.cc_harness")
 
-local MODES = { "works", "blackout", "allfour", "downlink", "noise", "bursty", "flight" }
+local MODES = { "works", "blackout", "allfour", "downlink", "noise", "bursty",
+    "refused", "flight" }
 local mode = arg[1] or "works"
 
 if mode == "all" then
@@ -131,6 +142,14 @@ elseif mode == "bursty" then
     EXPECT.uplinkGaps = 0
     EXPECT.someTimeouts = true
     EXPECT.verdict = "THE LINK LOST COMMANDS AND NO GAP WAS LONG ENOUGH"
+elseif mode == "refused" then
+    -- The craft's four pods were carrying 98 refusals each while two linkwatch
+    -- flights reported neither loss nor gaps for them, because the tool had no
+    -- column for a command that ARRIVED and was declined.
+    GROUND_SECONDS = 40
+    harness.model.tiltCommandsRejected = true
+    EXPECT.uplinkGaps = 0
+    EXPECT.someRejects = true
 elseif mode == "flight" then
     GROUND_SECONDS = 10
 elseif mode ~= "works" then
@@ -204,8 +223,12 @@ end
 --   corner transport modem probes sent counted loss% gaps outage_s longest_s timeouts
 local rows = {}
 for _, line in ipairs(captured) do
-    local corner, transport, _, probes, _, counted, _, gaps, outage =
-        line:match("^%s+(%u%u)%s+(%a+)%s+(%S+)%s+(%d+)%s+(%d+)%s+(%d+)%s+([%d%.]+)%s+(%d+)%s+([%d%.]+)")
+    -- longest_s and timeouts are matched but NOT captured, so the capture list
+    -- stays readable. Getting this arity wrong reads the timeout column as the
+    -- reject column and silently asserts on the wrong number.
+    local corner, transport, _, probes, _, counted, _, gaps, outage, rejects =
+        line:match("^%s+(%u%u)%s+(%a+)%s+(%S+)%s+(%d+)%s+(%d+)%s+(%d+)%s+([%d%.]+)"
+            .. "%s+(%d+)%s+([%d%.]+)%s+[%d%.]+%s+%d+%s+(%d+)")
     if corner and (corner == "FL" or corner == "FR" or corner == "RL" or corner == "RR") then
         rows[corner] = {
             transport = transport,
@@ -213,6 +236,7 @@ for _, line in ipairs(captured) do
             counted = tonumber(counted),
             gaps = tonumber(gaps),
             outage = tonumber(outage),
+            rejects = tonumber(rejects) or 0,
         }
     end
 end
@@ -284,6 +308,26 @@ if EXPECT.someTimeouts then
     end
     if seen == 0 then
         fail("expected COMMAND_TIMEOUTs from the burst loss, report showed none")
+    end
+end
+
+if EXPECT.someRejects then
+    local worst = 0
+    for _, row in pairs(rows) do
+        if (row.rejects or 0) > worst then worst = row.rejects end
+    end
+    if worst == 0 then
+        fail("every set_tilt was refused and the rejects column read zero")
+    end
+    if not findLine("commands REFUSED") then
+        fail("expected the cross-check to name the refusals")
+    end
+    for corner, row in pairs(rows) do
+        if row.counted < row.probes then
+            fail(("%s: a REFUSED command still increments commandsSeen, so counted"
+                .. " (%d) must not fall below probes (%d)")
+                :format(corner, row.counted, row.probes))
+        end
     end
 end
 
