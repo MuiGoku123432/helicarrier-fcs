@@ -30,6 +30,17 @@ local FILES = {
     "fcs/pitchdamp.lua", "fcs/pitchdampflight.lua",
     "fcs/velocityhold.lua", "fcs/velocityholdflight.lua",
     "tools/analyse_drift.lua",
+    -- ADDED 2026-08-28. These were MISSING, and tiltcheck.lua had already been
+    -- flown -- a flight tool that commands the bearings, checked by nothing.
+    -- A hardcoded list silently omits every new file; that is the same shape as
+    -- this project's signature failure, the rig agreeing with the code instead
+    -- of the craft.
+    "fcs/tiltcheck.lua", "fcs/netdiag.lua", "fcs/network.lua",
+    "fcs/config.lua", "fcs/protocol.lua", "fcs/atmosphere.lua",
+    "fcs/csv.lua", "fcs/discover.lua", "fcs/peripherals.lua",
+    "fcs/mixer_profile.lua", "fcs/snapshot.lua", "fcs/airprofile.lua",
+    "fcs/bankctl.lua", "fcs/rolldrift.lua", "fcs/ionsweep.lua",
+    "fcs/sweep.lua", "fcs/reboot.lua", "fcs/main.lua",
     -- The harness too. It is not flight code, but the rule is the same and it
     -- has now cost a run: commandedTilt() was called from stepRotation fifty
     -- lines above its own definition, and the flight died at "climb to +12".

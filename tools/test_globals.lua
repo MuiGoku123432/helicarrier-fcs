@@ -32,6 +32,17 @@ local FILES = {
     "fcs/pitchdamp.lua", "fcs/pitchdampflight.lua",
     "fcs/velocityhold.lua", "fcs/velocityholdflight.lua",
     "tools/analyse_drift.lua",
+    -- ADDED 2026-08-28. These were MISSING, and tiltcheck.lua had already been
+    -- flown -- a flight tool that commands the bearings, checked by nothing.
+    -- A hardcoded list silently omits every new file; that is the same shape as
+    -- this project's signature failure, the rig agreeing with the code instead
+    -- of the craft.
+    "fcs/tiltcheck.lua", "fcs/netdiag.lua", "fcs/network.lua",
+    "fcs/config.lua", "fcs/protocol.lua", "fcs/atmosphere.lua",
+    "fcs/csv.lua", "fcs/discover.lua", "fcs/peripherals.lua",
+    "fcs/mixer_profile.lua", "fcs/snapshot.lua", "fcs/airprofile.lua",
+    "fcs/bankctl.lua", "fcs/rolldrift.lua", "fcs/ionsweep.lua",
+    "fcs/sweep.lua", "fcs/reboot.lua", "fcs/main.lua",
     -- Pod code is deployed flight code too, and it is the half that runs
     -- with nobody watching the screen.
     "pod-template/pod/main.lua", "pod-template/pod/payload.lua",

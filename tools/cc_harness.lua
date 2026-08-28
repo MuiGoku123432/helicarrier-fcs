@@ -246,6 +246,15 @@ harness.model = {
     -- the 2026-08-28 blackout is suspected to live in. This is what makes the
     -- transport A/B testable offline.
     wiredCorners = {},
+    -- MODEMS ON THE FCS COMPUTER. One wireless "top" by default, which is what
+    -- every existing runner assumes. Give a runner a second entry with
+    -- wireless=false to exercise a wired bus.
+    --   { name = "back", wireless = true }
+    --   { name = "top",  wireless = false, networkName = "computer_1",
+    --     remote = { "modem_2", "modem_3" } }
+    -- Routing by transport is NOT modelled: every pod still hears every send.
+    -- This exists so tools that ENUMERATE modems can be run at all.
+    modems = { { name = "top", wireless = true } },
     -- rejected: the pod refuses it -- isNewCommand's sequence gate -- and
     -- answers with rejectReply, which increments commandsRejected and RECORDS
     -- NO FAULT. Row 2, and the row HANDOFF believed was ruled out by "no
@@ -1004,13 +1013,37 @@ function harness.install(env)
     }
 
     -- peripherals: one wireless modem
+    local function modemEntry(name)
+        for _, entry in ipairs(harness.model.modems or {}) do
+            if entry.name == name then return entry end
+        end
+        return nil
+    end
+
     env.peripheral = {
-        getNames = function() return { "top" } end,
-        isPresent = function(name) return name == "top" end,
-        hasType = function(name, kind) return name == "top" and kind == "modem" end,
+        getNames = function()
+            local names = {}
+            for _, entry in ipairs(harness.model.modems or {}) do
+                names[#names + 1] = entry.name
+            end
+            return names
+        end,
+        isPresent = function(name) return modemEntry(name) ~= nil end,
+        hasType = function(name, kind)
+            return modemEntry(name) ~= nil and kind == "modem"
+        end,
         wrap = function(name)
-            if name ~= "top" then return nil end
-            return { isWireless = function() return true end }
+            local entry = modemEntry(name)
+            if not entry then return nil end
+            local wireless = entry.wireless ~= false
+            local wrapped = { isWireless = function() return wireless end }
+            if not wireless then
+                -- Wired modems answer these; wireless ones do not have them at
+                -- all, which is what the tools pcall around.
+                wrapped.getNameLocal = function() return entry.networkName end
+                wrapped.getNamesRemote = function() return entry.remote or {} end
+            end
+            return wrapped
         end,
     }
 
@@ -1019,7 +1052,16 @@ function harness.install(env)
     env.rednet = {
         open = function(name) opened[name] = true end,
         isOpen = function(name) return opened[name] == true end,
-        close = function(name) opened[name] = nil end,
+        -- No argument closes EVERY open modem, as CC:Tweaked does. The old
+        -- one-line version indexed the table with nil and raised
+        -- "table index is nil" on a call the craft accepts.
+        close = function(name)
+            if name == nil then
+                for key in pairs(opened) do opened[key] = nil end
+            else
+                opened[name] = nil
+            end
+        end,
         host = function() end,
         unhost = function() end,
         lookup = function(_, hostname)
