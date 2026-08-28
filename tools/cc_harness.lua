@@ -512,6 +512,16 @@ local function podTelemetry(corner, messageType)
         online = true,
         bootedAt = pod.bootedAt or 1,
         commandsSeen = pod.commandsSeen or 0,
+        -- THE RECEIVE-SIDE COUNTERS. `received` counts what rednet.receive
+        -- handed the pod, so a command the model never DELIVERS -- a blackout,
+        -- a burst loss, dropEveryNthCommand -- must not move it. That is the
+        -- whole point of the field: it separates "never arrived" from
+        -- "arrived and was discarded", and a harness that incremented it for
+        -- an undelivered command would make that distinction untestable.
+        received = pod.received or 0,
+        invalid = pod.invalid or 0,
+        nonCommand = pod.nonCommand or 0,
+        untrusted = pod.untrusted or 0,
         commandsApplied = pod.commandsApplied or 0,
         commandsRejected = pod.commandsRejected or 0,
         lastReject = pod.lastReject,
@@ -1172,6 +1182,16 @@ function harness.install(env)
             -- The pod applies the command and acks after a short latency.
             for corner, pod in pairs(pods) do
                 local dropped, rejected = false, nil
+                if pod.id == recipient and not harness.blackedOut(corner) then
+                    -- Delivered: rednet.receive would have handed this over.
+                    -- Counted here rather than per branch so every message
+                    -- type is included exactly once, the way the pod's
+                    -- networkLoop counts it.
+                    pod.received = (pod.received or 0) + 1
+                    if message.type == "ping" or message.type == "status_request" then
+                        pod.nonCommand = (pod.nonCommand or 0) + 1
+                    end
+                end
                 if pod.id == recipient and harness.blackedOut(corner) then
                     -- THE BLACKOUT TAKES EVERY COMMAND TYPE, not just set_tilt.
                     --
@@ -1222,6 +1242,9 @@ function harness.install(env)
                     pod.commandsSeen = 0
                     pod.commandsApplied = 0
                     pod.commandsRejected = 0
+                    pod.received = 0
+                    pod.invalid = 0
+                    pod.nonCommand = 0
                     pod.rebooted = (pod.rebooted or 0) + 1
                     pod.bootedAt = now
                 elseif pod.id == recipient and message.type == "disarm" then

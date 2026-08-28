@@ -181,6 +181,25 @@ local state = {
     commandsApplied = 0,
     commandsRejected = 0,
     untrusted = 0,
+    -- EVERY MESSAGE rednet.receive HANDED THIS POD, before any judgement.
+    --
+    -- Without this the FCS can see "I sent 549, the pod counted 406" and
+    -- CANNOT tell three completely different faults apart:
+    --   never transmitted / lost on the wire
+    --   arrived at the computer and dropped by CC's 256-event queue
+    --   arrived at networkLoop and discarded there
+    -- All three read as loss, and only the third is anything this code can
+    -- fix. `received` splits the first two from the third.
+    received = 0,
+    -- Discarded by protocol.validate: wrong magic, wrong version, unknown
+    -- type. networkLoop had `if valid then ... end` with NO else, so these
+    -- vanished uncounted -- the same silent-drop shape as rejectReply
+    -- recording no fault, which hid 98 refusals per pod for two flights.
+    invalid = 0,
+    lastInvalid = nil,
+    -- Messages that were valid and NOT commands: ping and status_request.
+    -- Counted so received can be reconciled exactly rather than approximately.
+    nonCommand = 0,
     lastReject = nil,
     -- What the BEARINGS did with the last set_tilt, as opposed to what the pod
     -- was asked for. See noteTiltResult.
@@ -452,9 +471,57 @@ local function acceptCommand(message)
 end
 
 local function networkLoop()
-    while true do
+    -- Receipt and hardware application deliberately run in separate coroutines.
+    -- A peripheral setter may yield; it must never delay rednet receipt or make
+    -- watchdog freshness depend on actuator latency.
+    local pendingPower = nil
+
+    local function applyPowerLoop()
+        while true do
+            os.pullEvent("pod_apply_power")
+            while pendingPower do
+                local pending = pendingPower
+                pendingPower = nil
+
+                -- A disarm that arrives while an apply is pending wins. Do not
+                -- re-energize from a command accepted before that disarm.
+                if state.armed then
+                    local ok, applied = pcall(thrusters.applyCommand, pending.power)
+                    if ok then
+                        if state.armed and state.powerSession == pending.powerSession
+                            and not pendingPower then
+                            state.currentPower = applied
+                            state.lastPowerAppliedAt = os.epoch("utc")
+                            state.powerApplications = (state.powerApplications or 0) + 1
+                        elseif not pendingPower then
+                            -- The apply completed after a disarm/re-arm or after
+                            -- newer receipt was superseded. Reassert fallback
+                            -- rather than leaving stale hardware power live.
+                            state.currentPower = thrusters.applyExact(config.fallbackPower)
+                        end
+                    else
+                        recordFault("SET_POWER: " .. tostring(applied))
+                        state.armed = false
+                        pendingPower = nil
+                        state.currentPower = thrusters.applyExact(config.fallbackPower)
+                        reply(pending.senderId, "fault")
+                    end
+                end
+            end
+        end
+    end
+
+    local function receiveLoop()
+        while true do
         local senderId, message = rednet.receive(config.protocol)
-        local valid = protocol.validate(message)
+        -- COUNTED BEFORE ANY JUDGEMENT. This is the pod's own answer to "did
+        -- it arrive", and it is the only place that answer exists.
+        state.received = state.received + 1
+        local valid, why = protocol.validate(message)
+        if not valid then
+            state.invalid = state.invalid + 1
+            state.lastInvalid = why
+        end
         if valid then
             local trusted = resolveMain()
             local addressedHere = trusted and senderId == trusted
@@ -463,6 +530,9 @@ local function networkLoop()
                 state.untrusted = state.untrusted + 1
             end
             if addressedHere then
+                if message.type == "ping" or message.type == "status_request" then
+                    state.nonCommand = state.nonCommand + 1
+                end
                 if message.type == "ping" then
                     -- Liveness, not data. Answered immediately from the cache:
                     -- making a caller wait a sample for "are you there" would
@@ -485,6 +555,9 @@ local function networkLoop()
                         rejectReply(senderId, why)
                     else
                         acceptCommand(message)
+                        if not state.armed then
+                            state.powerSession = (state.powerSession or 0) + 1
+                        end
                         state.armed = true
                         -- Refreshed even when already armed: a repeated arm is a
                         -- legitimate keepalive against watchdogLoop.
@@ -502,18 +575,20 @@ local function networkLoop()
                     elseif not protocol.validPower(message.power) then
                         rejectReply(senderId, "bad_power")
                     else
-                        local ok, applied = pcall(thrusters.applyCommand, message.power)
-                        if ok then
-                            acceptCommand(message)
-                            state.currentPower = applied
-                            state.lastCommandAt = os.epoch("utc")
-                            lightReply(senderId, "ack")
-                        else
-                            recordFault("SET_POWER: " .. tostring(applied))
-                            state.armed = false
-                            state.currentPower = thrusters.applyExact(config.fallbackPower)
-                            reply(senderId, "fault")
-                        end
+                        -- Ack means valid receipt, not hardware completion. Keep
+                        -- the newest setpoint only: it is the only one worth
+                        -- applying after a yielding peripheral operation returns.
+                        local receivedAt = os.epoch("utc")
+                        acceptCommand(message)
+                        state.lastCommandAt = receivedAt
+                        pendingPower = {
+                            power = message.power,
+                            senderId = senderId,
+                            receivedAt = receivedAt,
+                            powerSession = state.powerSession or 0,
+                        }
+                        os.queueEvent("pod_apply_power")
+                        lightReply(senderId, "ack")
                     end
 
                 elseif message.type == "set_rpm" then
@@ -593,12 +668,16 @@ local function networkLoop()
                     -- refusing one as a replay would leave the banks live.
                     acceptCommand(message)
                     state.armed = false
+                    pendingPower = nil
                     state.currentPower = thrusters.applyExact(config.fallbackPower)
                     lightReply(senderId, "ack")
                 end
             end
         end
     end
+    end
+
+    parallel.waitForAll(receiveLoop, applyPowerLoop)
 end
 
 local function watchdogLoop()

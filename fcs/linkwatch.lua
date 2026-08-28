@@ -429,6 +429,21 @@ for _, corner in ipairs(flight.CORNERS) do
         firstRejects = nil,
         lastRejects = nil,
         lastReject = nil,
+        -- THE RECEIVE-SIDE COUNTERS, published by pod/payload.lua since
+        -- 2026-08-28. commandsSeen says the pod ACTED on a command; `received`
+        -- says one was HANDED to it by rednet.receive at all. Without the
+        -- second, "sent 549, counted 406" cannot separate a command that never
+        -- arrived from one that arrived and was thrown away.
+        firstReceived = nil,
+        lastReceived = nil,
+        firstInvalid = nil,
+        lastInvalid = nil,
+        lastInvalidWhy = nil,
+        firstUntrusted = nil,
+        lastUntrusted = nil,
+        firstNonCommand = nil,
+        lastNonCommand = nil,
+        sawReceived = false,
         framesSeen = 0,
         droppedGaps = 0,
         noCounter = false,
@@ -534,6 +549,23 @@ local function observe(now, state)
                 entry.lastRejects = rejects
             end
             if pod.lastReject then entry.lastReject = pod.lastReject end
+
+            local function track(field, firstKey, lastKey)
+                local value = tonumber(pod[field])
+                if value then
+                    if entry[firstKey] == nil then entry[firstKey] = value end
+                    entry[lastKey] = value
+                    return true
+                end
+                return false
+            end
+            if track("received", "firstReceived", "lastReceived") then
+                entry.sawReceived = true
+            end
+            track("invalid", "firstInvalid", "lastInvalid")
+            track("untrusted", "firstUntrusted", "lastUntrusted")
+            track("nonCommand", "firstNonCommand", "lastNonCommand")
+            if pod.lastInvalid then entry.lastInvalidWhy = pod.lastInvalid end
         end
 
         local seen = pod and tonumber(pod.commandsSeen) or nil
@@ -850,6 +882,104 @@ local function report()
             corner, entry.transport, entry.modemName or "--",
             probesSent[corner], sent, counted, loss,
             #entry.gaps, outage, longest, timeouts, rejects))
+    end
+
+    -- --- WHERE THE COMMANDS WENT -------------------------------------------
+    --
+    -- THE SPLIT THAT MATTERS, and the one this tool could not make until the
+    -- pods published `received`. Three faults read identically as "loss":
+    --
+    --   never arrived   sent but rednet.receive never handed it over --
+    --                   the wire, or CC's 256-event queue dropping it
+    --   discarded       arrived and thrown away before dispatch: failed
+    --                   protocol.validate, or not addressed to this pod
+    --   acted on        reached a command branch and moved commandsSeen
+    --
+    -- Only the middle one is anything the pod's code can fix, and only the
+    -- first implicates the transport or the queue. Reporting a single loss%
+    -- over all three is how this investigation spent two flights unable to
+    -- say which of them was happening.
+    local anyReceived = false
+    for _, corner in ipairs(flight.CORNERS) do
+        if watch[corner].sawReceived then anyReceived = true end
+    end
+
+    note("")
+    note("== WHERE THE COMMANDS WENT ==")
+    note("")
+    if not anyReceived then
+        note("  ** THE PODS ARE NOT PUBLISHING `received`. They are running pod")
+        note("  ** firmware older than pod-template in the repo, so a command that")
+        note("  ** never arrived cannot be told from one the pod threw away.")
+        note("  ** Redeploy pod-template and /fcs/reboot.lua all.")
+    else
+        note("  corner    sent  arrived  acted_on  discarded  never_arrived  arrived%")
+        for _, corner in ipairs(flight.CORNERS) do
+            local entry = watch[corner]
+            local function delta(firstKey, lastKey)
+                if entry[firstKey] == nil or entry[lastKey] == nil then return nil end
+                return entry[lastKey] - entry[firstKey]
+            end
+            local sent = (entry.sentAtLastAdvance or 0) - (entry.sentAtStart or 0)
+            local arrived = delta("firstReceived", "lastReceived")
+            local acted = (entry.firstSeen and entry.lastSeen)
+                and (entry.lastSeen - entry.firstSeen) or 0
+            local invalid = delta("firstInvalid", "lastInvalid") or 0
+            local untrusted = delta("firstUntrusted", "lastUntrusted") or 0
+            local discarded = invalid + untrusted
+            local never = arrived and (sent - arrived) or nil
+            if never and never < 0 then never = 0 end
+            note(string.format("  %-6s  %6d  %7s  %8d  %9d  %13s  %7s",
+                corner, sent,
+                arrived and tostring(arrived) or "--",
+                acted, discarded,
+                never and tostring(never) or "--",
+                (arrived and sent > 0)
+                    and string.format("%.1f", 100 * arrived / sent) or "--"))
+        end
+        note("")
+        note("  discarded = failed protocol.validate + not addressed to this pod.")
+        note("  never_arrived = sent here and never handed to the pod's")
+        note("  rednet.receive: the wire, or CC's 256-event queue.")
+        note("")
+        note("  All columns are deltas over the same window, aligned to within")
+        note("  the few commands in flight when the watch opened -- so arrived%")
+        note("  slightly over 100 means zero loss, not a miscount. Read anything")
+        note("  under about 95% as real.")
+
+        -- The reading, stated rather than left to the reader.
+        local sentTotal, arrivedTotal, discardedTotal = 0, 0, 0
+        for _, corner in ipairs(flight.CORNERS) do
+            local entry = watch[corner]
+            sentTotal = sentTotal + ((entry.sentAtLastAdvance or 0) - (entry.sentAtStart or 0))
+            if entry.firstReceived and entry.lastReceived then
+                arrivedTotal = arrivedTotal + (entry.lastReceived - entry.firstReceived)
+            end
+            if entry.firstInvalid and entry.lastInvalid then
+                discardedTotal = discardedTotal + (entry.lastInvalid - entry.firstInvalid)
+            end
+            if entry.firstUntrusted and entry.lastUntrusted then
+                discardedTotal = discardedTotal + (entry.lastUntrusted - entry.firstUntrusted)
+            end
+        end
+        local missing = sentTotal - arrivedTotal
+        note("")
+        if sentTotal > 0 and missing > sentTotal * 0.05 then
+            note(string.format("  ** %d of %d commands NEVER REACHED THE PODS (%.1f%%).",
+                missing, sentTotal, 100 * missing / sentTotal))
+            note("  ** They were sent and rednet.receive never handed them over, so")
+            note("  ** the fault is BELOW networkLoop: the modem, or the computer's")
+            note("  ** event queue dropping them before any pod code runs. No change")
+            note("  ** to the pod's dispatch can recover these.")
+        elseif discardedTotal > 0 then
+            note(string.format("  ** The commands ARRIVED. %d were discarded before dispatch",
+                discardedTotal))
+            note("  ** (last reason: " .. tostring(watch.FL.lastInvalidWhy or "not addressed here") .. ").")
+            note("  ** This is pod-side and fixable in networkLoop.")
+        else
+            note("  Sent, arrived and acted-on agree. Whatever is being lost is not")
+            note("  being lost on the way IN.")
+        end
     end
 
     -- --- LOAD AND LOSS PER SECOND ------------------------------------------

@@ -91,6 +91,13 @@ function payload.status(messageType, ctx)
     telemetry.commandsSeen = state.commandsSeen
     telemetry.commandsApplied = state.commandsApplied
     telemetry.commandsRejected = state.commandsRejected
+    -- THE RECEIVE-SIDE COUNTERS. commandsSeen answers "did the pod act on it";
+    -- these answer the prior question "did it reach the pod at all", which no
+    -- field published before 2026-08-28 could distinguish from packet loss.
+    telemetry.received = state.received
+    telemetry.invalid = state.invalid
+    telemetry.nonCommand = state.nonCommand
+    telemetry.untrusted = state.untrusted
     telemetry.lastReject = state.lastReject
     -- HOW MANY OF THIS CORNER'S BEARINGS ACCEPTED THE LAST TILT, and the first
     -- refusal if any did. props.setTilt has always reported this per bearing;
