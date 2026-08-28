@@ -1,0 +1,803 @@
+-- DOES A BEARING ANSWER set_tilt IN THE AIR? Nothing else. No measurement.
+--
+--     /fcs/tiltcheck.lua                 ground, climb, 3 confirms, land
+--     /fcs/tiltcheck.lua --ground-only   the ground half alone, ~20 s
+--     /fcs/tiltcheck.lua --gain 6        lower hold altitude
+--     /fcs/tiltcheck.lua --repeats 5     more air confirms
+--     /fcs/tiltcheck.lua --tilt 2.0      a bigger probe (see THE PROBE below)
+--
+-- Run it in the FCS-DEV "Flight Tools" tab. Expect about three minutes.
+--
+-- ---------------------------------------------------------------------------
+-- WHAT IS BEING ANSWERED
+--
+-- In flight the bearings sometimes ignore set_tilt. On the ground they never
+-- have: five ground runs, five successes, INCLUDING ONE TAKEN TWO MINUTES
+-- BEFORE A FLIGHT THAT FAILED. Two of six flights got 0.00 back from all four
+-- corners on a command the ground answers with 8.00.
+--
+-- Ruled out already: the command shape (all four corners answer it on the
+-- ground), prop.active being false (it reads true in flight), and message rate
+-- (run 7 failed at 8/s where runs 3-6 succeeded at 10-12/s).
+--
+-- What is left, untested: something about being AIRBORNE, or about the craft
+-- having MOVED. This tool tests exactly that and measures nothing else, so it
+-- is cheap enough to fly repeatedly for a hit rate.
+--
+-- ---------------------------------------------------------------------------
+-- WHY THE GROUND HALF IS IN THIS FILE AND NOT LEFT TO bearingsweep
+--
+-- bearingsweep is a DIFFERENT CODE PATH. A ground sweep that works and a
+-- flight tool that does not cannot separate "airborne" from "this tool's
+-- code", which is the whole question. Here the ground confirm and the air
+-- confirms call the SAME function with the same throttle, the same command
+-- shape and the same readback -- only the altitude differs. Run bearingsweep
+-- either side of this as the independent cross-check; that pairing is worth
+-- having, it is just not the discriminator.
+--
+-- ---------------------------------------------------------------------------
+-- THE SIGN ALTERNATES, AND THAT IS NOT COSMETIC
+--
+-- The net gain is -3.36 blocks/s per commanded degree on the roll axis, so a
+-- one-sided 1 degree probe held across three confirms walks the craft several
+-- hundred blocks. Chunk loading as the craft drifts is the leading suspect for
+-- BOTH the six-second loop stall and this fault -- so a one-sided probe would
+-- inject the very variable it is trying to test. Alternating +/- keeps the
+-- craft near where it took off.
+--
+-- IT ALSO SPLITS ALTITUDE FROM MOTION FOR FREE. Confirm 1 happens from a
+-- near-stationary hover: it tests AIRBORNE alone. By confirm 3 the craft has
+-- been moving: that tests MOTION. Failing at 1 and failing only at 3 are
+-- different diagnoses, and this is the cheapest way to tell them apart.
+--
+-- ---------------------------------------------------------------------------
+-- THE INSTRUMENT NOBODY WAS READING
+--
+-- pod/payload.lua puts three things in EVERY heartbeat that no flight tool
+-- here has ever looked at:
+--
+--     commandedTilt      state.lastTilt -- written ONLY by a set_tilt the pod
+--                        ACCEPTED. The angle the pod believes it applied.
+--     commandsRejected   incremented by rejectReply.
+--     lastReject         why.
+--
+-- That last pair matters because pod/main.lua's isNewCommand drops a command
+-- whose sequence <= lastSequence and answers with rejectReply -- which
+-- increments commandsRejected and sends a `fault`-TYPED REPLY but RECORDS NO
+-- FAULT IN THE FAULT LIST. HANDOFF lists "pod rejection" as ruled out on the
+-- evidence "no faults". That evidence never covered this path. Reading three
+-- fields covers it properly.
+--
+-- So a failure here is not a hit/miss. commandedTilt against prop.tiltAngle
+-- partitions the fault space:
+--
+--   commandedTilt | rejects | tiltAngle | verdict
+--   --------------|---------|-----------|--------------------------------------
+--   stale         | flat    | 0.00      | THE COMMAND NEVER REACHED THE POD
+--   stale         | RISING  | 0.00      | THE POD REFUSED IT (sequence/session)
+--   tracks        | flat    | 0.00      | POD APPLIED IT, BEARING DID NOT MOVE
+--   tracks        | flat    | = command | it works
+--
+-- THE BLIND SPOT IN ROW 3, said out loud because it will be the tempting one:
+-- props.setTilt returns per-bearing setManualTarget errors in applied.bearings
+-- and pod/main.lua keeps only .angle, throwing the rest away. A bearing
+-- peripheral going stale in flight looks EXACTLY like row 3 and logs nothing.
+-- If row 3 is what comes back, the next step is a one-line pod change to
+-- record that error as a fault -- not a conclusion drawn from this run.
+--
+-- ---------------------------------------------------------------------------
+-- THE PROBE IS 1 DEGREE
+--
+-- Not because it is gentle -- at -3.36 blocks/s per degree it is not -- but
+-- because 1.00 is the exact angle runs 4, 5 and 6 read back, so a 0.00 is
+-- unambiguous. Whether the bearings resolve half a degree is NOT MEASURED, and
+-- a false failure here would cost more than the drift a smaller probe saves.
+-- --tilt exists for when that is known; until then leave it alone.
+-- ---------------------------------------------------------------------------
+
+if package then
+    package.path = "/?.lua;/?/init.lua;" .. package.path
+end
+
+local config = require("fcs.config")
+local banks = require("fcs.banks")
+local flight = require("fcs.flight")
+local profile = require("fcs.mixer_profile")
+local atmosphere = require("fcs.atmosphere")
+local rolldamp = require("fcs.rolldamp")
+local lateralhold = require("fcs.lateralhold")
+
+local plan = {
+    propRpm = 64,
+    holdGain = 12,
+    climbTimeout = 90,
+    loopSeconds = 0.15,
+
+    tiltDegrees = 1.0,
+    -- Long enough for the pods to have pushed at least a few 200 ms status
+    -- heartbeats carrying the new tiltAngle, short enough that a 1 degree
+    -- command has not built much of its 3.4 blocks/s.
+    confirmSeconds = 6,
+    repeats = 3,
+    -- Tilt cleared, craft left alone. Not a settle -- nothing is being
+    -- measured -- just enough for the last command to stop mattering.
+    betweenSeconds = 4,
+
+    -- A corner has answered if it reports at least half the commanded angle.
+    -- The same threshold the velocity tool uses. The failure this looks for is
+    -- 0.00 against 1.00, not a calibration error.
+    answeredFraction = 0.5,
+
+    -- THE COMMAND THROTTLE, carried over from velocityholdflight unchanged.
+    -- set_tilt and set_rpm are set-and-hold with NO watchdog pod-side, so
+    -- re-sending them every sample is 107 messages a second of pure load. Any
+    -- CHANGE goes out immediately; the deadband is there because an exact
+    -- inequality never engages against a slewing command.
+    resendPeriodMs = 1000,
+    resendDeadbandDegrees = 0.05,
+
+    -- A LOOP THAT STOPS IS THE DANGEROUS FAILURE. Run 6 rolled to -15 degrees
+    -- from a 1 degree command because the sample callback -- which holds every
+    -- abort and the damper -- stopped executing for six seconds. A late sample
+    -- neutralises rather than carrying on with the standing command.
+    stallSeconds = 1.5,
+    abortSpeed = 5.0,
+    abortTilt = 4.0,
+
+    -- The ground half arms the banks at collective 0, which is no lift at all,
+    -- and props at 64 rpm are 52% of weight against a props-only hover
+    -- bracketed at 122-124. So the craft cannot lift -- and "cannot lift" is
+    -- exactly the kind of belief this project has been wrong about, so it is
+    -- checked anyway.
+    liftAbort = 0.5,
+    groundedGain = 0.6,
+}
+
+local args = { ... }
+local groundOnly = false
+for index = 1, #args do
+    local argument = args[index]
+    if argument == "--ground-only" then groundOnly = true
+    elseif argument == "--gain" then
+        plan.holdGain = tonumber(args[index + 1]) or plan.holdGain
+    elseif argument == "--repeats" then
+        plan.repeats = tonumber(args[index + 1]) or plan.repeats
+    elseif argument == "--tilt" then
+        plan.tiltDegrees = tonumber(args[index + 1]) or plan.tiltDegrees
+    end
+end
+
+local lines = {}
+local function note(text)
+    lines[#lines + 1] = text
+    print(text)
+end
+
+local function save()
+    local ok, file = pcall(fs.open, "/fcs/tiltcheck_result.txt", "w")
+    if ok and file then
+        file.write(table.concat(lines, "\n"))
+        file.close()
+        print("")
+        print("Saved to /fcs/tiltcheck_result.txt")
+    end
+end
+
+local session = flight.new({
+    config = config,
+    profile = profile,
+    atmosphere = atmosphere,
+    note = note,
+    sampleSeconds = plan.loopSeconds,
+})
+
+local rate = rolldamp.newRateEstimator({ windowSeconds = 0.6 })
+local startedAt = os.epoch("utc")
+local commandedProps, commandedTilt = false, false
+local applied = { starboard = 0, bow = 0 }
+local launchX, launchZ
+
+local function feed(state, now)
+    if state and state.valid and state.roll then
+        rate:push((now - startedAt) / 1000, state.roll)
+    end
+    return rate:rate()
+end
+
+-- ---------------------------------------------------------------------------
+-- Commanding, throttled. Copied from velocityholdflight rather than shared,
+-- deliberately: this tool exists to diagnose that tool's fault, and it must
+-- not be able to inherit a change made to it mid-investigation. The extraction
+-- into a common module comes after this question is answered.
+-- ---------------------------------------------------------------------------
+
+-- The azimuth a given command carries. Shared by the sender and the
+-- confirmation, because the confirmation NEEDS it: commandedTilt is a
+-- MAGNITUDE and every confirm here uses the same 1.00, so a stale value left
+-- over from the previous confirm is indistinguishable from a fresh one. The
+-- azimuth flips 180 degrees when the sign alternates, and that is what makes
+-- "the pod saw THIS command" answerable rather than "the pod saw A command".
+local function azimuthFor(starboard, bow)
+    local heading = math.deg(math.atan2(starboard, bow))
+    return lateralhold.azimuthForHeading(heading)
+end
+
+-- Smallest angle between two azimuths, degrees.
+local function azimuthApart(a, b)
+    local difference = math.abs((a - b) % 360)
+    if difference > 180 then difference = 360 - difference end
+    return difference
+end
+
+local lastTiltSentAt, tiltMessages = 0, 0
+
+local function commandTilt(starboard, bow)
+    local now = os.epoch("utc")
+    local changed = math.abs(starboard - applied.starboard) >= plan.resendDeadbandDegrees
+        or math.abs(bow - applied.bow) >= plan.resendDeadbandDegrees
+        or (starboard == 0 and bow == 0
+            and (applied.starboard ~= 0 or applied.bow ~= 0))
+    if not changed and (now - lastTiltSentAt) < plan.resendPeriodMs then
+        return
+    end
+
+    local magnitude = math.sqrt(starboard * starboard + bow * bow)
+    local azimuth = azimuthFor(starboard, bow)
+    for _, corner in ipairs(flight.CORNERS) do
+        banks.send(corner, "set_tilt", {
+            angle = magnitude, azimuth = azimuth, bearing = nil, mirror = true,
+        })
+        tiltMessages = tiltMessages + 1
+    end
+    applied.starboard, applied.bow = starboard, bow
+    lastTiltSentAt = now
+    if magnitude > 0 then commandedTilt = true end
+end
+
+-- Never throttled. Clearing the tilt is the one command that must not wait on
+-- a resend window, and it resets the throttle so the next command is a change.
+local function clearTilt()
+    applied.starboard, applied.bow = 0, 0
+    lastTiltSentAt = 0
+    for _, corner in ipairs(flight.CORNERS) do
+        banks.send(corner, "set_tilt",
+            { angle = 0, azimuth = 0, bearing = nil, mirror = true })
+    end
+end
+
+local lastPropsSentAt, lastDifferential, propMessages = 0, nil, 0
+
+local function commandProps(rollRate)
+    local differential = rollRate and rolldamp.differentialFor(rollRate) or 0
+    local now = os.epoch("utc")
+    if differential ~= lastDifferential
+        or (now - lastPropsSentAt) >= plan.resendPeriodMs then
+        session:sendProps(rolldamp.cornerRpm(plan.propRpm, differential,
+            { minimumRpm = config.propeller.minimumRpm }))
+        propMessages = propMessages + #flight.CORNERS
+        lastPropsSentAt = now
+        lastDifferential = differential
+        commandedProps = true
+    end
+    return differential
+end
+
+-- ---------------------------------------------------------------------------
+-- Reading the pods. Everything the decision table needs, per corner.
+-- ---------------------------------------------------------------------------
+
+local function timeoutsIn(faults)
+    local total = 0
+    if type(faults) == "table" then
+        for _, fault in ipairs(faults) do
+            local count = tostring(fault):match("COMMAND_TIMEOUT x(%d+)")
+            if count then total = total + tonumber(count)
+            elseif tostring(fault):find("COMMAND_TIMEOUT") then total = total + 1 end
+        end
+    elseif type(faults) == "string" then
+        local count = faults:match("COMMAND_TIMEOUT x(%d+)")
+        if count then total = total + tonumber(count)
+        elseif faults:find("COMMAND_TIMEOUT") then total = total + 1 end
+    end
+    return total
+end
+
+-- HAS THIS CRAFT'S POD FIRMWARE EVER PUBLISHED commandedTilt?
+--
+-- The field comes from pod/payload.lua, which lives on the FOUR POD COMPUTERS,
+-- not here. If those are running an older build the field is simply absent --
+-- and absent looks exactly like "the pod never saw the command", which would
+-- turn a genuine bearing failure into a confident wrong diagnosis. So the tool
+-- tracks whether it has EVER seen the field and refuses to read anything into
+-- its absence if it has not.
+local sawCommandedTiltEver = false
+
+local function snapshot()
+    local pods = {}
+    for _, corner in ipairs(flight.CORNERS) do
+        local pod = banks.getState()[corner]
+        local prop = pod and pod.prop
+        pods[corner] = {
+            online = pod and pod.online or false,
+            -- What the POD believes it applied. Only ever written by a
+            -- set_tilt the pod accepted.
+            commandedTilt = pod and pod.commandedTilt or nil,
+            commandedTiltAzimuth = pod and pod.commandedTiltAzimuth or nil,
+            rejected = (pod and tonumber(pod.commandsRejected)) or 0,
+            lastReject = pod and pod.lastReject or nil,
+            timeouts = timeoutsIn(pod and pod.faults),
+            -- What the BEARING actually did.
+            tiltAngle = prop and tonumber(prop.tiltAngle) or nil,
+            active = prop and prop.active or nil,
+            bearingRpm = prop and tonumber(prop.bearingRpm) or nil,
+            controllerRpm = prop and tonumber(prop.controllerRpm) or nil,
+            telemetry = prop ~= nil,
+        }
+        if type(pods[corner].commandedTilt) == "number" then
+            sawCommandedTiltEver = true
+        end
+    end
+    return pods
+end
+
+local function speedOf(state)
+    local velocity = state and state.valid and state.linearVelocityWorld
+    if not velocity then return 0 end
+    local x = velocity.x or velocity[1] or 0
+    local z = velocity.z or velocity[3] or 0
+    return math.sqrt(x * x + z * z)
+end
+
+local function horizontal(position)
+    if not position then return nil end
+    local x = position.x or position[1]
+    local z = position.z or position[3]
+    if not x or not z then return nil end
+    return x, z
+end
+
+local function displacement(state)
+    if not (state and state.valid) then return nil end
+    local x, z = horizontal(state.position)
+    if not x then return nil end
+    if not launchX then launchX, launchZ = x, z end
+    local dx, dz = x - launchX, z - launchZ
+    return math.sqrt(dx * dx + dz * dz)
+end
+
+local function limits(state)
+    if not (state and state.valid) then return nil end
+    local speed = speedOf(state)
+    if speed > plan.abortSpeed then
+        return string.format("ground speed %.2f blocks/s passed the %.1f limit",
+            speed, plan.abortSpeed)
+    end
+    if math.abs(state.roll or 0) > plan.abortTilt
+        or math.abs(state.pitch or 0) > plan.abortTilt then
+        return string.format("hull tilt passed %.1f deg (roll %.2f pitch %.2f)",
+            plan.abortTilt, state.roll or 0, state.pitch or 0)
+    end
+    return nil
+end
+
+-- ---------------------------------------------------------------------------
+-- THE CONFIRM. One function, used on the ground and in the air, so the only
+-- thing that differs between them is altitude.
+-- ---------------------------------------------------------------------------
+
+local results = {}
+
+local function confirm(label, starboard, airborne)
+    local magnitude = math.abs(starboard)
+    local azimuth = azimuthFor(starboard, 0)
+    local before = snapshot()
+
+    local slowestLoop, previousAt = 0, os.epoch("utc")
+    local tiltAtOpen, propAtOpen = tiltMessages, propMessages
+    local openedAt = os.epoch("utc")
+    local peakSpeed, endRoll, endPitch, endGain, endDrift = 0, 0, 0, nil, nil
+    local stalled = nil
+
+    session.cheapRead = true
+    local stop = session:hold(plan.confirmSeconds, function(state, now)
+        -- Altitude hold ONLY in the air. On the ground commanded.collective
+        -- stays 0, which is what makes the ground half safe: the banks are
+        -- armed but every ion is at zero.
+        if airborne then
+            session:trim(plan.holdGain, flight.MAX_CLIMB_RATE, 0, state)
+        end
+        commandProps(feed(state, now))
+        commandTilt(starboard, 0)
+
+        local elapsed = now - previousAt
+        if elapsed > slowestLoop then slowestLoop = elapsed end
+        previousAt = now
+
+        -- Came back from a stall: neutralise before anything else. The craft
+        -- has been flying on a standing command with nothing watching it.
+        if elapsed > plan.stallSeconds * 1000 then
+            stalled = elapsed / 1000
+            commandTilt(0, 0)
+            return string.format("LOOP STALLED for %.1f s -- neutralised."
+                .. " Nothing was watching the craft for that long.", elapsed / 1000)
+        end
+
+        if state and state.valid then
+            local speed = speedOf(state)
+            if speed > peakSpeed then peakSpeed = speed end
+            endRoll, endPitch = state.roll or 0, state.pitch or 0
+            endDrift = displacement(state) or endDrift
+            local y = session:craftY(state)
+            if y and session.groundY then endGain = y - session.groundY end
+        end
+
+        if airborne then
+            return limits(state)
+        end
+        -- The ground half's only limit: it must not be airborne.
+        if endGain and endGain > plan.liftAbort then
+            return string.format("LIFTED to +%.2f during a ground check", endGain)
+        end
+        return nil
+    end)
+
+    -- READ BEFORE CLEARING. Reading after the clear would sample a bearing on
+    -- its way back to zero and call it a failure.
+    local after = snapshot()
+    clearTilt()
+
+    local shown, cmdShown, answered, seconds = {}, {}, 0, (os.epoch("utc") - openedAt) / 1000
+    local rejects, timeouts, inactive, noTelemetry = 0, 0, 0, 0
+    local podSaw = 0
+    for _, corner in ipairs(flight.CORNERS) do
+        local pod = after[corner]
+        local angle = pod.tiltAngle
+        shown[#shown + 1] = string.format("%s %s", corner,
+            angle and string.format("%.2f", angle) or "--")
+        cmdShown[#cmdShown + 1] = string.format("%s %s", corner,
+            pod.commandedTilt and string.format("%.2f", pod.commandedTilt) or "--")
+        if angle and math.abs(angle) >= magnitude * plan.answeredFraction then
+            answered = answered + 1
+        end
+        -- Did the POD accept THIS command? Angle AND azimuth, because the
+        -- angle alone cannot tell this confirm's 1.00 from the last one's.
+        if pod.commandedTilt
+            and math.abs(pod.commandedTilt - magnitude) < plan.resendDeadbandDegrees
+            and (type(pod.commandedTiltAzimuth) ~= "number"
+                or azimuthApart(pod.commandedTiltAzimuth, azimuth) < 5) then
+            podSaw = podSaw + 1
+        end
+        rejects = rejects + (pod.rejected - before[corner].rejected)
+        timeouts = timeouts + (pod.timeouts - before[corner].timeouts)
+        if pod.active == false then inactive = inactive + 1 end
+        if not pod.telemetry then noTelemetry = noTelemetry + 1 end
+    end
+
+    local messages = (tiltMessages - tiltAtOpen) + (propMessages - propAtOpen)
+    local ok = answered == #flight.CORNERS
+
+    note("")
+    note(string.format("  %s -- commanded %+.2f deg", label, starboard))
+    note("    bearing reports:  " .. table.concat(shown, "  "))
+    note("    pod believes:     " .. table.concat(cmdShown, "  "))
+    note(string.format("    %d/%d answered   pod accepted %d/%d   rejects %+d"
+        .. "   timeouts %+d", answered, #flight.CORNERS, podSaw,
+        #flight.CORNERS, rejects, timeouts))
+    note(string.format("    %.1f msg/s   slowest loop %.0f ms   alt %s"
+        .. "   drift %s   peak %.2f blocks/s",
+        messages / math.max(seconds, 0.001), slowestLoop,
+        endGain and string.format("%+.1f", endGain) or "?",
+        endDrift and string.format("%.0f", endDrift) or "?", peakSpeed))
+    note(string.format("    roll %+.2f  pitch %+.2f", endRoll or 0, endPitch or 0))
+
+    -- THE DECISION TABLE. Only reached on a failure, and it says which of the
+    -- three layers the command died in rather than "it did not work".
+    local verdict
+    if ok then
+        verdict = "OK"
+        note("    -> ALL FOUR ANSWERED.")
+    elseif noTelemetry > 0 then
+        verdict = "NO TELEMETRY"
+        note(string.format("    -> %d corner(s) sent no prop telemetry at all."
+            .. " Nothing can be concluded", noTelemetry))
+        note("       about the bearings from this confirm.")
+    elseif rejects > 0 then
+        verdict = "POD REFUSED"
+        note("    -> THE POD REFUSED THE COMMAND. commandsRejected rose during")
+        note("       this window, and a rejectReply records NO fault -- which is")
+        note("       why 'no faults' never ruled this out. Reasons seen:")
+        for _, corner in ipairs(flight.CORNERS) do
+            if after[corner].rejected > before[corner].rejected then
+                note(string.format("       %s: %s", corner,
+                    tostring(after[corner].lastReject)))
+            end
+        end
+    elseif podSaw == 0 and not sawCommandedTiltEver then
+        verdict = "DIAGNOSIS BLIND"
+        note("    -> CANNOT TELL. No corner has reported commandedTilt at any point")
+        note("       in this run, which means the POD firmware is older than")
+        note("       pod/payload.lua in the repo and does not publish the field.")
+        note("       An absent field is indistinguishable from 'the pod never saw")
+        note("       the command', so nothing is concluded. Redeploy pod-template")
+        note("       to all four pod computers and run this again -- the bearing")
+        note("       readback above is still true, just not diagnosable.")
+    elseif podSaw == 0 then
+        verdict = "NEVER ARRIVED"
+        note("    -> THE COMMAND NEVER REACHED THE PODS. No corner's")
+        note("       commandedTilt moved to the commanded angle and nothing was")
+        note("       rejected, so the set_tilt was lost on the link.")
+    elseif inactive > 0 then
+        verdict = "BEARINGS INACTIVE"
+        note(string.format("    -> %d corner(s) report prop.active FALSE. At 0 rpm"
+            .. " a bearing", inactive))
+        note("       STORES the target and ignores it. Check the props are turning.")
+    else
+        verdict = "BEARING IGNORED IT"
+        note("    -> THE POD APPLIED IT AND THE BEARING DID NOT MOVE.")
+        note("       commandedTilt tracks the command, nothing was rejected, the")
+        note("       bearings report ACTIVE, and tiltAngle stayed put. That is the")
+        note("       mod layer, not the link and not this code.")
+        note("       NOTE THE BLIND SPOT: props.setTilt's per-bearing")
+        note("       setManualTarget error is discarded by pod/main.lua, so a")
+        note("       stale bearing peripheral looks exactly like this and logs")
+        note("       nothing. Do not conclude further without that one-line")
+        note("       pod change.")
+    end
+
+    if stalled then
+        note(string.format("    ** THE LOOP STALLED for %.1f s during this confirm."
+            .. " The tilt was", stalled))
+        note("    ** neutralised. This confirm says nothing about the bearings.")
+        verdict = "STALLED"
+    end
+
+    results[#results + 1] = {
+        label = label, verdict = verdict, ok = ok, answered = answered,
+        podSaw = podSaw, rejects = rejects, timeouts = timeouts,
+        gain = endGain, drift = endDrift, peak = peakSpeed,
+        slowestLoop = slowestLoop, stop = stop,
+    }
+    return ok, stop
+end
+
+local function coast(seconds, airborne)
+    session.cheapRead = true
+    return session:hold(seconds, function(state, now)
+        if airborne then
+            session:trim(plan.holdGain, flight.MAX_CLIMB_RATE, 0, state)
+        end
+        commandProps(feed(state, now))
+        commandTilt(0, 0)
+        if state and state.valid then displacement(state) end
+        if airborne then return limits(state) end
+        return nil
+    end)
+end
+
+-- ---------------------------------------------------------------------------
+
+local function report()
+    note("")
+    note("== RESULT ==")
+    note("")
+    note("  where              answered  pod saw  rejects  timeouts   alt   verdict")
+    for _, entry in ipairs(results) do
+        note(string.format("  %-17s   %d/4      %d/4     %+4d     %+5d   %5s   %s",
+            entry.label, entry.answered, entry.podSaw, entry.rejects,
+            entry.timeouts,
+            entry.gain and string.format("%+.0f", entry.gain) or "?",
+            entry.verdict))
+    end
+
+    local ground, groundOk, air, airOk = 0, 0, 0, 0
+    for _, entry in ipairs(results) do
+        if entry.gain and entry.gain > plan.groundedGain then
+            air = air + 1
+            if entry.ok then airOk = airOk + 1 end
+        else
+            ground = ground + 1
+            if entry.ok then groundOk = groundOk + 1 end
+        end
+    end
+
+    note("")
+    note(string.format("  ground %d/%d answered      air %d/%d answered",
+        groundOk, ground, airOk, air))
+    note("")
+
+    if ground > 0 and air > 0 and groundOk == ground and airOk == 0 then
+        note("  THE FAULT IS BEING AIRBORNE, not this code. The same function")
+        note("  with the same command answered on the ground and did not answer")
+        note("  in the air, minutes apart, on the same craft.")
+    elseif ground > 0 and air > 0 and groundOk == ground and airOk < air then
+        note("  INTERMITTENT IN THE AIR ONLY. Look at WHICH air confirms failed:")
+        note("  the first is from a near-stationary hover and tests ALTITUDE; the")
+        note("  later ones follow real displacement and test MOTION. Failing only")
+        note("  late points at the drift, which points at chunk loading.")
+    elseif groundOk < ground then
+        note("  IT FAILED ON THE GROUND TOO. That is new -- five ground runs have")
+        note("  never failed -- so something on the craft has changed. Do not fly")
+        note("  anything else until /fcs/bearingsweep.lua is understood.")
+    elseif air == 0 and groundOk == ground then
+        note("  THE GROUND HALF PASSED, which is what it has always done -- five")
+        note("  ground runs, five successes. It says nothing about the fault on")
+        note("  its own. The flight is the experiment; run this without")
+        note("  --ground-only.")
+    elseif airOk == air and groundOk == ground then
+        note("  EVERYTHING ANSWERED. The fault did not reproduce on this run. It")
+        note("  is intermittent -- two of six flights -- so ONE clean run is not")
+        note("  evidence that it is gone. Fly this again; the point of a 3 minute")
+        note("  tool is the hit rate, not the single result.")
+    end
+
+    note("")
+    note("  Run /fcs/bearingsweep.lua either side of this as the independent")
+    note("  cross-check. It is a different code path, so it cannot separate")
+    note("  'airborne' from 'this tool' -- that is what the ground confirm above")
+    note("  is for -- but it is the standing reference this craft has five clean")
+    note("  runs of.")
+end
+
+-- ---------------------------------------------------------------------------
+
+local function mainLoop()
+    note("TILT CHECK -- does a bearing answer set_tilt in the air?")
+    note("utc_ms=" .. tostring(os.epoch("utc")))
+    note(string.format("probe %.2f deg   %d air confirms   hold +%d   props %d rpm",
+        plan.tiltDegrees, plan.repeats, plan.holdGain, plan.propRpm))
+    note("Nothing is measured. This is a hit rate.")
+    note("")
+
+    if not session:preflight() then
+        note("PREFLIGHT FAILED -- not flying.")
+        return
+    end
+
+    note("== GROUND ==")
+    note(string.format("  props to %d rpm. Ions stay at zero collective, so there",
+        plan.propRpm))
+    note("  is no path to lift -- checked anyway.")
+    local spun, reason = session:setAllProps(plan.propRpm)
+    commandedProps = true
+    if not spun then
+        note("  could not set base props: " .. tostring(reason))
+        return
+    end
+    -- Let the props reach speed. A bearing below its rpm is INACTIVE and
+    -- stores the target rather than obeying it, which would read as the fault
+    -- this tool is looking for.
+    coast(6, false)
+
+    local groundOk, groundStop = confirm("ground, before", plan.tiltDegrees, false)
+    if groundStop then
+        note("")
+        note("  ground check stopped: " .. tostring(groundStop))
+        return
+    end
+    if not groundOk then
+        note("")
+        note("  ** THE GROUND CHECK FAILED. NOT FLYING.")
+        note("  ** Five ground runs have never failed. Something on the craft has")
+        note("  ** changed, and flying now would measure that instead of the")
+        note("  ** airborne fault. Run /fcs/bearingsweep.lua.")
+        report()
+        return
+    end
+
+    if not sawCommandedTiltEver then
+        note("")
+        note("  ** THE PODS ARE NOT PUBLISHING commandedTilt.")
+        note("  ** The bearings answered, so the flight is still worth making --")
+        note("  ** but if a confirm fails in the air this tool will NOT be able")
+        note("  ** to say whether the command was lost, refused, or applied and")
+        note("  ** ignored. That diagnosis is the reason it exists. Redeploy")
+        note("  ** pod-template to the four pod computers first if you can.")
+    end
+
+    if groundOnly then
+        report()
+        return
+    end
+
+    note("")
+    note("== CLIMB to +" .. plan.holdGain .. " ==")
+    if not session:arm() then
+        note("could not arm -- not flying.")
+        return
+    end
+    if not session:climb(plan.holdGain, plan.climbTimeout) then
+        note("climb failed or aborted")
+        clearTilt()
+        session:descend()
+        return
+    end
+
+    note("")
+    note("== AIR ==")
+    note("  signs alternate so the craft stays near where it took off. Confirm 1")
+    note("  is from a near-stationary hover and tests ALTITUDE; the later ones")
+    note("  follow real displacement and test MOTION.")
+
+    for index = 1, plan.repeats do
+        local sign = (index % 2 == 1) and 1 or -1
+        local _, stop = confirm(string.format("air %d", index),
+            sign * plan.tiltDegrees, true)
+        if stop then
+            note("")
+            note("  stopped during air confirm " .. index .. ": " .. tostring(stop))
+            break
+        end
+        if index < plan.repeats then
+            local coastStop = coast(plan.betweenSeconds, true)
+            if coastStop then
+                note("")
+                note("  stopped between confirms: " .. tostring(coastStop))
+                break
+            end
+        end
+    end
+
+    clearTilt()
+    note("")
+    note("== descend and land ==")
+    session:descend()
+
+    -- The second ground confirm, on the same craft that just flew. If the air
+    -- confirms failed and this one passes, the craft did not break -- it was
+    -- airborne.
+    note("")
+    note("== GROUND, after ==")
+    coast(4, false)
+    confirm("ground, after", plan.tiltDegrees, false)
+
+    report()
+end
+
+local function listenLoop()
+    while true do
+        if not banks.listen(1) then sleep(0.05) end
+    end
+end
+
+local ok, err = pcall(parallel.waitForAny, mainLoop, listenLoop)
+if not ok then
+    note("")
+    note("RUN ERROR: " .. tostring(err))
+end
+
+-- SHUTDOWN RUNS UNDER THE LISTENER, or its commands cannot be acknowledged.
+local function shutdown()
+    if commandedTilt then clearTilt() end
+
+    if not commandedProps then
+        note("")
+        note("  nothing was commanded; props untouched.")
+        pcall(session.finish, session)
+        return
+    end
+
+    session:sendProps(rolldamp.cornerRpm(plan.propRpm, 0,
+        { minimumRpm = config.propeller.minimumRpm }))
+
+    local state = session:read()
+    local altitude = state and session:craftY(state)
+    local gain = (altitude and session.groundY) and (altitude - session.groundY) or nil
+
+    if gain and gain > plan.groundedGain then
+        note("")
+        note(string.format("  STILL AIRBORNE at +%.1f -- leaving props at %d rpm.",
+            gain, plan.propRpm))
+        note("  Cutting them here removes ~52% of the lift. Land with")
+        note("  /fcs/bankctl.lua; the props and the bearings are level.")
+    else
+        local stopped, why = session:setAllProps(0)
+        if not stopped then
+            note("  WARNING: could not stop all props -- " .. tostring(why))
+        end
+    end
+
+    pcall(session.finish, session)
+end
+
+pcall(parallel.waitForAny, shutdown, listenLoop)
+save()

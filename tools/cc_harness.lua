@@ -224,13 +224,45 @@ harness.model = {
     -- A constant added to every bearing's reported thrust. Zero here; the
     -- craft measures about -442.6. See bearingThrust.
     bearingThrustOffset = 0,
-    -- Bearings that report active and do not answer a manual target.
+    -- Bearings that report active and do not answer a manual target. The POD
+    -- still accepts the command, so commandedTilt tracks it and tiltAngle does
+    -- not -- row 3 of tiltcheck's decision table.
     bearingsIgnoreTilt = false,
+    -- THE OTHER TWO ROWS OF THAT TABLE, so the diagnosis can be tested rather
+    -- than just the pass case.
+    --
+    -- lost: the set_tilt never reaches the pod. Nothing is applied, nothing is
+    -- rejected, commandedTilt stays where it was. Row 1.
+    tiltCommandsLost = false,
+    -- The same thing, but only above an absolute world y -- so the GROUND
+    -- confirm succeeds first and leaves a stale commandedTilt behind on every
+    -- pod. That stale value is why tiltcheck checks the AZIMUTH as well as the
+    -- angle: the angle is the same 1.00 every confirm and cannot tell this
+    -- command from the last one.
+    tiltCommandsLostAboveY = nil,
+    -- rejected: the pod refuses it -- isNewCommand's sequence gate -- and
+    -- answers with rejectReply, which increments commandsRejected and RECORDS
+    -- NO FAULT. Row 2, and the row HANDOFF believed was ruled out by "no
+    -- faults" when a rejectReply never produces one.
+    tiltCommandsRejected = false,
+    -- THE HYPOTHESIS THIS WHOLE TOOL EXISTS TO TEST, modelled: the bearings
+    -- answer on the ground and stop answering above an altitude. The POD still
+    -- accepts the command either way, so commandedTilt tracks and tiltAngle
+    -- does not -- row 3, but only in the air. Set to an absolute world y.
+    tiltFailsAboveY = nil,
     -- Create's universal drag: a tilt-implied acceleration reaches terminal
     -- velocity rather than integrating. This is why the craft cruises instead
     -- of accelerating away.
     universalDrag = 0.09,
 }
+
+-- Read at CALL time, not load time: harness.craft is assigned further down and
+-- a runner may move the craft before installing.
+function harness.tiltSuppressedByAltitude()
+    local ceiling = harness.model.tiltFailsAboveY
+    if not ceiling then return false end
+    return (harness.craft and harness.craft.y or 0) > ceiling
+end
 
 local commandCount = 0
 
@@ -278,7 +310,8 @@ local function bearingVectors(pod, rpm, b1, b2)
     -- models the same outcome from a different cause -- a bearing that reports
     -- active and still does not answer -- which is what the velocity tool's
     -- first flight appears to have hit.
-    local tilt = (math.abs(rpm) > 0 and not harness.model.bearingsIgnoreTilt)
+    local tilt = (math.abs(rpm) > 0 and not harness.model.bearingsIgnoreTilt
+        and not harness.tiltSuppressedByAltitude())
         and (pod.tiltAngle or 0) or 0
     local azimuth = math.rad(pod.tiltAzimuth or 0)
     local s, c = math.sin(math.rad(tilt)), math.cos(math.rad(tilt))
@@ -330,6 +363,13 @@ local function podTelemetry(corner, messageType)
         commandsSeen = pod.commandsSeen or 0,
         commandsApplied = pod.commandsApplied or 0,
         commandsRejected = pod.commandsRejected or 0,
+        lastReject = pod.lastReject,
+        -- state.lastTilt on the real pod: the angle the POD believes it
+        -- applied, written only by a set_tilt it ACCEPTED. Distinct from
+        -- prop.tiltAngle, which is what the BEARING actually did -- and the
+        -- difference between the two is the whole of tiltcheck's diagnosis.
+        commandedTilt = pod.commandedTilt,
+        commandedTiltAzimuth = pod.commandedTiltAzimuth,
         armed = pod.armed,
         -- currentPower is the pod's own unsnapped target; averagePower comes
         -- from getPower() on the hardware and is therefore SNAPPED. They are
@@ -364,7 +404,8 @@ local function podTelemetry(corner, messageType)
             -- now reproduces the trap instead of handing out clean numbers.
             active = math.abs(rpm) > 0 or nil,
             bearingsAssembled = true,
-            tiltAngle = (math.abs(rpm) > 0 and not harness.model.bearingsIgnoreTilt)
+            tiltAngle = (math.abs(rpm) > 0 and not harness.model.bearingsIgnoreTilt
+                and not harness.tiltSuppressedByAltitude())
                 and (pod.tiltAngle or 0) or 0,
             perBearing = bearingVectors(pod, rpm, b1, b2),
             faults = {},
@@ -446,6 +487,7 @@ harness.snapPower = snapPower
 -- what either the old props.lua comment or a naive reading of the axes said.
 local function commandedTilt()
     if harness.model.bearingsIgnoreTilt then return 0, 0 end
+    if harness.tiltSuppressedByAltitude() then return 0, 0 end
     local starboard, bow, n = 0, 0, 0
     for _, pod in pairs(pods) do
         local tilt = pod.tiltAngle or 0
@@ -973,6 +1015,25 @@ function harness.install(env)
                     end
                 elseif pod.id == recipient and message.type == "set_tilt" then
                     -- Set-and-hold, no arm gate, no watchdog -- like the pod.
+                    pod.commandsSeen = (pod.commandsSeen or 0) + 1
+                    local lostHere = harness.model.tiltCommandsLost
+                        or (harness.model.tiltCommandsLostAboveY
+                            and harness.craft.y > harness.model.tiltCommandsLostAboveY)
+                    if lostHere then
+                        -- Never arrived. Not applied, not rejected, and the
+                        -- pod's own commandedTilt does not move.
+                        dropped = true
+                    elseif harness.model.tiltCommandsRejected then
+                        pod.commandsRejected = (pod.commandsRejected or 0) + 1
+                        pod.lastReject = "replay"
+                        rejected = "replay"
+                    else
+                    pod.commandsApplied = (pod.commandsApplied or 0) + 1
+                    -- The POD's belief, set before the bearing is touched --
+                    -- exactly like pod/main.lua, which stores applied.angle
+                    -- and throws the per-bearing setManualTarget result away.
+                    pod.commandedTilt = message.angle
+                    pod.commandedTiltAzimuth = message.azimuth or 0
                     pod.tiltAngle = message.angle
                     pod.tiltAzimuth = message.azimuth or 0
                     -- MIRROR IS PART OF THE COMMAND, not a detail. An
@@ -980,8 +1041,10 @@ function harness.install(env)
                     -- 0.0 -- so a harness that ignores this flag reports
                     -- lateral force for a command that makes none.
                     pod.tiltMirror = message.mirror and true or false
+                    end
                 elseif pod.id == recipient and message.type == "clear_tilt" then
                     pod.tiltAngle, pod.tiltAzimuth, pod.tiltMirror = 0, 0, false
+                    pod.commandedTilt, pod.commandedTiltAzimuth = nil, nil
                 elseif pod.id == recipient and message.type ~= "status_request" then
                     -- other command types are ignored by this model
                 end
