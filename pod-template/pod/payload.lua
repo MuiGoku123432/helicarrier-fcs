@@ -92,6 +92,13 @@ function payload.status(messageType, ctx)
     telemetry.commandsApplied = state.commandsApplied
     telemetry.commandsRejected = state.commandsRejected
     telemetry.lastReject = state.lastReject
+    -- HOW MANY OF THIS CORNER'S BEARINGS ACCEPTED THE LAST TILT, and the first
+    -- refusal if any did. props.setTilt has always reported this per bearing;
+    -- pod/main.lua used to discard it, so a bearing refusing its target was
+    -- invisible from the FCS. See noteTiltResult.
+    telemetry.tiltBearings = state.lastTiltBearings
+    telemetry.tiltAccepted = state.lastTiltAccepted
+    telemetry.lastTiltError = state.lastTiltError
 
     telemetry.type = messageType or "status"
     return telemetry

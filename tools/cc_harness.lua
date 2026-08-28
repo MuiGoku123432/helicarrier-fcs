@@ -250,11 +250,49 @@ harness.model = {
     -- accepts the command either way, so commandedTilt tracks and tiltAngle
     -- does not -- row 3, but only in the air. Set to an absolute world y.
     tiltFailsAboveY = nil,
+    -- Does the MOD store the manual target at all? getManualTarget reads the
+    -- stored vector straight back out of the mod, so it separates two failures
+    -- that look identical from the corner aggregate:
+    --   stored, tilt 0   -- the mod took the target and the bearing sat still
+    --   not stored       -- setManualTarget never took
+    -- Default false: targets are stored, which is the documented behaviour
+    -- even at 0 rpm ("the target is stored and completely ignored").
+    bearingsRefuseTarget = false,
     -- Create's universal drag: a tilt-implied acceleration reaches terminal
     -- velocity rather than integrating. This is why the craft cruises instead
     -- of accelerating away.
     universalDrag = 0.09,
 }
+
+-- The tilt each of a corner's two bearings reports. Both answer together in
+-- this model -- the craft has never shown a split pair -- but the SHAPE is
+-- real, so a tool that reads per-bearing rows can be tested.
+function harness.perBearingTilt(pod, rpm)
+    local moved = math.abs(rpm) > 0
+        and not harness.model.bearingsIgnoreTilt
+        and not harness.tiltSuppressedByAltitude()
+    local angle = moved and (pod.tiltAngle or 0) or 0
+    return { angle, angle }
+end
+
+-- getManualTarget, read back out of the mod. Stored even when the bearing does
+-- not move -- which is exactly what makes it worth reading.
+function harness.perBearingTarget(pod)
+    if harness.model.bearingsRefuseTarget then return nil end
+    local angle = pod.commandedTilt
+    if type(angle) ~= "number" then return nil end
+    local tilt = math.rad(angle)
+    local swing = math.rad(pod.commandedTiltAzimuth or 0)
+    local horizontal = math.sin(tilt)
+    -- {sin(tilt)cos(swing), +/-cos(tilt), sin(tilt)sin(swing)}, as
+    -- pod/props.lua tiltTarget builds it. The second bearing of a pair faces
+    -- down, so its normal -- and its vertical sign -- is inverted.
+    return {
+        { horizontal * math.cos(swing), math.cos(tilt), horizontal * math.sin(swing) },
+        { horizontal * math.cos(swing + math.pi), -math.cos(tilt),
+          horizontal * math.sin(swing + math.pi) },
+    }
+end
 
 -- Read at CALL time, not load time: harness.craft is assigned further down and
 -- a runner may move the craft before installing.
@@ -408,6 +446,11 @@ local function podTelemetry(corner, messageType)
                 and not harness.tiltSuppressedByAltitude())
                 and (pod.tiltAngle or 0) or 0,
             perBearing = bearingVectors(pod, rpm, b1, b2),
+            -- PER BEARING, not per corner. A corner aggregate cannot show one
+            -- bearing of a pair answering while the other does not, and the
+            -- pod has been sampling both of these all along.
+            perBearingTilt = harness.perBearingTilt(pod, rpm),
+            perBearingTarget = harness.perBearingTarget(pod),
             faults = {},
         },
     }

@@ -96,6 +96,11 @@ local state = {
     commandsRejected = 0,
     untrusted = 0,
     lastReject = nil,
+    -- What the BEARINGS did with the last set_tilt, as opposed to what the pod
+    -- was asked for. See noteTiltResult.
+    lastTiltBearings = nil,
+    lastTiltAccepted = nil,
+    lastTiltError = nil,
 }
 
 -- Faults were an UNBOUNDED list, appended to and never cleared.
@@ -133,6 +138,64 @@ local function recordFault(text)
     end
 end
 
+
+-- ---------------------------------------------------------------------------
+-- WHAT THE BEARINGS ACTUALLY DID WITH A TILT.
+--
+-- props.setTilt returns a PER-BEARING report -- setManualTarget wrapped in a
+-- pcall for each bearing -- and this handler used to keep only `.angle`, the
+-- number the pod was ASKED for, and throw the report away. A bearing whose
+-- setManualTarget threw, or that had no such method, therefore reported a
+-- clean success up the wire and logged nothing at all.
+--
+-- THAT IS NOT HYPOTHETICAL. On 2026-08-28 a ground run read FL 8.00 with
+-- FR/RL/RR at 0.00, while all four pods' own counters showed every command
+-- SEEN and APPLIED -- seen minus applied equalled rejected to the message on
+-- every corner. The commands arrived, the pods accepted them, three corners'
+-- bearings did not move, and the one error that could have named why was
+-- discarded here.
+--
+-- recordFault collapses repeats into "x N" and is capped at FAULT_LIMIT, so
+-- calling this on every set_tilt cannot run the fault list away -- which it
+-- once did, destroying six runs of flight data.
+--
+-- WHAT THIS STILL CANNOT SAY: setManualTarget returning without throwing does
+-- not mean the bearing moved. Only getTiltAngle says that, and it is sampled
+-- elsewhere. This closes the case where the mod refuses OUT LOUD.
+local function noteTiltResult(applied)
+    local bearings = applied and applied.bearings
+    if type(bearings) ~= "table" then
+        state.lastTiltBearings, state.lastTiltAccepted = 0, 0
+        state.lastTiltError = "no per-bearing report"
+        recordFault("SET_TILT: no per-bearing report")
+        return
+    end
+
+    local total, accepted, firstError = 0, 0, nil
+    for index, result in pairs(bearings) do
+        total = total + 1
+        local failure = type(result) == "table" and result.error or nil
+        if failure then
+            if not firstError then
+                firstError = tostring(index) .. ": " .. tostring(failure)
+            end
+            recordFault("SET_TILT bearing " .. tostring(index) .. ": "
+                .. tostring(failure))
+        else
+            accepted = accepted + 1
+        end
+    end
+
+    state.lastTiltBearings = total
+    state.lastTiltAccepted = accepted
+    state.lastTiltError = firstError
+
+    -- NOT ONE BEARING TOOK IT. Said separately from the per-bearing faults:
+    -- this is the whole corner refusing, which is the shape the ground run saw.
+    if total > 0 and accepted == 0 then
+        recordFault("SET_TILT: no bearing on this corner accepted the target")
+    end
+end
 
 -- Written to disk so a pod that is running but silent can be diagnosed without
 -- standing in front of its screen. A crash leaves last_error.txt; a live pod
@@ -410,6 +473,8 @@ local function networkLoop()
                             acceptCommand(message)
                             state.lastTilt = applied and applied.angle
                             state.lastTiltAzimuth = applied and applied.azimuth
+                            -- The half this used to throw away.
+                            noteTiltResult(applied)
                             lightReply(senderId, "ack")
                         else
                             recordFault("SET_TILT: " .. tostring(applied))
@@ -558,6 +623,10 @@ local function displayLoop()
                 "commands_applied=" .. tostring(state.commandsApplied),
                 "commands_rejected=" .. tostring(state.commandsRejected),
                 "last_reject=" .. tostring(state.lastReject),
+                "last_tilt=" .. tostring(state.lastTilt),
+                "tilt_bearings=" .. tostring(state.lastTiltBearings),
+                "tilt_accepted=" .. tostring(state.lastTiltAccepted),
+                "last_tilt_error=" .. tostring(state.lastTiltError),
                 "untrusted_msgs=" .. tostring(state.untrusted),
                 "wireless_modem=" .. tostring(wirelessModem),
                 "rednet_open=" .. tostring(rednet.isOpen(wirelessModem)),

@@ -159,6 +159,49 @@ checkEqual("commandedTiltAzimuth is live", afterArm.commandedTiltAzimuth, 90)
 checkEqual("fallbackPower from config", afterArm.fallbackPower, 0.0)
 checkEqual("commsLossPower from config", afterArm.commsLossPower, 0.195)
 
+-- --- what the BEARINGS did with the last tilt ------------------------------
+--
+-- props.setTilt has always returned a per-bearing setManualTarget report and
+-- pod/main.lua used to keep only `.angle`. A bearing refusing its target was
+-- therefore invisible from the FCS -- and on 2026-08-28 three corners' bearings
+-- sat at 0.00 while every pod counter said the command was seen and applied.
+-- These three fields are the only channel that carries the refusal, so they
+-- are pinned here rather than left to be quietly dropped by a later edit.
+
+local tilted = payload.status("status", {
+    sample = { at = 1000, thrusters = { healthyThrusters = 32, faults = {} },
+               props = { active = true } },
+    state = {
+        faults = {},
+        lastTilt = 8.0,
+        lastTiltBearings = 2,
+        lastTiltAccepted = 1,
+        lastTiltError = "2: setManualTarget absent",
+    },
+    config = { corner = "RL" },
+    computerId = 4,
+    now = 1500,
+})
+checkEqual("tiltBearings is published", tilted.tiltBearings, 2)
+checkEqual("tiltAccepted is published", tilted.tiltAccepted, 1)
+checkEqual("lastTiltError is published", tilted.lastTiltError,
+    "2: setManualTarget absent")
+checkEqual("commandedTilt still rides alongside", tilted.commandedTilt, 8.0)
+
+-- A corner that has never been tilted reports ABSENT, not zero. A zero would
+-- read as "two bearings, none accepted", which is the failure itself.
+local untilted = payload.status("status", {
+    sample = { at = 1000, thrusters = { healthyThrusters = 32, faults = {} },
+               props = { active = true } },
+    state = { faults = {} },
+    config = { corner = "RR" },
+    computerId = 5,
+    now = 1500,
+})
+checkEqual("no tilt yet: bearings absent", untilted.tiltBearings, nil)
+checkEqual("no tilt yet: accepted absent", untilted.tiltAccepted, nil)
+checkEqual("no tilt yet: no error invented", untilted.lastTiltError, nil)
+
 -- --- a failed read must not erase the previous one -------------------------
 --
 -- refreshSample keeps the last good half rather than publishing nil, because

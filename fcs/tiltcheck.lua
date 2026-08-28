@@ -151,10 +151,28 @@ local plan = {
     -- checked anyway.
     liftAbort = 0.5,
     groundedGain = 0.6,
+
+    -- SEND THE FOUR-CORNER COMMAND EXACTLY ONCE, never repeating it.
+    --
+    -- This is bearingsweep's shape, and the difference between the two tools
+    -- may be the whole fault. bearingsweep sends four set_tilts in a tight
+    -- loop -- banks.send is a bare rednet.send with no yield, so they leave in
+    -- one tick -- and never repeats them. This tool re-sends every second, so
+    -- a command lost in that tick is covered by five retries.
+    --
+    -- On 2026-08-28 bearingsweep got FL 8.00 / FR 0.00 / RL 0.00 / RR 0.00 and
+    -- this tool got 4/4 two minutes later. --once removes the retries so the
+    -- two can be compared with the SAME instrumentation.
+    sendOnce = false,
+    -- Milliseconds between the four corner sends, so the burst stops being a
+    -- burst. Clamped: this sleeps inside the sample callback, and the pods'
+    -- watchdog is 750 ms.
+    sendSpacingMs = 0,
+    maxSendSpacingMs = 200,
 }
 
 local args = { ... }
-local groundOnly = false
+local groundOnly, sendOnceRequested = false, false
 for index = 1, #args do
     local argument = args[index]
     if argument == "--ground-only" then groundOnly = true
@@ -164,8 +182,18 @@ for index = 1, #args do
         plan.repeats = tonumber(args[index + 1]) or plan.repeats
     elseif argument == "--tilt" then
         plan.tiltDegrees = tonumber(args[index + 1]) or plan.tiltDegrees
+    elseif argument == "--rpm" then
+        plan.propRpm = tonumber(args[index + 1]) or plan.propRpm
+    elseif argument == "--once" then sendOnceRequested = true
+    elseif argument == "--spacing" then
+        local ms = tonumber(args[index + 1]) or 0
+        if ms < 0 then ms = 0 end
+        if ms > plan.maxSendSpacingMs then ms = plan.maxSendSpacingMs end
+        plan.sendSpacingMs = ms
     end
 end
+
+plan.sendOnce = sendOnceRequested
 
 local lines = {}
 local function note(text)
@@ -230,9 +258,18 @@ local function azimuthApart(a, b)
 end
 
 local lastTiltSentAt, tiltMessages = 0, 0
+-- Reset at the top of every confirm. --once uses this to send the command for
+-- that window exactly once.
+local windowTiltSends = 0
 
 local function commandTilt(starboard, bow)
     local now = os.epoch("utc")
+    local magnitudeWanted = math.abs(starboard) + math.abs(bow)
+    -- --once: one send per window. Going to ZERO is never suppressed -- that
+    -- is the command that stops things, and the stall neutralise depends on it.
+    if plan.sendOnce and magnitudeWanted > 0 and windowTiltSends > 0 then
+        return
+    end
     local changed = math.abs(starboard - applied.starboard) >= plan.resendDeadbandDegrees
         or math.abs(bow - applied.bow) >= plan.resendDeadbandDegrees
         or (starboard == 0 and bow == 0
@@ -243,12 +280,18 @@ local function commandTilt(starboard, bow)
 
     local magnitude = math.sqrt(starboard * starboard + bow * bow)
     local azimuth = azimuthFor(starboard, bow)
-    for _, corner in ipairs(flight.CORNERS) do
+    for index, corner in ipairs(flight.CORNERS) do
         banks.send(corner, "set_tilt", {
             angle = magnitude, azimuth = azimuth, bearing = nil, mirror = true,
         })
         tiltMessages = tiltMessages + 1
+        -- Break the burst apart. banks.send is a bare rednet.send with no
+        -- yield, so without this all four leave in the same tick.
+        if plan.sendSpacingMs > 0 and index < #flight.CORNERS then
+            sleep(plan.sendSpacingMs / 1000)
+        end
     end
+    if magnitude > 0 then windowTiltSends = windowTiltSends + 1 end
     applied.starboard, applied.bow = starboard, bow
     lastTiltSentAt = now
     if magnitude > 0 then commandedTilt = true end
@@ -330,6 +373,14 @@ local function snapshot()
             tiltAngle = prop and tonumber(prop.tiltAngle) or nil,
             active = prop and prop.active or nil,
             bearingRpm = prop and tonumber(prop.bearingRpm) or nil,
+            -- PER BEARING. The pod has sampled both of these every cycle since
+            -- 2026-08-26 and nothing on this side has ever read them.
+            -- perBearingTilt is getTiltAngle per bearing; perBearingTarget is
+            -- getManualTarget, the vector the MOD stored -- which separates
+            -- "the mod took the target and the bearing sat still" from
+            -- "setManualTarget never took".
+            perBearingTilt = prop and prop.perBearingTilt or nil,
+            perBearingTarget = prop and prop.perBearingTarget or nil,
             controllerRpm = prop and tonumber(prop.controllerRpm) or nil,
             telemetry = prop ~= nil,
         }
@@ -338,6 +389,23 @@ local function snapshot()
         end
     end
     return pods
+end
+
+-- The tilt angle a stored manual target implies.
+--
+-- pod/props.lua builds the target as
+--     { sin(tilt)cos(swing), +/-cos(tilt), sin(tilt)sin(swing) }
+-- about the bearing's own getBlockNormal, and the mod normalises it. Every
+-- bearing on this craft has a +/-Y normal -- a counter-rotating pair reads
+-- {0,1,0} and {0,-1,0} -- so the angle off vertical IS the tilt. Returns nil
+-- rather than guessing if the vector is not that shape.
+local function targetAngle(vector)
+    if type(vector) ~= "table" then return nil end
+    local x, y, z = vector[1], vector[2], vector[3]
+    if type(x) ~= "number" or type(y) ~= "number" or type(z) ~= "number" then
+        return nil
+    end
+    return math.deg(math.atan2(math.sqrt(x * x + z * z), math.abs(y)))
 end
 
 local function speedOf(state)
@@ -387,9 +455,39 @@ end
 
 local results = {}
 
+-- Per-bearing rows for one corner: what each bearing was TOLD (the stored
+-- manual target) against what it DID (getTiltAngle).
+local function bearingRows(corner, pod, magnitude)
+    local rows, stored, moved, seen = {}, 0, 0, 0
+    local tilts = pod.perBearingTilt
+    local targets = pod.perBearingTarget
+    if type(tilts) ~= "table" and type(targets) ~= "table" then
+        return nil, 0, 0, 0
+    end
+    for index = 1, 8 do
+        local tilt = type(tilts) == "table" and tonumber(tilts[index]) or nil
+        local target = type(targets) == "table" and targets[index] or nil
+        local wanted = targetAngle(target)
+        if tilt ~= nil or wanted ~= nil then
+            seen = seen + 1
+            if wanted and wanted >= magnitude * plan.answeredFraction then
+                stored = stored + 1
+            end
+            if tilt and math.abs(tilt) >= magnitude * plan.answeredFraction then
+                moved = moved + 1
+            end
+            rows[#rows + 1] = string.format("%s.%d told %s did %s", corner, index,
+                wanted and string.format("%.2f", wanted) or "--",
+                tilt and string.format("%.2f", tilt) or "--")
+        end
+    end
+    return rows, stored, moved, seen
+end
+
 local function confirm(label, starboard, airborne)
     local magnitude = math.abs(starboard)
     local azimuth = azimuthFor(starboard, 0)
+    windowTiltSends = 0
     local before = snapshot()
 
     local slowestLoop, previousAt = 0, os.epoch("utc")
@@ -473,6 +571,18 @@ local function confirm(label, starboard, airborne)
         if not pod.telemetry then noTelemetry = noTelemetry + 1 end
     end
 
+    -- PER BEARING, across all four corners.
+    local bearingLines, storedTotal, movedTotal, bearingsSeen = {}, 0, 0, 0
+    for _, corner in ipairs(flight.CORNERS) do
+        local rows, stored, moved, seen = bearingRows(corner, after[corner], magnitude)
+        if rows then
+            for _, row in ipairs(rows) do bearingLines[#bearingLines + 1] = row end
+            storedTotal = storedTotal + stored
+            movedTotal = movedTotal + moved
+            bearingsSeen = bearingsSeen + seen
+        end
+    end
+
     local messages = (tiltMessages - tiltAtOpen) + (propMessages - propAtOpen)
     local ok = answered == #flight.CORNERS
 
@@ -489,6 +599,22 @@ local function confirm(label, starboard, airborne)
         endGain and string.format("%+.1f", endGain) or "?",
         endDrift and string.format("%.0f", endDrift) or "?", peakSpeed))
     note(string.format("    roll %+.2f  pitch %+.2f", endRoll or 0, endPitch or 0))
+
+    -- The per-bearing rows, printed whenever they disagree with each other or
+    -- with the command. A pair that answers together needs no explanation.
+    if bearingsSeen > 0 and (movedTotal < bearingsSeen or storedTotal < bearingsSeen) then
+        note(string.format("    per bearing: %d/%d stored the target, %d/%d moved",
+            storedTotal, bearingsSeen, movedTotal, bearingsSeen))
+        local row = {}
+        for _, line in ipairs(bearingLines) do
+            row[#row + 1] = line
+            if #row == 2 then
+                note("      " .. table.concat(row, "   "))
+                row = {}
+            end
+        end
+        if #row > 0 then note("      " .. table.concat(row, "   ")) end
+    end
 
     -- THE DECISION TABLE. Only reached on a failure, and it says which of the
     -- three layers the command died in rather than "it did not work".
@@ -531,6 +657,23 @@ local function confirm(label, starboard, airborne)
         note(string.format("    -> %d corner(s) report prop.active FALSE. At 0 rpm"
             .. " a bearing", inactive))
         note("       STORES the target and ignores it. Check the props are turning.")
+    elseif bearingsSeen > 0 and storedTotal == 0 then
+        verdict = "TARGET NEVER STORED"
+        note("    -> setManualTarget DID NOT TAKE. The pod accepted the command")
+        note("       and called setManualTarget, but getManualTarget reads NOTHING")
+        note("       back out of the mod on any bearing. The failure is between")
+        note("       the pod and the mod, not in the link and not in the bearing.")
+        note("       pod/main.lua discards setManualTarget's per-bearing error, so")
+        note("       redeploy pod-template for the fault text that names it.")
+    elseif bearingsSeen > 0 and storedTotal > 0 and movedTotal == 0 then
+        verdict = "STORED, NOT OBEYED"
+        note("    -> THE MOD STORED THE TARGET AND THE BEARINGS DID NOT MOVE.")
+        note("       getManualTarget reads the commanded vector back, and")
+        note("       getTiltAngle stays at zero. props.lua documents exactly this")
+        note("       at 0 RPM -- 'the target is stored and completely ignored' --")
+        note("       so check the props are ACTUALLY turning, whatever")
+        note("       prop.active says. This is the strongest single clue the")
+        note("       craft can give and no tool has ever read it before.")
     else
         verdict = "BEARING IGNORED IT"
         note("    -> THE POD APPLIED IT AND THE BEARING DID NOT MOVE.")

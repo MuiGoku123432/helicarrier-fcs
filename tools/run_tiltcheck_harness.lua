@@ -11,6 +11,11 @@
 --   luajit tools/run_tiltcheck_harness.lua airborne     answers on the ground,
 --                                                       stops in the air --
 --                                                       THE HYPOTHESIS
+--   luajit tools/run_tiltcheck_harness.lua notarget     setManualTarget never
+--                                                       takes -- getManualTarget
+--                                                       reads nothing back
+--   luajit tools/run_tiltcheck_harness.lua once         --once, the shape
+--                                                       bearingsweep sends
 --   luajit tools/run_tiltcheck_harness.lua lostinair    the ground confirm
 --                                                       succeeds, then the link
 --                                                       eats every airborne
@@ -32,8 +37,9 @@
 package.path = "./?.lua;./?/init.lua;" .. package.path
 local harness = require("tools.cc_harness")
 
+local ONCE = false
 local MODES = { "works", "ground", "deadbearings", "lost", "rejected",
-    "airborne", "lostinair" }
+    "airborne", "lostinair", "notarget", "once" }
 local mode = arg[1] or "works"
 
 if mode == "all" then
@@ -83,6 +89,17 @@ elseif mode == "airborne" then
     -- must fail, and the report must say the fault is being airborne rather
     -- than shrugging at five failed corners.
     harness.model.tiltFailsAboveY = harness.craft.y + 2.0
+elseif mode == "notarget" then
+    -- The mod refuses the target outright. Distinct from deadbearings, where
+    -- the target IS stored and the bearing still does not move -- and no tool
+    -- could tell those apart before per-bearing rows were read.
+    harness.model.bearingsIgnoreTilt = true
+    harness.model.bearingsRefuseTarget = true
+elseif mode == "once" then
+    -- Nothing wrong with the craft; just the one-shot send shape. Must still
+    -- pass -- if --once fails on a healthy harness the flag is broken, not the
+    -- craft, and that would poison the whole ground matrix.
+    ONCE = true
 elseif mode == "lostinair" then
     -- THE CASE THE AZIMUTH CHECK EXISTS FOR. The ground confirm succeeds and
     -- leaves commandedTilt = 1.00 on all four pods. Every airborne set_tilt is
@@ -110,7 +127,9 @@ print(("-"):rep(72))
 local ok, err = pcall(function()
     harness.run({ function()
         local chunk = assert(loadfile("fcs/tiltcheck.lua"))
-        if mode == "ground" then chunk("--ground-only") else chunk() end
+        if mode == "ground" then chunk("--ground-only")
+        elseif ONCE then chunk("--ground-only", "--once", "--tilt", "8")
+        else chunk() end
     end }, true)
 end)
 
