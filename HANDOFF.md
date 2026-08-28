@@ -1,24 +1,25 @@
 # Helicarrier FCS — session handoff
 
-Last updated: 2026-08-27, end of session. **READ THE BLOCK BELOW, THEN
-`THE VELOCITY LOOP`.** In one line: station keeping works, and an intermittent
-fault that stops the bearings answering in flight is what blocks confirming it.
+Last updated: 2026-08-28, end of session. **READ THE BLOCK BELOW, THEN
+`THE UPLINK BLACKOUT`.** In one line: station keeping works, the thing that
+was blocking it is a COMMS fault and not a bearing fault, and half the craft
+now runs on a wired bus to prove it.
 
 What this session established, all of it measured:
 
-- **The velocity loop closed and held** -- net drift 1.409 -> 1.019 blocks/s,
-  against a design figure of 33%.
-- **The bearing actuator is INVERTED and SLOW.** A tilt commanded to push the
-  craft one way moves it the other once the hull catches up, after moving it
-  the right way for a few seconds. That sign change is the old 1.76 -> 11.5
-  blocks/s runaway, and it is now a measurement.
-- **The bearing lateral gain is 4x what two files store**, read off live
-  telemetry in a two-minute ground run rather than flown for.
-- **The drift curve is ONE oscillator: roll.** Pitch is overdamped and levels
-  itself, so it wants no damper -- which killed the premise the pitch tool was
-  built on.
-- **Three archived flight logs have TRANSPOSED angle columns**, including the
-  one this document's standing offsets came from.
+- **THE BEARINGS WERE NEVER THE PROBLEM.** "The bearings intermittently ignore
+  `set_tilt`" -- the headline of the previous handoff -- is WRONG. In flight
+  the commands do not arrive. The pods' own counters say so.
+- **The fault is a ~6 second UPLINK BLACKOUT.** All four pods go deaf at once
+  while their telemetry keeps flowing and the FCS loop stays healthy. One
+  transmitter, four receivers, downlink unaffected.
+- **FR and RR now run on a WIRED bus**, FL and RL on the radio, so the next
+  blackout attributes itself.
+- **A modem's open channels outlive the computer.** Three reboots could not
+  take a pod off the radio; only an explicit close could.
+- **Four hypotheses died on measurement**: command flooding, same-tick send
+  bursts, gyroscopic bearing slew, and rpm-dependent settle time. Each is
+  recorded below because the wrong answer is instructive.
 
 Written for a fresh session picking this up cold. Rewritten rather than
 patched: superseded findings are REMOVED, not annotated, except where the wrong
@@ -30,22 +31,19 @@ answer is instructive. Keep it that way.
 
 A ComputerCraft flight-control stack for a Create Aeronautics / CC:Sable
 helicarrier on a **creative superflat test server**. Five Advanced Computers:
-one main telemetry computer and four engine pods, over rednet.
+one main telemetry computer and four engine pods, over rednet -- and, since
+2026-08-28, over a wired network for two of the four.
 
 It logs flight data, commands propeller RPM, ion thruster power and bearing
 tilt, and can fly short scripted profiles (climb, hold, land). It does **not**
 have a pilot-facing controller yet.
 
 Source repo: **`~/repos/mine/luaScripts/helicarrier-fcs`** — a git repo, remote
-`git@github.com:MuiGoku123432/helicarrier-fcs.git`. Moved here 2026-08-26 from
-`~/repos/fcs-wireless-pods-v2`, which was NOT under version control and is now
-superseded; the two were byte-identical at the import, so nothing was lost.
+`git@github.com:MuiGoku123432/helicarrier-fcs.git`. `flight-logs/` is
+gitignored on purpose: it is experiment output, not source.
 
 **There is a safety net now.** The old "back up before large edits" warning is
-retired — commit instead. That matters more than it sounds: this session found
-four separate cases of a test or harness encoding the flight code's mistaken
-belief, and being able to bisect is worth more than any of the individual
-fixes.
+retired — commit instead.
 
 **Creative test world. The craft is expendable.** Prefer deploying a tool and
 gathering real data over perfecting the offline harness — but see
@@ -53,55 +51,89 @@ gathering real data over perfecting the offline harness — but see
 
 ---
 
-## WHERE THE 2026-08-27 SESSION LEFT OFF
+## WHERE THE 2026-08-28 SESSION LEFT OFF
 
-Read this block, then **THE VELOCITY LOOP**. Everything else in this file is
-background.
+Read this block, then **THE UPLINK BLACKOUT**. Everything else is background.
 
-### THE GOAL IS ESSENTIALLY MET, AND ONE FAULT BLOCKS CONFIRMING IT
+### THE BLOCKER WAS MISDIAGNOSED FOR A WEEK
 
-**Station keeping works.** Run 4 closed the velocity loop and cut net drift
+Station keeping works: run 4 closed the velocity loop and cut net drift
 **1.409 -> 1.019 blocks/s (28%)** against a proportional loop under-relaxed by
-half, which is *designed* to remove 33%. The loop did what it was built to do.
-
-**The gains reproduce**, which no bearing number on this craft had managed
-before:
+half, which is *designed* to remove 33%. The gains reproduce:
 
     pitch  -2.8029, -2.7900, -2.7814   three flights, 0.8% spread
     roll   -3.3601, -3.5603            two flights, 5.6% apart
 
-**THE BLOCKER: the bearings intermittently ignore `set_tilt` IN FLIGHT.** Five
-of five ground runs answer; two of six flights do not -- including one two
-minutes after a clean ground run. See **THE INTERMITTENT TILT FAULT**. Until
-that is understood, a flight can waste ten minutes or, worse, produce a number.
+What blocked confirming it was believed to be the bearings ignoring `set_tilt`
+in flight. **It is not.** On 2026-08-28 `/fcs/tiltcheck.lua` caught the fault
+in the air with instrumentation nobody had used before:
+
+    air 1 -- commanded +1.00 deg
+      bearing reports:  FL 0.00  FR 0.00  RL 0.00  RR 0.00
+      pod believes:     FL 0.00  FR 0.00  RL 0.00  RR 0.00
+      0/4 answered   pod accepted 0/4   rejects +0   timeouts +4
+      per bearing: 0/8 stored the target, 0/8 moved
+      -> THE COMMAND NEVER REACHED THE PODS.
+
+`commandedTilt` never left 0.00 on any corner, `commandsRejected` never moved,
+not one of the eight bearings had a target stored, and the pods logged four
+`COMMAND_TIMEOUT`s -- which means they agree they heard nothing. **There was
+nothing for a bearing to ignore.**
 
 ### WHAT TO DO NEXT, in order
 
-1. **Isolate the tilt fault with a 90-second flight**: climb, confirm the tilt,
-   land. No measurement. Repeat a few times for a hit rate, with a ground sweep
-   either side. That is the one experiment that separates "airborne" from
-   "our code" and it has not been run.
-2. **Give `trimflight.lua` and `pitchdampflight.lua` the same treatment the
-   velocity tool got** -- the set-and-hold throttle, the tilt readback, the
-   stall guard. Both still re-send at the sample rate and neither confirms the
-   tilt. Their measured couplings (-0.8205 / +0.5588) were taken without a
+1. **FLY `/fcs/tiltcheck.lua` REPEATEDLY.** Three minutes, no measurement, safe
+   to repeat. The blackout fires on roughly 2 flights in 7, and the decisive
+   outcome is a within-flight split: `wired 2/2 (FR RR)  wireless 0/2 (FL RL)`.
+   **A run of clean flights is NOT evidence** -- see the confound below.
+2. **Retrofit `/fcs/trimflight.lua` and `/fcs/pitchdampflight.lua`** with what
+   the velocity tool has: the set-and-hold command throttle, the tilt readback,
+   the stall guard. Their couplings (-0.8205 / +0.5588) were measured with no
    readback and are 1.45x smaller than the confirmed-tilt flight measured, so
-   **they are probably wrong**.
-3. Only then, a clean velocity-hold run. And if more than a third of the drift
-   is wanted, the lever is `relaxation` in `velocityhold.DEFAULTS` (0.5).
+   **they are probably wrong** and several conclusions rest on them.
+3. **Make commands closed-loop.** A six-second command blackout is what put the
+   craft at -15 degrees in run 6, and no diagnosis changes that a link can
+   drop. Re-send until telemetry confirms the achieved value, and treat
+   "unconfirmed after N seconds" as a condition the loop must act on.
+4. Only then, a clean velocity-hold run.
 
-### THE THREE THINGS THAT WILL BITE A FRESH SESSION
+### THE CONFOUND IN THE WIRED-BUS TEST, and it is the reason step 1 says what it says
+
+Moving FR and RR to the wire changed **two** things: the transport, and the
+radio load -- half the pod traffic left the air. So "the blackout stopped
+happening" cannot distinguish them.
+
+**The within-flight split is immune to that.** If the blackout fires and the
+wired pair survives while the wireless pair dies, both pairs saw the same radio
+load in the same instant and only the path differs. One firing settles it; five
+clean flights do not.
+
+### THE FOUR THINGS THAT WILL BITE A FRESH SESSION
 
 - **A loop that stops is more dangerous than a loop that is wrong.** Run 6
-  rolled to -15 degrees from a 1 degree command because the sample callback --
+  rolled to -15 degrees from a ONE degree command because the sample callback --
   which holds every abort, every limit and the damper -- stopped executing for
   six seconds. Guarded now; understand it before removing the guard.
-- **This craft was intermittently anomalous all day**: bearings ignoring tilt in
-  flight, lifting at 48 rpm where it had held to 64 three hours earlier, a
-  six-second stall. Between episodes it measures consistently. **A surprising
-  flight result is suspect until the craft has been shown to be behaving.**
+- **A modem's open channels are state on the MODEM, not the computer, and
+  survive a reboot.** FR and RR reported `modems_open=top,back` across three
+  reboots while every `rednet.open` in the pod correctly chose the wired modem.
+  `back` had been opened by code that ran before the config change and nothing
+  had ever closed it. `rednet.receive` takes from ANY open modem.
+- **CC tabs are separate Lua environments.** Replacing a function in one tab's
+  copy of a module does nothing to another tab's. `netdiag` monkey-patched
+  `network.open` to hold a modem closed and the telemetry tab reopened it
+  mid-measurement, four times out of five.
 - **LuaJIT is not the craft's Lua.** A `%+5s` passed every harness and killed a
   run on the carrier. `tools/test_formats.lua` catches that class now.
+
+### AND THE STATIC CHECKS HAD A HOLE
+
+`tools/test_globals.lua` and `tools/test_forwardrefs.lua` carry **hardcoded
+file lists**, and neither contained `fcs/tiltcheck.lua` -- a flight tool that
+commands the bearings, already flown four times, checked by nothing. Nor
+`network.lua`, `config.lua`, `main.lua`, `bankctl.lua` or ten others. Both now
+cover 46-47 files. Nothing was broken, but it was UNCHECKED, which is not the
+same thing. **If you add a file, add it to those lists.**
 
 ---
 
@@ -136,9 +168,10 @@ oscillation, seen from above.
               roll: FLOWN AND WORKING.  pitch: DOES NOT NEED IT (measured).
 
     layer 2   VELOCITY HOLD      seconds   bearing common-mode tilt
-              BUILT, not yet flown: fcs/velocityhold.lua +
-              /fcs/velocityholdflight.lua. The actuator is INVERTED
-              and SLOW -- see THE VELOCITY LOOP before touching it.
+              BUILT AND FLOWN: fcs/velocityhold.lua +
+              /fcs/velocityholdflight.lua. Run 4 closed the loop and
+              cut net drift 28% against a 33% design. The actuator is
+              INVERTED and SLOW -- read THE VELOCITY LOOP first.
 
     layer 3   ATTITUDE REFERENCE slow, weak, subordinate to layer 2
 
@@ -167,12 +200,28 @@ separation and the two loops chase each other.
    Pitch does not ring -- it is OVERDAMPED and it levels itself. No damper
    wanted. See **THE PITCH FLIGHT**. What replaces this: *what actually
    rotates the tilt vector*, since it is not an undamped pitch axis.
-3. **FLY VELOCITY HOLD -- `/fcs/velocityholdflight.lua`, BUILT AND WAITING.**
-   `--ground-only` first: it prints the plant, which is worth reading before
-   committing to air. Then `--measure-only` (phase A, ~5 min) measures the NET
-   gain per axis; the full run adds the A/B (~9 min). See **THE VELOCITY
-   LOOP**.
-4. Only then ask whether any standing trim is still wanted. Probably not.
+3. ~~FLY VELOCITY HOLD~~ **FLOWN 2026-08-27, SEVEN TIMES, AND IT WORKS.**
+   Run 4 closed the loop: net drift 1.409 -> 1.019 blocks/s, 28% against a 33%
+   design. The gains reproduce across flights. See **THE VELOCITY LOOP**.
+4. **ESTABLISH WHETHER THE UPLINK BLACKOUT IS FIXED** -- repeated
+   `/fcs/tiltcheck.lua` runs on the wired bus. Everything below is measured
+   through a link that intermittently stops delivering, and no control result
+   is safe until that is understood. See **THE UPLINK BLACKOUT**.
+5. Only then ask whether any standing trim is still wanted. Probably not.
+
+**AND THE TWO THINGS THE DRIFT ACTUALLY NEEDS NEXT, neither of which is a
+mystery:** the velocity loop is PURE PROPORTIONAL at `relaxation = 0.5`, so it
+is BUILT to leave 67% of the disturbance standing -- the residual drift is a
+tuning constant, not a failure, and the fix for steady-state error is an
+integral term that does not exist yet. And `rolldamp.differentialFor` takes
+RATE ONLY, so a constant roll offset is invisible to it by construction.
+
+**A STRUCTURAL LIMIT WORTH KNOWING BEFORE CHASING BOTH:** the bearings have no
+pure attitude channel, so cancelling drift REQUIRES a standing roll. At the
+measured gains, cancelling 1.409 blocks/s needs 0.419 commanded degrees, which
+is 0.419 x -1.2175 = about **-0.51 degrees of hull roll**. The observed standing
+roll is -0.615. Zero drift and zero roll are not simultaneously reachable with
+these actuators.
 
 ### What has FLOWN and works
 
@@ -239,7 +288,17 @@ design failed by asking one of them to do a job it is structurally incapable of.
 ### State of the craft, in one place
 
 - **Grounded and disarmed.** Computer 1 and all four pods are running current
-  code as of 2026-08-27.
+  code as of 2026-08-28.
+- **FR and RR are on a WIRED bus; FL and RL are on the radio.** Set by
+  `modemName = "wired"` in each pod's `config.lua`. The FCS opens every modem
+  it has. Verify with `/fcs/netdiag.lua` before any flight -- a wired corner
+  has no radio fallback.
+- **The FCS's wired modem sits on a 72-peripheral network** carrying the ion
+  thrusters, the rotation controllers and
+  `gyroscopic_propeller_bearing_3,4,5,6` -- FR's pair and RR's pair. Names like
+  `computer_1` on that network are NETWORK-ASSIGNED indices, exactly like
+  `ion_thruster_51`, and are NOT computer IDs: computer 1 calls itself
+  `computer_4` on that bus.
 - **bearing_5 repair: VERIFIED.** All four corners bit-for-bit identical under
   load. Do not re-investigate the RR deficit.
 - **The axis convention is CALIBRATED: bow = body +Z, port = body +X.**
@@ -323,7 +382,12 @@ the craft's mass, both of which move when the hull is loaded.
   nothing about the loop, whatever the two numbers did. There is a guard for
   that now.
 
-#### RUN 1, 2026-08-27: THE BEARINGS DID NOT MOVE
+#### RUN 1, 2026-08-27: NO RESPONSE AT ALL
+
+**Read this section knowing its conclusion was half wrong.** It says the
+bearings never moved, which is true, and implies the bearings were at fault,
+which is not: 2026-08-28 showed the commands never arrive. Kept because the
+REFUSAL was right and the framing is the mistake to avoid.
 
 `flight-logs/velocityholdflight_run1_noresponse.txt`, `--measure-only`.
 
@@ -382,7 +446,7 @@ Same craft, twenty minutes apart, same command shape.
 below fixed the watchdog starvation outright (212 COMMAND_TIMEOUTs to 4) and
 the tilt answered on four flights running. Then run 7 failed the same way at
 **8 messages a second**. The flooding is real and worth fixing; it is not what
-stops the bearings answering. See **THE INTERMITTENT TILT FAULT**.
+stops the commands arriving. See **THE UPLINK BLACKOUT**.
 
 The reasoning that led to the throttle, kept because the traffic problem it
 fixed was genuine: `set_tilt` and `set_rpm` have NO watchdog
@@ -536,66 +600,158 @@ had held to 64 three hours earlier, and now a six-second loop stall. Between
 episodes it measures consistently. **Treat a surprising flight result as
 suspect until the craft has been shown to be behaving**, and prefer ground runs.
 
-#### THE INTERMITTENT TILT FAULT -- the live blocker
+#### THE UPLINK BLACKOUT -- what the fault actually is
 
-**In flight, the bearings sometimes ignore `set_tilt`. On the ground they never
-have.** Every tilt-confirm result from 2026-08-27:
+**In flight, commands FCS->pod stop arriving for about six seconds. The
+bearings are not involved.** Caught 2026-08-28 by `/fcs/tiltcheck.lua`
+(`flight-logs/tiltcheck_flight1_uplink_blackout.txt`):
 
-| run | conditions | all four corners report |
-|---|---|---|
-| 2 | no throttle | **0.00 FAILED** |
-| 3 | throttle | 2.00 ok |
-| 4 | throttle | 1.00 ok |
-| 5 | throttle | 1.00 ok |
-| 6 | throttle | 1.00 ok, then a 6 s loop stall |
-| 7 | throttle, **8 msg/s** | **0.00 FAILED** |
+| | air 1 | air 2 | air 3 |
+|---|---|---|---|
+| bearings answered | **0/4** | 4/4 | 4/4 |
+| pod accepted the command | **0/4** | 4/4 | 4/4 |
+| `commandsRejected` delta | 0 | +1 | 0 |
+| `COMMAND_TIMEOUT` delta | **+4** | +1 | 0 |
+| bearings that stored a target | **0/8** | 8/8 | 8/8 |
+| slowest FCS loop | 201 ms | 199 ms | 226 ms |
 
-Ground sweep tilt readback: **five runs, five successes** -- including one taken
-**two minutes before run 7 failed**
-(`flight-logs/bearingsweep_run5_postanomaly.txt` then
-`velocityholdflight_run7.txt`). That pair is the cleanest statement of the
-fault available: same craft, same command shape, two minutes apart, ground
-works and flight does not.
+Five facts, and together they close the question:
 
-What is ruled out: the command shape (all four corners answer it on the
-ground), the pods refusing it (no faults), `prop.active` being false (it reads
-true in flight), and message rate (run 7 failed at 8/s where runs 3-6 succeeded
-at 10-12/s).
+1. **`commandedTilt` never moved off 0.00** on any corner. That field is
+   `state.lastTilt` on the pod, written only by a `set_tilt` the pod ACCEPTED.
+2. **`commandsRejected` never moved**, so nothing was refused.
+3. **No bearing stored a target.** `getManualTarget` read back nothing.
+4. **The pods logged four `COMMAND_TIMEOUT`s** -- armed, and no command inside
+   750 ms. They agree they heard nothing, and `set_power` was being lost too.
+5. **Telemetry kept flowing the whole time.** The slew trace recorded five
+   DISTINCT pod `sampleAt` values inside the window, so this is not stale cache.
 
-What is left, untested: something about being AIRBORNE, or a craft state that
-persists after an event -- run 7 followed run 6's stall and -15 degree roll by
-eleven minutes.
+The FCS loop was healthy at 201 ms. So: one transmitter, four receivers, all
+deaf at once, downlink unaffected, self-healing after ~6 s.
 
-**The next session should start here.** The cheapest discriminator that has not
-been run: a flight that climbs, confirms the tilt, and lands -- nothing else.
-Ninety seconds, no measurement, repeated a few times to get a hit rate. If it
-fails while a ground run either side of it succeeds, the fault is altitude or
-motion, not the code.
+**This is almost certainly the same event as run 6's "six second loop stall."**
+The loop was running; its commands were going nowhere.
 
-#### AND THE PROBE IS NOW 1 DEGREE, NOT 2
+#### FOUR HYPOTHESES THAT DIED, and each cost a theory
 
-At -3.36 blocks/s per degree a 2 degree probe drove the craft to 6.9 blocks/s
-against an 8.0 abort. trimflight flew 2 degrees twice "without incident" -- but
-through the flood, so that is not the reassurance it looks like.
+Recorded because the wrong answers are the map.
 
- A bearing only obeys a manual target while
-it is ACTIVE -- "at 0 RPM the target is stored and completely ignored:
-getTiltAngle stays 0 and getThrustVector does not move" (`props.lua`) -- and
-this tool read neither `prop.active` nor the achieved `prop.tiltAngle`.
-`bearingsweep` does; five findings in this document died of not doing it.
+- **COMMAND FLOODING.** 107 msg/s down to ~9 fixed a real watchdog-starvation
+  problem (212 `COMMAND_TIMEOUT`s to 4), and then run 7 failed at 8 msg/s where
+  runs 3-6 succeeded at 10-12. **Rate and failure are uncorrelated.**
+- **SAME-TICK SEND BURSTS.** `banks.send` is a bare `rednet.send` with no yield,
+  so four corner commands leave in one tick, and `bearingsweep` never retries.
+  Plausible -- and `tiltcheck --once` reproduced that exact shape at 8 deg /
+  48 rpm and got **4/4**. Dead.
+- **GYROSCOPIC BEARING SLEW.** The bearings are `gyroscopic_propeller_bearing_N`
+  and angular momentum resists reorientation, so slew should slow with rpm. The
+  numbers even lined up. Then the slew was MEASURED: **under 0.5 s at 32, 48 and
+  64 rpm.** Dead.
+- **RPM-DEPENDENT SETTLE TIME.** 3 s settles passed at 32 rpm and failed at 48,
+  so `bearingsweep` looked like it was reading too early. `tiltcheck` at
+  **48 rpm with a 3 s settle answered 4/4.** Dead.
 
-**FIXED, and this is THE RULE again.** Phase A now commands the probe tilt for
-6 s and reads every corner's `tiltAngle` back before measuring anything. If the
-four corners do not answer it aborts in ten seconds with the diagnosis instead
-of flying four minutes of nothing. Every measurement window also reports the
-achieved tilt, and a reverse pair whose halves did not reach the commanded
-angle is refused rather than reported as a gain.
+`bearingsweep`'s one ground failure on 2026-08-28 (FL 8.00, others 0.00) has
+never reproduced -- 7 `tiltcheck` ground runs, 28 of 28 corners, across 1 and
+8 degrees, 32/48/64 rpm, 3/6/12 s settles, one-shot and retrying. Treat it as
+the blackout landing on a ground run, not as a separate fault.
 
-**THE CHEAP NEXT STEP IS ON THE GROUND.** `/fcs/bearingsweep.lua` tilts FL to
-8 degrees at 64 rpm and reads the angle back -- two minutes, nothing armed. It
-returned `reported tilt 8.00` on 2026-08-27. If it still does, `set_tilt` works
-and the problem is specific to this tool or to flight; if it does not,
-something on the craft has changed since that run.
+#### WHAT IS RULED OUT, AND WHAT IS LEFT
+
+**Ruled out by measurement:** the command shape, pod rejection (`rejectReply`
+records no fault, so "no faults" never covered it -- `commandsRejected` does),
+`prop.active`, message rate, bearing slew, settle time, and the bearings
+themselves.
+
+**Ruled out by reading the source:** CC:Tweaked's wireless range. Its network
+computes `receiveRange = max(senderRange, receiverRange)` explicitly to keep
+range symmetrical, and **the craft runs Ender modems, verified in world**.
+Ender modems are interdimensional, so delivery short-circuits BEFORE the
+distance term. Sable's `WirelessNetworkMixin` redirects that distance
+calculation through `distanceSquaredWithSubLevels` -- a real moving-contraption
+code path sitting inside the delivery decision -- but **no distance, however
+wrong, can drop a packet these modems carry.**
+
+**What is left:** the receiver not being in the set the transmit iterated at
+all. That is Sable sublevel/registration state rather than geometry, and it is
+consistent with Sable's own known failures -- NaN poses, sublevels removed and
+re-added to the physics pipeline, a sublevel's stored location going wrong.
+
+**A SEPARATE, SMALLER FAULT: ~1% steady command loss.** Pod counters after a
+run read `telemetry_sends` identical on all four while `commands_seen` spread
+1051/1063/1057/1051. CC computers buffer **256 events** and drop the rest; the
+pods' ~160-getter sampler is exactly the workload that squeezes `modem_message`
+out of the queue. This explains the baseline, NOT the six-second blackout --
+that hit all four pods simultaneously while their samplers ran normally.
+
+#### THE WIRED BUS -- the experiment now standing on the craft
+
+FR and RR are on a **wired** network; FL and RL are on the radio.
+
+    FCS      opens EVERY modem. rednet.send transmits on all of them, so one
+             FCS reaches wired and wireless corners with no per-corner routing.
+    POD      opens EXACTLY ONE, chosen by config.modemName ("wired" /
+             "wireless" / a literal side).
+
+**One pod, one transport, or there is no A/B** -- `rednet.receive` cannot say
+which modem a message arrived on, so a pod listening on both that survives an
+outage proves nothing. Redundant delivery with sequence-gate dedup is the right
+PRODUCTION design and the wrong experiment.
+
+Verified on the ground with `/fcs/netdiag.lua`, which opens one modem at a time
+and counts probes the pods actually COUNTED:
+
+    modem            kind      FL          FR          RL          RR
+    bottom           wired     up0 downn   up5 downY   up0 downn   up5 downY
+    top              wireless  up5 downY   up4 downY   up5 downY   up4 downY
+
+The wired row is exact. The wireless row's `up4` on FR and RR is a
+MEASUREMENT artifact, not the craft: the telemetry tab reopened the FCS's
+wired modem mid-probe. The pods themselves report `modems_open=top` -- one
+modem each.
+
+**A wired corner has NO radio fallback.** If the cable fails it holds
+`commsLossPower` (0.195, near hover trim, not zero) while the other two take
+commands -- asymmetric lift, not a fall. Run `/fcs/netdiag.lua` on the ground
+before flying.
+
+**FIRST WIRED FLIGHT: all five confirms 4/4, and ZERO `COMMAND_TIMEOUT`s in the
+whole flight** (`flight-logs/tiltcheck_flight2_wiredbus_clean.txt`), where the
+blackout flight logged +4 and +1. The fault did not fire, so this settles
+nothing yet -- at ~2 in 7, one clean run is what the null predicts. **See the
+confound in the opening block.**
+
+#### THE TOOLS THIS SESSION ADDED
+
+- **`/fcs/tiltcheck.lua`** -- climb, confirm the tilt on all four corners with
+  alternating sign, land, with a ground confirm either side using the SAME
+  function so only altitude differs. ~3 min, no measurement, safe to repeat.
+  Reports per-bearing target-vs-achieved, the transport split, the slew trace,
+  and a decision-table verdict. `--ground-only --tilt --rpm --settle --once
+  --spacing --gain --repeats`.
+- **`/fcs/netdiag.lua`** -- which pod is on which wire, measured. ~30 s, ground,
+  commands nothing that moves. Uplink is measured through the pods' CUMULATIVE
+  `commandsSeen`, so it is readable even when the downlink under test is dead.
+
+#### TELEMETRY THAT WAS ALWAYS THERE AND NOBODY READ
+
+`pod/payload.lua` has published these since 2026-08-26. They are the reason the
+blackout was diagnosable at all:
+
+| field | means |
+|---|---|
+| `commandedTilt` | the angle the POD believes it applied |
+| `commandsRejected` / `lastReject` | the pod REFUSED a command -- and a `rejectReply` records NO fault |
+| `prop.perBearingTilt` | `getTiltAngle` per bearing |
+| `prop.perBearingTarget` | `getManualTarget` -- what the MOD stored |
+| `tiltBearings` / `tiltAccepted` / `lastTiltError` | added 2026-08-28: which bearings took the target |
+| `modemName` / `modemWireless` / `modems_open` | which transport this corner is on |
+
+`commandedTilt` against `prop.tiltAngle` partitions the fault three ways:
+never arrived, refused by the pod, or applied and ignored by the bearing.
+`perBearingTarget` splits that last one again: the mod stored it and the
+bearing sat still, versus `setManualTarget` never took.
+
 
 #### WHAT THIS SUPERSEDES
 
