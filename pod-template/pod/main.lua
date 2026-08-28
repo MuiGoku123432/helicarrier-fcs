@@ -138,6 +138,22 @@ props.load()
 
 local wirelessModem = findModem()
 local modemWireless = modemIsWireless(wirelessModem)
+
+-- CLOSE EVERYTHING FIRST, then open exactly one.
+--
+-- A modem's open channels are state on the MODEM, not on the computer, so they
+-- outlive a reboot. FR and RR were moved to the wired bus, both rednet.open
+-- calls on the pod correctly chose the wired modem, and the pods still reported
+-- modems_open=top,back across three reboots -- `back` had been opened by the
+-- code that ran BEFORE the config change and nothing ever closed it.
+--
+-- rednet.receive takes messages from ANY open modem, so a leftover channel puts
+-- the pod on a transport main.lua never chose. That is not a tidiness problem:
+-- it silently destroys the wired/wireless A/B, because a corner surviving an
+-- outage proves nothing about the wire if it was also on the radio.
+--
+-- Forcing the invariant is cheaper than reasoning about who opened what.
+pcall(rednet.close)
 rednet.open(wirelessModem)
 pcall(rednet.unhost, config.protocol, config.hostname)
 rednet.host(config.protocol, config.hostname)
