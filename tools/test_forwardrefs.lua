@@ -35,7 +35,7 @@ local FILES = {
     -- A hardcoded list silently omits every new file; that is the same shape as
     -- this project's signature failure, the rig agreeing with the code instead
     -- of the craft.
-    "fcs/tiltcheck.lua", "fcs/netdiag.lua", "fcs/network.lua",
+    "fcs/tiltcheck.lua", "fcs/netdiag.lua", "fcs/linkwatch.lua", "fcs/network.lua",
     "pod-template/pod/reboot_listener.lua",
     "fcs/config.lua", "fcs/protocol.lua", "fcs/atmosphere.lua",
     "fcs/csv.lua", "fcs/discover.lua", "fcs/peripherals.lua",

@@ -15,6 +15,11 @@ local harness = {}
 
 -- --- virtual clock ---------------------------------------------------------
 local now = 1787666000000
+-- Exported so a runner can express a fault WINDOW -- "the uplink dies from
+-- t+40 s to t+46 s" -- rather than only a permanent condition. An intermittent
+-- fault that a harness can only model as permanent is a fault the harness
+-- cannot test the detection of.
+harness.START = now
 local timers, nextTimer = {}, 1
 
 -- --- scheduler -------------------------------------------------------------
@@ -240,6 +245,22 @@ harness.model = {
     -- angle: the angle is the same 1.00 every confirm and cannot tell this
     -- command from the last one.
     tiltCommandsLostAboveY = nil,
+    -- THE BLACKOUT AS IT ACTUALLY BEHAVES: a WINDOW, not a state.
+    --
+    --   { from = 40000, to = 46000 }              wireless corners go deaf
+    --   { from = 40000, to = 46000, wiredToo = true }   all four do
+    --
+    -- Milliseconds since harness.START. The craft's fault lasts about six
+    -- seconds and self-heals, and a detector that only ever sees a permanent
+    -- outage has never been shown to find an edge -- neither the start of one
+    -- nor the recovery. wiredToo is the case that would kill the wired-bus
+    -- fix, so it has to be testable.
+    uplinkBlackout = nil,
+    -- The DOWNLINK equivalent: the pods stop reporting for a window while
+    -- their command counters keep advancing. This is the fault that must NOT
+    -- be reported as an uplink outage, and the only way to prove a tool tells
+    -- them apart is to hand it one and see.
+    podsSilentBetween = nil,
     -- CORNERS ON THE WIRED BUS, as a set: { FR = true, RR = true }. A wired
     -- corner is exempt from the uplink losses above, because a wired network
     -- is a connected graph and does not go through the spatial-query path that
@@ -300,6 +321,32 @@ harness.model = {
 -- real, so a tool that reads per-bearing rows can be tested.
 -- The angle a corner's bearings have actually REACHED, given the slew model.
 -- Instant when no rate is set, which is every pre-existing runner.
+-- Is this corner inside an uplink blackout window right now? Wired corners are
+-- exempt unless the window says otherwise -- which is the whole A/B.
+-- Is the DOWNLINK silent right now? Gates the unsolicited telemetry push AND
+-- the per-command ack, because a real downlink outage takes both -- the first
+-- version gated only the push, and the pod's ack to every 5 Hz probe kept the
+-- link looking alive through the whole modelled silence.
+function harness.podsSilentNow()
+    if harness.model.podsSilent then return true end
+    local window = harness.model.podsSilentBetween
+    if not window then return false end
+    local elapsed = now - harness.START
+    return elapsed >= (window.from or 0) and elapsed < (window.to or 0)
+end
+
+function harness.blackedOut(corner)
+    local window = harness.model.uplinkBlackout
+    if not window then return false end
+    local elapsed = now - harness.START
+    if elapsed < (window.from or 0) or elapsed >= (window.to or 0) then
+        return false
+    end
+    if window.wiredToo then return true end
+    local wired = harness.model.wiredCorners and harness.model.wiredCorners[corner]
+    return not wired
+end
+
 function harness.achievedTilt(pod, rpm)
     local target = pod.tiltAngle or 0
     local rate = harness.model.bearingSlewDegPerSecond
@@ -463,6 +510,11 @@ local function podTelemetry(corner, messageType)
         commandedTilt = pod.commandedTilt,
         commandedTiltAzimuth = pod.commandedTiltAzimuth,
         -- The transport this corner reports itself to be on.
+        -- TOP-LEVEL, as pod/payload.lua publishes it -- not the empty list
+        -- inside `prop`. Every tool that counts COMMAND_TIMEOUTs reads
+        -- pod.faults, and until now the harness never put anything there, so
+        -- that whole code path was untested offline.
+        faults = pod.faults,
         modemName = (harness.model.wiredCorners
             and harness.model.wiredCorners[corner]) and "top" or "back",
         modemWireless = not (harness.model.wiredCorners
@@ -899,10 +951,26 @@ local function advance(ms)
                 and (now - pod.lastCommandAt) > harness.model.ionCommandTimeoutMs then
                 pod.armed = false
                 pod.currentPower = harness.model.ionCommsLossPower
+                -- AND IT SAYS SO. pod/main.lua recordFault("COMMAND_TIMEOUT")
+                -- run-length collapses repeats into "COMMAND_TIMEOUT xN", and
+                -- that counter is the INDEPENDENT witness to an uplink outage
+                -- -- the one that does not come through commandsSeen. A
+                -- harness that models the fallback but not the fault cannot
+                -- test whether a tool cross-checks its two witnesses.
+                pod.faults = pod.faults or {}
+                local last = pod.faults[#pod.faults]
+                local count = last and tostring(last):match("^COMMAND_TIMEOUT x(%d+)$")
+                if count then
+                    pod.faults[#pod.faults] = "COMMAND_TIMEOUT x" .. (tonumber(count) + 1)
+                elseif last == "COMMAND_TIMEOUT" then
+                    pod.faults[#pod.faults] = "COMMAND_TIMEOUT x2"
+                else
+                    pod.faults[#pod.faults + 1] = "COMMAND_TIMEOUT"
+                end
             end
         end
 
-        if not harness.model.podsSilent then
+        if not harness.podsSilentNow() then
             for corner, pod in pairs(pods) do
                 if now >= pod.nextTelemetry then
                     pod.nextTelemetry = now + harness.model.telemetryPeriodMs
@@ -1086,7 +1154,20 @@ function harness.install(env)
             -- The pod applies the command and acks after a short latency.
             for corner, pod in pairs(pods) do
                 local dropped, rejected = false, nil
-                if pod.id == recipient and message.type == "set_rpm" then
+                if pod.id == recipient and harness.blackedOut(corner) then
+                    -- THE BLACKOUT TAKES EVERY COMMAND TYPE, not just set_tilt.
+                    --
+                    -- On 2026-08-28 the pods logged COMMAND_TIMEOUTs during the
+                    -- window, and that watchdog only fires when NO command of
+                    -- any kind has arrived for 750 ms -- so set_power was being
+                    -- lost too. A model that ate only set_tilt left set_power
+                    -- and set_rpm advancing commandsSeen right through the
+                    -- outage, which hides the outage from every tool that
+                    -- measures the link through that counter. The first
+                    -- linkwatch harness run showed exactly that: 30 commands
+                    -- missing on the wireless pair and not one gap detected.
+                    dropped = true
+                elseif pod.id == recipient and message.type == "set_rpm" then
                     commandCount = commandCount + 1
                     if harness.model.dropEveryNthCommand > 0
                         and commandCount % harness.model.dropEveryNthCommand == 0 then
@@ -1154,13 +1235,40 @@ function harness.install(env)
                     end
                 elseif pod.id == recipient and message.type == "set_tilt" then
                     -- Set-and-hold, no arm gate, no watchdog -- like the pod.
-                    pod.commandsSeen = (pod.commandsSeen or 0) + 1
                     local wired = harness.model.wiredCorners
                         and harness.model.wiredCorners[corner]
                     local lostHere = not wired
                         and (harness.model.tiltCommandsLost
                             or (harness.model.tiltCommandsLostAboveY
                                 and harness.craft.y > harness.model.tiltCommandsLostAboveY))
+                    -- THE ~1% STEADY LOSS, modelled for set_tilt too.
+                    --
+                    -- CC computers buffer 256 events and drop the rest, and
+                    -- the pods' ~160-getter sampler is exactly the workload
+                    -- that squeezes modem_message out of the queue. That
+                    -- baseline is a DIFFERENT fault from the six-second
+                    -- blackout, and a gap detector that cannot tell them apart
+                    -- would report an outage on a healthy craft -- so the
+                    -- harness has to be able to hand it the baseline alone.
+                    commandCount = commandCount + 1
+                    if not lostHere and harness.model.dropEveryNthCommand > 0
+                        and commandCount % harness.model.dropEveryNthCommand == 0 then
+                        lostHere = true
+                    end
+                    -- COUNTED ONLY IF IT ARRIVED.
+                    --
+                    -- This increment used to sit above the loss check, which
+                    -- made the harness disagree with pod/main.lua: the real
+                    -- pod increments state.commandsSeen INSIDE its receive
+                    -- handler, so a command that never reaches the pod cannot
+                    -- move the counter. Counting a lost command made every
+                    -- uplink-loss mode invisible to any tool that measures the
+                    -- link through commandsSeen -- which is how /fcs/netdiag
+                    -- and /fcs/linkwatch measure it, and the one thing the
+                    -- harness must not get wrong for them.
+                    if not lostHere then
+                        pod.commandsSeen = (pod.commandsSeen or 0) + 1
+                    end
                     if lostHere then
                         -- Never arrived. Not applied, not rejected, and the
                         -- pod's own commandedTilt does not move.
@@ -1202,7 +1310,7 @@ function harness.install(env)
                 elseif pod.id == recipient and message.type ~= "status_request" then
                     -- other command types are ignored by this model
                 end
-                if pod.id == recipient and not harness.model.podsSilent and not dropped then
+                if pod.id == recipient and not harness.podsSilentNow() and not dropped then
                     local reply = podTelemetry(corner,
                         rejected and "fault"
                         or (message.type == "set_rpm" and "ack" or "status"))
