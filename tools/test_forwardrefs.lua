@@ -36,6 +36,7 @@ local FILES = {
     -- this project's signature failure, the rig agreeing with the code instead
     -- of the craft.
     "fcs/tiltcheck.lua", "fcs/netdiag.lua", "fcs/network.lua",
+    "pod-template/pod/reboot_listener.lua",
     "fcs/config.lua", "fcs/protocol.lua", "fcs/atmosphere.lua",
     "fcs/csv.lua", "fcs/discover.lua", "fcs/peripherals.lua",
     "fcs/mixer_profile.lua", "fcs/snapshot.lua", "fcs/airprofile.lua",

@@ -22,10 +22,42 @@ end
 local config = require("pod.config")
 local protocol = require("pod.protocol")
 
-local function findWirelessModem()
-    if config.wirelessModemName then
-        return config.wirelessModemName
+-- SAME MODEM main.lua CHOSE. Not "any wireless one".
+--
+-- rednet's set of open modems is PER COMPUTER, not per tab. This listener runs
+-- in its own tab, so opening a modem here opens it for main.lua's networkLoop
+-- too -- and rednet.receive takes messages from ANY open modem.
+--
+-- MEASURED 2026-08-28. FR and RR were moved to the wired bus and opened only
+-- their wired modem in main.lua, and netdiag still found them reachable on the
+-- RADIO: they counted 10 probes across the two transports where FL and RL
+-- counted 5. This tab was holding the wireless modem open behind main.lua's
+-- back. That silently destroys the transport A/B -- a pod surviving an outage
+-- proves nothing if it was listening on both paths.
+--
+-- Honouring modemName also keeps remote reboot working on a wired corner: the
+-- FCS opens every modem it has, so it reaches this listener over the cable.
+local function findModem()
+    local configured = config.modemName or config.wirelessModemName
+
+    if configured == "wired" or configured == "wireless" then
+        local want = (configured == "wireless")
+        for _, name in ipairs(peripheral.getNames()) do
+            if peripheral.hasType(name, "modem") then
+                local modem = peripheral.wrap(name)
+                if type(modem.isWireless) == "function" then
+                    local ok, wireless = pcall(modem.isWireless)
+                    if ok and (wireless and true or false) == want then
+                        return name
+                    end
+                end
+            end
+        end
+        return nil
     end
+
+    if configured then return configured end
+
     for _, name in ipairs(peripheral.getNames()) do
         if peripheral.hasType(name, "modem") then
             local modem = peripheral.wrap(name)
@@ -37,9 +69,9 @@ local function findWirelessModem()
     return nil
 end
 
-local modem = findWirelessModem()
+local modem = findModem()
 if not modem then
-    print("reboot listener: no wireless modem; nothing to listen on")
+    print("reboot listener: no modem matching config.modemName")
     return
 end
 
