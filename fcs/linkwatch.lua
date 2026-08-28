@@ -426,6 +426,17 @@ end
 
 local phase = "startup"
 local sawSampleAt = false
+-- OBSERVATION IS NOT CONTINUOUS, and the cadence estimate must know it.
+--
+-- The descent runs Session:descend, which has no sample hook, so observe()
+-- stops for the whole landing. The first flight recorded that as a 51153 ms
+-- telemetry interval -- a number that says nothing about the pods and drags
+-- both the median and the spread with it. An interval measured across a gap
+-- in the OBSERVER is not a measurement of the OBSERVED.
+--
+-- Same class of bug as the stall detector's previousAt, which was fixed at
+-- phase boundaries and then missed here.
+local resumed = true
 -- The span the watch actually covered, measured rather than assumed. The
 -- verdict used to quote plan.holdSeconds, which is a plan and not an
 -- observation -- a --ground-only run claimed 180 s of exposure it never had.
@@ -527,7 +538,7 @@ local function observe(now, state)
             entry.frameSource = entry.frameSource or source
 
             if stamp and stamp ~= entry.lastSampleAt then
-                if entry.lastFrameAt then
+                if entry.lastFrameAt and not resumed then
                     local interval = now - entry.lastFrameAt
                     if interval > 0 then
                         entry.intervals[#entry.intervals + 1] = interval
@@ -636,6 +647,17 @@ local function observe(now, state)
     end
 end
 
+-- The first observation after a break establishes the clocks without recording
+-- an interval; every one after it measures normally.
+local function endOfObservation()
+    resumed = false
+end
+
+-- Call before any phase that stops observing, so the next interval is dropped.
+local function observationBreak()
+    resumed = true
+end
+
 -- Close whatever is still open, so a blackout that is still running when the
 -- flight ends is counted rather than discarded.
 local function closeOpen(now)
@@ -699,6 +721,7 @@ local function tick(state, now, airborne)
     commandProps(feed(state, now))
     probe(now)
     observe(now, state)
+    endOfObservation()
     checkStall(now)
 
     if state and state.valid then
@@ -721,6 +744,7 @@ local function watchFor(seconds, airborne, label)
     -- a 1.3 s stall on a healthy run. A stall detector that cries wolf is one
     -- that gets ignored on the run that matters.
     previousAt = os.epoch("utc")
+    observationBreak()
     return session:hold(seconds, function(state, now)
         return tick(state, now, airborne)
     end)
@@ -906,6 +930,55 @@ local function report()
     local wireless = outageFor["wireless"] or 0
     local haveBoth = byTransport["wired"] ~= nil and byTransport["wireless"] ~= nil
 
+    -- SUB-THRESHOLD LOSS OUTRANKS A CLEAN GAP COUNT.
+    --
+    -- The first flight reported "NO UPLINK OUTAGE" above 354 COMMAND_TIMEOUTs
+    -- and 23% command loss on every corner. Both statements were true: every
+    -- loss burst was shorter than the 3.6 s floor the measured cadence
+    -- produced, so no gap opened. But a headline that says "no outage" over a
+    -- link losing a quarter of its commands is a lie by omission, and this
+    -- tool exists because this project spent a week believing one.
+    --
+    -- A gap count answers "was there a BLACKOUT". It does not answer "is the
+    -- link healthy", and only one of those was ever in the headline.
+    local timeoutTotal, worstLoss = 0, 0
+    for _, corner in ipairs(flight.CORNERS) do
+        local entry = watch[corner]
+        local timeouts = (entry.lastTimeouts and entry.firstTimeouts)
+            and (entry.lastTimeouts - entry.firstTimeouts) or 0
+        timeoutTotal = timeoutTotal + timeouts
+        local counted = (entry.firstSeen and entry.lastSeen)
+            and (entry.lastSeen - entry.firstSeen) or 0
+        local sent = (entry.sentAtLastAdvance or 0) - (entry.sentAtStart or 0)
+        local loss = (sent > 0) and (100 * (sent - counted) / sent) or 0
+        if loss > worstLoss then worstLoss = loss end
+    end
+
+    if timeoutTotal > 0 and wired == 0 and wireless == 0 then
+        note("  ** THE LINK LOST COMMANDS AND NO GAP WAS LONG ENOUGH TO SHOW IT. **")
+        note("")
+        note(string.format("  %d COMMAND_TIMEOUTs and up to %.1f%% command loss, with ZERO",
+            timeoutTotal, worstLoss))
+        note(string.format("  gaps -- so every loss burst was shorter than the %.1f s floor",
+            gapThresholdMs(watch.FL) / 1000))
+        note("  the measured telemetry cadence produced. This is NOT the six-second")
+        note("  blackout, and it is NOT a clean flight.")
+        note("")
+        local wiredT = (byTransport["wired"] and byTransport["wired"].timeouts) or 0
+        local wirelessT = (byTransport["wireless"] and byTransport["wireless"].timeouts) or 0
+        if haveBoth and wiredT > 0 and wirelessT > 0 then
+            note(string.format("  It is also NOT the transport: wired %d timeouts against",
+                wiredT))
+            note(string.format("  wireless %d. Both paths, the same rate. That leaves this", wirelessT))
+            note("  computer's sending, the pods' receiving, or THIS TOOL'S OWN LOAD.")
+            note("")
+            note("  Re-fly at --rate 1. If the loss falls with the probe rate, the")
+            note("  instrument was the fault and the probe rate has to come down")
+            note("  before anything it reports means anything.")
+        end
+        note("")
+    end
+
     if not haveBoth then
         note("  CANNOT SPLIT. This run did not see both a wired and a wireless")
         note("  corner reporting its own transport. Either the pods are running")
@@ -914,11 +987,12 @@ local function report()
     elseif wired == 0 and wireless == 0 then
         local watched = (firstObserveAt and lastObserveAt)
             and (lastObserveAt - firstObserveAt) / 1000 or 0
-        note("  NO UPLINK OUTAGE, AND THAT SETTLES NOTHING. The fault fires on")
-        note("  roughly 2 flights in 7, so one clean run is exactly what the null")
-        note(string.format("  predicts. This run watched the link for %.0f s against tiltcheck's", watched))
-        note("  ~18 s, so it is worth much more than a clean tiltcheck -- but it")
-        note("  is not an answer. Fly it again.")
+        note("  NO GAP LONGER THAN THE FLOOR, AND THAT SETTLES NOTHING. The")
+        note("  blackout fires on roughly 2 flights in 7, so one clean run is")
+        note("  exactly what the null predicts.")
+        note(string.format("  This run watched the link for %.0f s against tiltcheck's ~18 s,", watched))
+        note("  so it is worth much more than a clean tiltcheck -- but it is not")
+        note("  an answer. Fly it again.")
         local downTotal = 0
         for _, corner in ipairs(flight.CORNERS) do
             downTotal = downTotal + totalDownlink(watch[corner])
@@ -1018,8 +1092,21 @@ local function report()
     note("")
     note("== RUN ==")
     note("")
-    note(string.format("  probes %d at %.1f Hz per corner   prop commands %d",
-        probeMessages, plan.probeRate, propMessages))
+    -- THE ACHIEVED RATE, not the requested one. The first flight asked for
+    -- 5 Hz and delivered 2.5: the sample callback's real period on the craft
+    -- is ~400 ms, not the 100 ms in the plan, and probe() fires once per
+    -- callback. Printing the plan here reported a rate that never happened,
+    -- which is the exact failure mode this project keeps paying for.
+    local watched = (firstObserveAt and lastObserveAt)
+        and (lastObserveAt - firstObserveAt) / 1000 or 0
+    local achieved = (watched > 0) and (probesSent.FL / watched) or 0
+    note(string.format("  probes %d   ACHIEVED %.2f Hz per corner (asked %.1f)   prop commands %d",
+        probeMessages, achieved, plan.probeRate, propMessages))
+    if plan.probeRate > 0 and achieved < plan.probeRate * 0.8 then
+        note(string.format("  ** the loop could not carry %.1f Hz. Every rate-dependent",
+            plan.probeRate))
+        note("  ** statement in this report means the ACHIEVED rate.")
+    end
     note(string.format("  slowest loop %d ms   peak speed %.2f blocks/s", slowestLoop, peakSpeed))
     note(string.format("  final drift %s blocks   final altitude %s",
         endDrift and string.format("%.0f", endDrift) or "--",
@@ -1102,6 +1189,7 @@ local function mainLoop()
     end
 
     previousAt = os.epoch("utc")
+    observationBreak()
     local climbed, climbWhy = session:climb(plan.holdGain, plan.climbTimeout,
         function(state, now)
             -- climb() ignores what an onSample returns, so aborts here are
@@ -1109,6 +1197,7 @@ local function mainLoop()
             commandProps(feed(state, now))
             probe(now)
             observe(now, state)
+            endOfObservation()
             checkStall(now)
             if state and state.valid then
                 endDrift = displacement(state) or endDrift
@@ -1138,6 +1227,7 @@ local function mainLoop()
     note("")
     note("== descend and land ==")
     note("  the descent is NOT watched: Session:descend has no sample hook.")
+    observationBreak()
     session:descend()
 
     note("")

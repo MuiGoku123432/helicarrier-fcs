@@ -15,6 +15,14 @@
 --   luajit tools/run_linkwatch_harness.lua noise      the steady ~1% command
 --                                                     loss alone -- must report
 --                                                     ZERO gaps
+--   luajit tools/run_linkwatch_harness.lua bursty     short losses on BOTH
+--                                                     transports, every one
+--                                                     under the gap floor --
+--                                                     what the craft actually
+--                                                     did. Zero gaps, many
+--                                                     COMMAND_TIMEOUTs, and
+--                                                     the verdict must REFUSE
+--                                                     to call it clean
 --   luajit tools/run_linkwatch_harness.lua flight     climb, hold, land
 --   luajit tools/run_linkwatch_harness.lua all
 --
@@ -38,7 +46,7 @@
 package.path = "./?.lua;./?/init.lua;" .. package.path
 local harness = require("tools.cc_harness")
 
-local MODES = { "works", "blackout", "allfour", "downlink", "noise", "flight" }
+local MODES = { "works", "blackout", "allfour", "downlink", "noise", "bursty", "flight" }
 local mode = arg[1] or "works"
 
 if mode == "all" then
@@ -112,6 +120,17 @@ elseif mode == "noise" then
     GROUND_SECONDS = 40
     harness.model.dropEveryNthCommand = 100
     EXPECT.uplinkGaps = 0
+elseif mode == "bursty" then
+    -- 0.8 s deaf every 3.5 s, on BOTH transports -- the shape the first real
+    -- flight produced. Each burst is far below the gap floor the 1000 ms
+    -- harness cadence yields, so the gap count stays zero and the only
+    -- evidence is the timeout counter and the loss rate. The tool used to
+    -- print "NO UPLINK OUTAGE" over exactly this.
+    harness.model.uplinkBurstLoss = { everyMs = 3500, durationMs = 800,
+        wiredToo = true }
+    EXPECT.uplinkGaps = 0
+    EXPECT.someTimeouts = true
+    EXPECT.verdict = "THE LINK LOST COMMANDS AND NO GAP WAS LONG ENOUGH"
 elseif mode == "flight" then
     GROUND_SECONDS = 10
 elseif mode ~= "works" then
@@ -254,6 +273,17 @@ if EXPECT.someDownGaps then
     end
     if not findLine("DOWNLINK silence") then
         fail("expected the cross-check to name the downlink silence")
+    end
+end
+
+if EXPECT.someTimeouts then
+    local seen = 0
+    for _, line in ipairs(captured) do
+        local n = line:match("(%d+) COMMAND_TIMEOUTs")
+        if n then seen = seen + tonumber(n) end
+    end
+    if seen == 0 then
+        fail("expected COMMAND_TIMEOUTs from the burst loss, report showed none")
     end
 end
 

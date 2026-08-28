@@ -256,6 +256,15 @@ harness.model = {
     -- nor the recovery. wiredToo is the case that would kill the wired-bus
     -- fix, so it has to be testable.
     uplinkBlackout = nil,
+    -- REPEATING SHORT OUTAGES: { everyMs = 3500, durationMs = 800 }.
+    --
+    -- This is what the craft actually produced on the first linkwatch flight:
+    -- 88 COMMAND_TIMEOUTs per corner and 23% command loss, in bursts far too
+    -- short to trip a gap threshold derived from a 1200 ms telemetry cadence.
+    -- A model that only offers "healthy" and "deaf for six seconds" cannot
+    -- test the case a tool is most likely to meet -- or the verdict that has
+    -- to refuse to call it clean.
+    uplinkBurstLoss = nil,
     -- The DOWNLINK equivalent: the pods stop reporting for a window while
     -- their command counters keep advancing. This is the fault that must NOT
     -- be reported as an uplink outage, and the only way to prove a tool tells
@@ -336,14 +345,23 @@ function harness.podsSilentNow()
 end
 
 function harness.blackedOut(corner)
+    local elapsed = now - harness.START
+    local wired = harness.model.wiredCorners and harness.model.wiredCorners[corner]
+
+    local burst = harness.model.uplinkBurstLoss
+    if burst and (burst.wiredToo == nil or burst.wiredToo or not wired) then
+        local everyMs = burst.everyMs or 3500
+        if everyMs > 0 and (elapsed % everyMs) < (burst.durationMs or 800) then
+            return true
+        end
+    end
+
     local window = harness.model.uplinkBlackout
     if not window then return false end
-    local elapsed = now - harness.START
     if elapsed < (window.from or 0) or elapsed >= (window.to or 0) then
         return false
     end
     if window.wiredToo then return true end
-    local wired = harness.model.wiredCorners and harness.model.wiredCorners[corner]
     return not wired
 end
 
