@@ -164,7 +164,24 @@ end
 -- the measurement depends on.
 -- ---------------------------------------------------------------------------
 
-local function openOnly(name)
+-- THE RACE THIS EXISTS TO CLOSE, and the first run of this tool hit it.
+--
+-- banks.listen runs in its own coroutine and calls network.open() every pass.
+-- network.open() re-opens EVERY modem unless the one it remembers is already
+-- open -- so between `rednet.close()` and setting network.openedModem, the
+-- listener could put every modem back and the "isolated" phase was not
+-- isolated. The 2026-08-28 first run showed it plainly: with only the WIRED
+-- modem open, all four pods counted 2 of 5 probes on a transport they were not
+-- listening to. Those probes went out while the radio was open again.
+--
+-- So network.open is replaced outright for the duration. Nothing can reopen
+-- behind us, whatever coroutine asks.
+local realOpen = network.open
+local pinned = false
+
+local function pinTo(name)
+    network.open = function() return true end
+    pinned = true
     pcall(rednet.close)
     local ok = pcall(rednet.open, name)
     network.openedModem = ok and name or nil
@@ -173,6 +190,10 @@ local function openOnly(name)
 end
 
 local function openAll()
+    if pinned then
+        network.open = realOpen
+        pinned = false
+    end
     pcall(rednet.close)
     network.openedModem = nil
     network.openedModems = {}
@@ -377,7 +398,7 @@ local function mainLoop()
         wait(plan.settleSeconds)
         local before = podSnapshot()
 
-        if not openOnly(entry.name) then
+        if not pinTo(entry.name) then
             note("     could not open it; skipped.")
         else
             local during = podSnapshot()
@@ -404,13 +425,26 @@ local function mainLoop()
             end
             matrix[#matrix + 1] = row
 
-            local shown = {}
+            local shown, partial = {}, 0
             for _, corner in ipairs(flight.CORNERS) do
                 local cell = row.corners[corner]
                 shown[#shown + 1] = string.format("%s up%s down%s", corner,
                     cell.up and tostring(cell.up) or "?", cell.down and "Y" or "n")
+                -- A clean result is 0 or all of them. Anything between means
+                -- the probes did not all travel the same way, and the cell is
+                -- not evidence about this transport.
+                if cell.up and cell.up > 0 and cell.up < plan.probesPerCorner then
+                    partial = partial + 1
+                end
             end
             note("     " .. table.concat(shown, "   "))
+            if partial > 0 then
+                note(string.format("     ** %d corner(s) counted SOME but not all %d probes.",
+                    partial, plan.probesPerCorner))
+                note("     ** A partial count is not evidence about this transport --")
+                note("     ** the probes did not all travel the same way. Suspect other")
+                note("     ** traffic on the link, or something reopening modems.")
+            end
         end
     end
 
