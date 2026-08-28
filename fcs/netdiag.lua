@@ -407,6 +407,23 @@ local function mainLoop()
         if not pinTo(entry.name) then
             note("     could not open it; skipped.")
         else
+            -- DID THE ISOLATION ACTUALLY HOLD? Measured, not assumed. The
+            -- first craft runs showed corners answering on a transport they
+            -- were not listening to, and "my close() worked" was exactly the
+            -- kind of belief this project keeps paying for.
+            local openNow = {}
+            for _, other in ipairs(modems) do
+                if rednet.isOpen(other.name) then
+                    openNow[#openNow + 1] = other.name
+                end
+            end
+            note("     modems open during the probe: "
+                .. (#openNow > 0 and table.concat(openNow, " ") or "NONE"))
+            if #openNow ~= 1 or openNow[1] ~= entry.name then
+                note("     ** ISOLATION FAILED. This row measures nothing about")
+                note("     ** " .. entry.name .. " -- probes could travel another way.")
+            end
+
             local during = podSnapshot()
             probeAll()
             wait(plan.listenSeconds)

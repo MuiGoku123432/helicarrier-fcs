@@ -706,6 +706,20 @@ local function displayLoop()
                     or modemWireless == true and "wireless" or "unknown"),
                 -- EVERY modem this pod has, so which sides exist is a reading
                 -- rather than something to be looked up on the hull.
+                -- WHICH MODEMS THIS POD ACTUALLY HAS OPEN. rednet's open set is
+                -- per COMPUTER, not per tab, so any other tab calling
+                -- rednet.open puts this pod on a transport main.lua never
+                -- chose -- and that silently destroys the wired/wireless A/B.
+                -- Reported rather than reasoned about.
+                "modems_open=" .. (function()
+                    local parts = {}
+                    for _, entry in ipairs(modemsPresent()) do
+                        if rednet.isOpen(entry.name) then
+                            parts[#parts + 1] = entry.name
+                        end
+                    end
+                    return #parts > 0 and table.concat(parts, ",") or "none"
+                end)(),
                 "modems_present=" .. (function()
                     local parts = {}
                     for _, entry in ipairs(modemsPresent()) do
