@@ -1,55 +1,55 @@
--- Regression guard for pod command receipt/application decoupling.
--- Run with: LUA_PATH='pod-template/?.lua;pod-template/?/init.lua;;' luajit tools/test_pod_command_receipt.lua
-
-local path = "pod-template/pod/main.lua"
-local handle = assert(io.open(path, "r"), "could not open " .. path)
-local source = handle:read("*a")
-handle:close()
-
-local function findAfter(needle, startAt)
-    local index = source:find(needle, startAt or 1, true)
-    assert(index, "missing expected pod behavior: " .. needle)
-    return index
+local function readFile(path)
+    local handle = assert(io.open(path, "r"))
+    local source = handle:read("*a")
+    handle:close()
+    return source
 end
 
-local function expectBefore(first, second, label)
-    assert(first < second, label)
+local main = readFile("pod-template/pod/main.lua")
+local mailbox = readFile("pod-template/pod/control_mailbox.lua")
+local apply = readFile("pod-template/pod/control_apply.lua")
+local passed = 0
+
+local function check(condition, message)
+    assert(condition, message)
+    passed = passed + 1
 end
 
-local applyLoop = findAfter("local function applyPowerLoop()")
-local receiveLoop = findAfter("local function receiveLoop()", applyLoop)
-local applyCall = findAfter("pcall(thrusters.applyCommand, pending.power)", applyLoop)
-expectBefore(applyLoop, applyCall, "actuator apply must stay in the dedicated worker")
-expectBefore(applyCall, receiveLoop, "receive loop must not invoke thrusters.applyCommand inline")
+check(not main:find("local function networkLoop", 1, true),
+    "legacy Rednet networkLoop must remain retired")
+check(not main:find("rednet.receive(config.protocol)", 1, true),
+    "active pod source must not receive legacy Rednet commands")
+check(not main:find("local function watchdogLoop", 1, true),
+    "legacy command timeout watchdog must remain retired")
+check(not main:find("local function applyPowerLoop", 1, true),
+    "legacy inline power worker must remain retired")
+check(main:find('require("pod.control_mailbox").new(config)', 1, true),
+    "active pod must construct the wired control mailbox")
+check(main:find('require("pod.control_apply").new(controlMailbox, thrusters)', 1, true),
+    "active pod must construct the independent actuator worker")
+check(main:find("parallel.waitForAll(controlMailbox.receiveLoop, controlMailbox.statusLoop, controlApply.loop, samplerLoop, statusLoop, displayLoop)", 1, true),
+    "wired receive, apply, sampling, status, and display loops must run independently")
+check(mailbox:find('mailbox.PROTOCOL = "helicarrier.control-frame.v1"', 1, true),
+    "mailbox protocol must remain explicit")
+check(mailbox:find('message.mode ~= "ground_apply"', 1, true),
+    "ground_apply must have a dedicated validation boundary")
+check(mailbox:find("command.ionPower == 0", 1, true),
+    "first actuator stage must reject non-zero ion power")
+check(mailbox:find("command.propRpm == 0", 1, true),
+    "first actuator stage must reject non-zero prop RPM")
+check(mailbox:find("command.tiltDegrees == 0", 1, true),
+    "first actuator stage must reject non-zero tilt")
+check(mailbox:find("command.azimuthDegrees == 0", 1, true),
+    "first actuator stage must reject non-zero azimuth")
+check(apply:find("controlMailbox.latest()", 1, true),
+    "actuator worker must read only the newest mailbox entry")
+check(apply:find("currentTime %- entry.receivedAt > entry.validForMs"),
+    "stale entries must be rejected before actuator application")
+check(apply:find("pcall(applyZero, 0)", 1, true),
+    "ground stage must make a guarded exact-zero actuator call")
+check(apply:find("controlMailbox.recordApply", 1, true),
+    "applied sequence must be reported separately")
+check(apply:find("controlMailbox.recordFallback", 1, true),
+    "stale communication must trigger a recorded zero fallback")
 
-local setPower = findAfter('elseif message.type == "set_power" then', receiveLoop)
-local setRpm = findAfter('elseif message.type == "set_rpm" then', setPower)
-local setPowerBlock = source:sub(setPower, setRpm - 1)
-
-local receipt = assert(setPowerBlock:find('state.lastCommandAt = receivedAt', 1, true),
-    "set_power must refresh watchdog time at validated receipt")
-local handoff = assert(setPowerBlock:find('os.queueEvent("pod_apply_power")', 1, true),
-    "set_power must hand actuator work to the worker")
-local acknowledgement = assert(setPowerBlock:find('lightReply(senderId, "ack")', 1, true),
-    "set_power must acknowledge validated receipt")
-expectBefore(receipt, handoff, "watchdog receipt time must precede deferred actuator work")
-expectBefore(handoff, acknowledgement, "handoff must precede the receipt acknowledgement")
-assert(not setPowerBlock:find("thrusters.applyCommand", 1, true),
-    "set_power must not perform hardware application inline")
-assert(setPowerBlock:find("powerSession = state.powerSession or 0", 1, true),
-    "queued power must be tagged with its armed session")
-
-local arm = findAfter('elseif message.type == "arm" then', receiveLoop)
-local armBlock = source:sub(arm, setPower - 1)
-assert(armBlock:find("state.powerSession = (state.powerSession or 0) + 1", 1, true),
-    "a transition into the armed state must start a new power session")
-assert(source:find("state.powerSession == pending.powerSession", applyLoop, true),
-    "an apply must be accepted only in the session that received it")
-
-local disarm = findAfter('elseif message.type == "disarm" then', setRpm)
-local watchdog = findAfter("local function watchdogLoop()", disarm)
-local disarmBlock = source:sub(disarm, watchdog - 1)
-assert(disarmBlock:find("pendingPower = nil", 1, true),
-    "disarm must discard a queued power command")
-
-print("pod command receipt regression: 13 passed, 0 failed")
+print(string.format("pod direct-control architecture: %d passed, 0 failed", passed))

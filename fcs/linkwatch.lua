@@ -4,6 +4,8 @@
 --     /fcs/linkwatch.lua --ground-only   the same watch, on the ground
 --     /fcs/linkwatch.lua --hold 240      a longer observation
 --     /fcs/linkwatch.lua --rate 2.5      probes per second, per corner
+--     /fcs/linkwatch.lua --ground-only --corner FL --rate 10
+--                                           isolated sender/receiver test
 --     /fcs/linkwatch.lua --gain 12       hold altitude
 --
 -- Run it in the FCS-DEV "Flight Tools" tab. Run /fcs/netdiag.lua first: a
@@ -175,9 +177,18 @@ local plan = {
 
 local args = { ... }
 local groundOnly = false
+local targetCorner = nil
 for index = 1, #args do
     local argument = args[index]
     if argument == "--ground-only" then groundOnly = true
+    elseif argument == "--corner" and args[index + 1] then
+        local requested = string.upper(args[index + 1])
+        for _, corner in ipairs(flight.CORNERS) do
+            if corner == requested then targetCorner = requested end
+        end
+        if not targetCorner then
+            error("--corner must be FL, FR, RL, or RR", 0)
+        end
     elseif argument == "--gain" then
         plan.holdGain = tonumber(args[index + 1]) or plan.holdGain
     elseif argument == "--hold" then
@@ -317,11 +328,70 @@ local propMessages = 0
 -- never happened here.
 local commandsSentTo = { FL = 0, FR = 0, RL = 0, RR = 0 }
 local realBanksSend = banks.send
+local sendStats = {
+    attempted = 0,
+    accepted = 0,
+    failed = 0,
+    suppressed = 0,
+    totalMs = 0,
+    maxMs = 0,
+    overTick = 0,
+    over100Ms = 0,
+    byType = {},
+    typeOrder = {},
+}
+
+local function sendBucket(messageType)
+    local key = tostring(messageType or "<nil>")
+    local bucket = sendStats.byType[key]
+    if not bucket then
+        bucket = {
+            attempted = 0, accepted = 0, failed = 0, suppressed = 0,
+            totalMs = 0, maxMs = 0, overTick = 0,
+        }
+        sendStats.byType[key] = bucket
+        sendStats.typeOrder[#sendStats.typeOrder + 1] = key
+    end
+    return bucket
+end
+
 banks.send = function(corner, messageType, fields)
+    local key = string.upper(corner or "")
+    local bucket = sendBucket(messageType)
+
+    -- In isolated mode, higher flight/session layers still request arm and
+    -- set_power keepalives. Report and suppress them here so the modem sees
+    -- exactly one traffic class to exactly one destination.
+    if targetCorner
+        and (key ~= targetCorner or messageType ~= "set_tilt") then
+        sendStats.suppressed = sendStats.suppressed + 1
+        bucket.suppressed = bucket.suppressed + 1
+        return true, "suppressed by single-corner diagnostic"
+    end
+
+    local started = os.epoch("utc")
     local ok, result = realBanksSend(corner, messageType, fields)
+    local elapsed = os.epoch("utc") - started
+
+    sendStats.attempted = sendStats.attempted + 1
+    sendStats.totalMs = sendStats.totalMs + elapsed
+    sendStats.maxMs = math.max(sendStats.maxMs, elapsed)
+    bucket.attempted = bucket.attempted + 1
+    bucket.totalMs = bucket.totalMs + elapsed
+    bucket.maxMs = math.max(bucket.maxMs, elapsed)
+    if elapsed >= 50 then
+        sendStats.overTick = sendStats.overTick + 1
+        bucket.overTick = bucket.overTick + 1
+    end
+    if elapsed >= 100 then sendStats.over100Ms = sendStats.over100Ms + 1 end
+
     if ok then
-        local key = string.upper(corner or "")
+        sendStats.accepted = sendStats.accepted + 1
+        bucket.accepted = bucket.accepted + 1
         if commandsSentTo[key] then commandsSentTo[key] = commandsSentTo[key] + 1 end
+    else
+        sendStats.failed = sendStats.failed + 1
+        bucket.failed = bucket.failed + 1
     end
     return ok, result
 end
@@ -341,7 +411,8 @@ end
 -- comparable within a single instant.
 local function probe(now)
     if (now - lastProbeAt) < probePeriodMs then return false end
-    for _, corner in ipairs(flight.CORNERS) do
+    local corners = targetCorner and { targetCorner } or flight.CORNERS
+    for _, corner in ipairs(corners) do
         local ok = banks.send(corner, "set_tilt",
             { angle = 0, azimuth = 0, bearing = nil, mirror = true })
         if ok then
@@ -356,6 +427,10 @@ end
 -- The props are held with the roll damper, exactly as tiltcheck flies them, so
 -- the craft this watches is the craft that produced the fault.
 local function commandProps(rollRate)
+    -- Single-corner mode isolates rednet throughput. Periodic prop commands to
+    -- all four pods would contaminate the offered rate we are trying to vary.
+    if targetCorner then return 0 end
+
     local differential = rollRate and rolldamp.differentialFor(rollRate) or 0
     local now = os.epoch("utc")
     if differential ~= lastDifferential or (now - lastPropsSentAt) >= 1000 then
@@ -845,6 +920,35 @@ local function peakConcurrency()
 end
 
 local function report()
+    local processSeconds = math.max(0.001,
+        (os.epoch("utc") - startedAt) / 1000)
+    local averageMs = sendStats.attempted > 0
+        and (sendStats.totalMs / sendStats.attempted) or 0
+
+    note("")
+    note("== SEND CALLS ==")
+    note("")
+    note(targetCorner
+        and ("  isolated target: " .. targetCorner .. " (set_tilt probes only)")
+        or "  scope: all LinkWatch banks.send calls")
+    note(string.format(
+        "  modem attempts %d   rednet accepted %d   false %d   suppressed %d   accepted/s %.2f",
+        sendStats.attempted, sendStats.accepted, sendStats.failed,
+        sendStats.suppressed, sendStats.accepted / processSeconds))
+    note(string.format(
+        "  call duration avg %.2f ms   max %d ms   >=50ms %d   >=100ms %d",
+        averageMs, sendStats.maxMs, sendStats.overTick, sendStats.over100Ms))
+    note("  accepted means rednet accepted the send; it does NOT mean the pod received it.")
+    note("")
+    note("  message type       attempted  accepted  false  suppressed  accepted/s  max_ms  >=50ms")
+    for _, messageType in ipairs(sendStats.typeOrder) do
+        local bucket = sendStats.byType[messageType]
+        note(string.format("  %-18s %9d  %8d  %5d  %10d  %10.2f  %6d  %6d",
+            messageType, bucket.attempted, bucket.accepted, bucket.failed,
+            bucket.suppressed, bucket.accepted / processSeconds,
+            bucket.maxMs, bucket.overTick))
+    end
+
     note("")
     note("== WHAT EACH CORNER SAW ==")
     note("")
@@ -951,15 +1055,22 @@ local function report()
         local sentTotal, arrivedTotal, discardedTotal = 0, 0, 0
         for _, corner in ipairs(flight.CORNERS) do
             local entry = watch[corner]
-            sentTotal = sentTotal + ((entry.sentAtLastAdvance or 0) - (entry.sentAtStart or 0))
-            if entry.firstReceived and entry.lastReceived then
-                arrivedTotal = arrivedTotal + (entry.lastReceived - entry.firstReceived)
-            end
-            if entry.firstInvalid and entry.lastInvalid then
-                discardedTotal = discardedTotal + (entry.lastInvalid - entry.firstInvalid)
-            end
-            if entry.firstUntrusted and entry.lastUntrusted then
-                discardedTotal = discardedTotal + (entry.lastUntrusted - entry.firstUntrusted)
+            local sent = (entry.sentAtLastAdvance or 0) - (entry.sentAtStart or 0)
+            -- Single-corner mode still listens to every pod for safety, but
+            -- only the selected corner belongs in its delivery aggregate.
+            if sent > 0 then
+                sentTotal = sentTotal + sent
+                if entry.firstReceived and entry.lastReceived then
+                    arrivedTotal = arrivedTotal + (entry.lastReceived - entry.firstReceived)
+                end
+                if entry.firstInvalid and entry.lastInvalid then
+                    discardedTotal = discardedTotal
+                        + (entry.lastInvalid - entry.firstInvalid)
+                end
+                if entry.firstUntrusted and entry.lastUntrusted then
+                    discardedTotal = discardedTotal
+                        + (entry.lastUntrusted - entry.firstUntrusted)
+                end
             end
         end
         local missing = sentTotal - arrivedTotal
@@ -1163,7 +1274,14 @@ local function report()
         note("")
     end
 
-    if not haveBoth then
+    if targetCorner then
+        note("  SINGLE-CORNER THROUGHPUT RUN. Transport comparison is intentionally")
+        note("  disabled: only " .. targetCorner .. " received probes.")
+        note("  Compare SEND CALLS accepted/s with this corner's arrived/s.")
+        note("  If one pod accepts the full requested rate, the earlier ~21/s")
+        note("  plateau is shared sender/load pressure. If this pod alone plateaus")
+        note("  near its previous ~5/s, the ceiling is receiver-side.")
+    elseif not haveBoth then
         note("  CANNOT SPLIT. This run did not see both a wired and a wireless")
         note("  corner reporting its own transport. Either the pods are running")
         note("  firmware older than pod/main.lua in the repo, or every corner is")
@@ -1296,9 +1414,13 @@ local function report()
     -- which is the exact failure mode this project keeps paying for.
     local watched = (firstObserveAt and lastObserveAt)
         and (lastObserveAt - firstObserveAt) / 1000 or 0
-    local achieved = (watched > 0) and (probesSent.FL / watched) or 0
-    note(string.format("  probes %d   ACHIEVED %.2f Hz per corner (asked %.1f)   prop commands %d",
-        probeMessages, achieved, plan.probeRate, propMessages))
+    local achievedCorner = targetCorner or "FL"
+    local achieved = (watched > 0)
+        and (probesSent[achievedCorner] / watched) or 0
+    note(string.format("  probes %d   ACHIEVED %.2f Hz %s (asked %.1f)   prop commands %d",
+        probeMessages, achieved,
+        targetCorner and ("to " .. targetCorner) or "per corner",
+        plan.probeRate, propMessages))
     if plan.probeRate > 0 and achieved < plan.probeRate * 0.8 then
         note(string.format("  ** the loop could not carry %.1f Hz. Every rate-dependent",
             plan.probeRate))
@@ -1331,10 +1453,18 @@ end
 -- ---------------------------------------------------------------------------
 
 local function mainLoop()
+    if targetCorner and not groundOnly then
+        error("--corner requires --ground-only", 0)
+    end
+
     note("LINK WATCH -- how many seconds of this flight is the uplink dead?")
     note("utc_ms=" .. tostring(os.epoch("utc")))
     note(string.format("probe set_tilt angle 0 at %.1f Hz per corner   props %d rpm",
         plan.probeRate, plan.propRpm))
+    if targetCorner then
+        note("single-corner target=" .. targetCorner
+            .. "; all-corner prop traffic suppressed")
+    end
     if groundOnly then
         note(string.format("GROUND ONLY: %d s watch, no flight.", plan.groundSeconds))
     else
@@ -1352,22 +1482,28 @@ local function mainLoop()
     end
 
     note("== GROUND ==")
-    note(string.format("  props to %d rpm. Ions stay at zero collective, so there is",
-        plan.propRpm))
-    note("  no path to lift -- checked anyway.")
-    local spun, reason = session:setAllProps(plan.propRpm)
-    commandedProps = true
-    if not spun then
-        note("  could not set base props: " .. tostring(reason))
-        return
-    end
+    if targetCorner then
+        note(string.format("  SINGLE-CORNER sender diagnostic: %s only.", targetCorner))
+        note("  Props and ions are left unchanged; the observation sends only")
+        note("  zero-degree set_tilt probes to the selected pod.")
+    else
+        note(string.format("  props to %d rpm. Ions stay at zero collective, so there is",
+            plan.propRpm))
+        note("  no path to lift -- checked anyway.")
+        local spun, reason = session:setAllProps(plan.propRpm)
+        commandedProps = true
+        if not spun then
+            note("  could not set base props: " .. tostring(reason))
+            return
+        end
 
-    -- Let the props reach speed before the watch starts, so the spin-up is not
-    -- inside the cadence estimate.
-    local spinStop = watchFor(plan.spinUpSeconds, false, "spinup")
-    if spinStop then
-        note("  stopped during spin-up: " .. tostring(spinStop))
-        return
+        -- Let the props reach speed before the watch starts, so the spin-up is
+        -- not inside the cadence estimate.
+        local spinStop = watchFor(plan.spinUpSeconds, false, "spinup")
+        if spinStop then
+            note("  stopped during spin-up: " .. tostring(spinStop))
+            return
+        end
     end
 
     note(string.format("  watching the link on the ground for %d s.", plan.groundSeconds))

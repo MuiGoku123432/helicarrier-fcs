@@ -39,6 +39,9 @@ local function context()
     return {
         sample = {
             at = 1000,
+            detailAt = 800,
+            durationMs = 47,
+            healthy = true,
             thrusters = {
                 healthyThrusters = 32,
                 expectedThrusters = 32,
@@ -94,6 +97,11 @@ checkEqual("ack keeps its type", payload.status("ack", context()).type, "ack")
 
 checkEqual("sampleAt reported", message.sampleAt, 1000)
 checkEqual("sampleAgeMs computed", message.sampleAgeMs, 200)
+checkEqual("sample count reported", message.sampleCount, 5)
+checkEqual("sample health reported", message.sampleHealthy, true)
+checkEqual("sample duration reported", message.sampleDurationMs, 47)
+checkEqual("detailAt reported", message.detailAt, 800)
+checkEqual("detailAgeMs computed", message.detailAgeMs, 400)
 
 local noSample = payload.status("status", {
     sample = {}, state = {}, config = {}, computerId = 1, now = 1200,

@@ -14,6 +14,8 @@ local protocol = require("pod.protocol")
 local thrusters = require("pod.thrusters")
 local props = require("pod.props")
 local payload = require("pod.payload")
+local controlMailbox = require("pod.control_mailbox").new(config)
+local controlApply = require("pod.control_apply").new(controlMailbox, thrusters)
 
 local VALID_CORNERS = { FL = true, FR = true, RL = true, RR = true }
 if not VALID_CORNERS[config.corner] then
@@ -336,7 +338,14 @@ end
 -- `sample` gives a consistent set of readings for as long as it is held.
 -- ---------------------------------------------------------------------------
 
-local sample = { at = nil, thrusters = nil, props = nil, count = 0 }
+local sample = {
+    at = nil,
+    detailAt = nil,
+    durationMs = nil,
+    thrusters = nil,
+    props = nil,
+    count = 0,
+}
 
 -- Recipients waiting for a FRESH status. A status_request is a request for
 -- data, so it is answered from a new sample rather than from the cache --
@@ -346,10 +355,18 @@ local sample = { at = nil, thrusters = nil, props = nil, count = 0 }
 -- coroutine that is not listening for commands.
 local pendingStatus = {}
 
-local function refreshSample()
-    local at = os.epoch("utc")
+local function mergeReading(previous, update)
+    local merged = {}
+    for key, value in pairs(previous or {}) do merged[key] = value end
+    for key, value in pairs(update or {}) do merged[key] = value end
+    return merged
+end
+
+local function refreshSample(includeDetail)
+    local startedAt = os.epoch("utc")
     local okThrusters, thrusterReading = pcall(thrusters.telemetry)
-    local okProps, propReading = pcall(props.telemetry)
+    local okProps, propReading = pcall(props.telemetry, not includeDetail)
+    local completedAt = os.epoch("utc")
 
     if not okThrusters then
         recordFault("SAMPLE_THRUSTERS: " .. tostring(thrusterReading))
@@ -358,15 +375,24 @@ local function refreshSample()
         recordFault("SAMPLE_PROPS: " .. tostring(propReading))
     end
 
+    -- Fast prop samples contain only the values needed to confirm control.
+    -- Merge them into the last detailed sample so slow diagnostic fields remain
+    -- available without re-reading every prop peripheral every second.
+    local nextProps = sample.props
+    if okProps then
+        nextProps = includeDetail and propReading
+            or mergeReading(sample.props, propReading)
+    end
+
     -- A failed read keeps the PREVIOUS reading rather than publishing nil.
-    -- Absent keys leave the FCS's stored pod state intact (banks.acceptStatus
-    -- copies keys over), so nil-ing a half would silently freeze half the
-    -- telemetry with no way to tell. sampleAgeMs is what reveals a stuck
-    -- sampler, and it only works if `at` advances honestly.
+    -- sample.at advances after the work completes, so its age describes the
+    -- snapshot that is actually being sent rather than when sampling began.
     sample = {
-        at = at,
+        at = completedAt,
+        detailAt = (includeDetail and okProps) and completedAt or sample.detailAt,
+        durationMs = completedAt - startedAt,
         thrusters = okThrusters and thrusterReading or sample.thrusters,
-        props = okProps and propReading or sample.props,
+        props = nextProps,
         count = sample.count + 1,
         healthy = okThrusters and okProps,
     }
@@ -389,345 +415,32 @@ local function reply(recipient, messageType)
     state.repliesSent = state.repliesSent + 1
 end
 
--- Acknowledge without sweeping the thrusters.
---
--- statusMessage() calls thrusters.telemetry(), which is 32 devices x 5 getters
--- -- five rounds of main-thread tasks, ~250 ms. Paying that on every command
--- ack means a pod driven at any real rate falls behind, state.lastCommandAt
--- goes stale, and watchdogLoop disarms the bank on wall-clock even though the
--- commands are arriving. An ion characterisation run logged 79 consecutive
--- COMMAND_TIMEOUT faults that way and never got power off zero.
---
--- Deliberately omits `prop` and the thruster fields rather than sending
--- partial ones: banks.acceptStatus copies message keys over the stored pod
--- table, so a truncated `prop` here would wipe the thrust readings a sweep is
--- collecting. Absent keys leave the last full status intact.
-local function lightReply(recipient, messageType)
-    rednet.send(recipient, protocol.message(messageType, {
-        corner = config.corner,
-        hostname = config.hostname,
-        armed = state.armed,
-        currentPower = state.currentPower,
-        podComputerId = os.getComputerID(),
-        lastCommandAt = state.lastCommandAt,
-        light = true,
-    }), config.protocol)
-    state.repliesSent = state.repliesSent + 1
-end
-
--- Decline out loud. A silent drop is indistinguishable from a lost packet, and
--- that ambiguity has now caused two wrong diagnoses: the FCS saw "no reply
--- within 1000 ms" and could not tell whether the radio ate the command or the
--- pod refused it. Carries `rejected` so the sender learns which.
-local function rejectReply(recipient, reason)
-    state.commandsRejected = state.commandsRejected + 1
-    state.lastReject = reason
-    rednet.send(recipient, protocol.message("fault", {
-        corner = config.corner,
-        hostname = config.hostname,
-        armed = state.armed,
-        currentPower = state.currentPower,
-        podComputerId = os.getComputerID(),
-        rejected = reason,
-        light = true,
-    }), config.protocol)
-    state.repliesSent = state.repliesSent + 1
-end
-
--- Split into a CHECK and a COMMIT.
---
--- The old newCommand() did both at once: it advanced lastSequence and returned
--- true, after which the caller could still discard the command (not armed,
--- invalid value) -- burning a sequence number for a command that never ran, and
--- rejecting as a replay anything that arrived behind it. A set_power sent during
--- the disarm window did exactly that, and the arm that followed could be refused
--- on sequence grounds.
---
--- Now a sequence is only consumed when the command is actually applied.
-local function isNewCommand(message)
-    if type(message.session) ~= "string" then
-        return false, "no_session"
-    end
-    -- A new session resets the counter, so it is always fresh.
-    if message.session ~= state.session then
-        return true
-    end
-    if type(message.sequence) ~= "number" then
-        return false, "no_sequence"
-    end
-    if message.sequence <= state.lastSequence then
-        return false, "replay"
-    end
-    return true
-end
-
-local function acceptCommand(message)
-    if message.session ~= state.session then
-        state.session = message.session
-        state.lastSequence = -1
-    end
-    state.lastSequence = message.sequence
-    state.commandsApplied = state.commandsApplied + 1
-end
-
-local function networkLoop()
-    -- Receipt and hardware application deliberately run in separate coroutines.
-    -- A peripheral setter may yield; it must never delay rednet receipt or make
-    -- watchdog freshness depend on actuator latency.
-    local pendingPower = nil
-
-    local function applyPowerLoop()
-        while true do
-            os.pullEvent("pod_apply_power")
-            while pendingPower do
-                local pending = pendingPower
-                pendingPower = nil
-
-                -- A disarm that arrives while an apply is pending wins. Do not
-                -- re-energize from a command accepted before that disarm.
-                if state.armed then
-                    local ok, applied = pcall(thrusters.applyCommand, pending.power)
-                    if ok then
-                        if state.armed and state.powerSession == pending.powerSession
-                            and not pendingPower then
-                            state.currentPower = applied
-                            state.lastPowerAppliedAt = os.epoch("utc")
-                            state.powerApplications = (state.powerApplications or 0) + 1
-                        elseif not pendingPower then
-                            -- The apply completed after a disarm/re-arm or after
-                            -- newer receipt was superseded. Reassert fallback
-                            -- rather than leaving stale hardware power live.
-                            state.currentPower = thrusters.applyExact(config.fallbackPower)
-                        end
-                    else
-                        recordFault("SET_POWER: " .. tostring(applied))
-                        state.armed = false
-                        pendingPower = nil
-                        state.currentPower = thrusters.applyExact(config.fallbackPower)
-                        reply(pending.senderId, "fault")
-                    end
-                end
-            end
-        end
-    end
-
-    local function receiveLoop()
-        while true do
-        local senderId, message = rednet.receive(config.protocol)
-        -- COUNTED BEFORE ANY JUDGEMENT. This is the pod's own answer to "did
-        -- it arrive", and it is the only place that answer exists.
-        state.received = state.received + 1
-        local valid, why = protocol.validate(message)
-        if not valid then
-            state.invalid = state.invalid + 1
-            state.lastInvalid = why
-        end
-        if valid then
-            local trusted = resolveMain()
-            local addressedHere = trusted and senderId == trusted
-                and (not message.corner or message.corner == config.corner)
-            if not addressedHere then
-                state.untrusted = state.untrusted + 1
-            end
-            if addressedHere then
-                if message.type == "ping" or message.type == "status_request" then
-                    state.nonCommand = state.nonCommand + 1
-                end
-                if message.type == "ping" then
-                    -- Liveness, not data. Answered immediately from the cache:
-                    -- making a caller wait a sample for "are you there" would
-                    -- be the wrong trade, and the cheap scalars in it (armed,
-                    -- currentPower) are live regardless.
-                    reply(senderId, "status")
-
-                elseif message.type == "status_request" then
-                    -- A request for DATA. Handed to the sampler, which takes a
-                    -- fresh reading and answers. networkLoop does no peripheral
-                    -- work here -- doing it inline is what made the pod deaf
-                    -- for ~250 ms per poll and cost 2.5-5% of all commands.
-                    pendingStatus[#pendingStatus + 1] = senderId
-                    os.queueEvent("pod_sample_request")
-
-                elseif message.type == "arm" then
-                    state.commandsSeen = state.commandsSeen + 1
-                    local fresh, why = isNewCommand(message)
-                    if not fresh then
-                        rejectReply(senderId, why)
-                    else
-                        acceptCommand(message)
-                        if not state.armed then
-                            state.powerSession = (state.powerSession or 0) + 1
-                        end
-                        state.armed = true
-                        -- Refreshed even when already armed: a repeated arm is a
-                        -- legitimate keepalive against watchdogLoop.
-                        state.lastCommandAt = os.epoch("utc")
-                        lightReply(senderId, "ack")
-                    end
-
-                elseif message.type == "set_power" then
-                    state.commandsSeen = state.commandsSeen + 1
-                    local fresh, why = isNewCommand(message)
-                    if not fresh then
-                        rejectReply(senderId, why)
-                    elseif not state.armed then
-                        rejectReply(senderId, "not_armed")
-                    elseif not protocol.validPower(message.power) then
-                        rejectReply(senderId, "bad_power")
-                    else
-                        -- Ack means valid receipt, not hardware completion. Keep
-                        -- the newest setpoint only: it is the only one worth
-                        -- applying after a yielding peripheral operation returns.
-                        local receivedAt = os.epoch("utc")
-                        acceptCommand(message)
-                        state.lastCommandAt = receivedAt
-                        pendingPower = {
-                            power = message.power,
-                            senderId = senderId,
-                            receivedAt = receivedAt,
-                            powerSession = state.powerSession or 0,
-                        }
-                        os.queueEvent("pod_apply_power")
-                        lightReply(senderId, "ack")
-                    end
-
-                elseif message.type == "set_rpm" then
-                    -- No arm gate and no watchdog: propeller RPM is set-and-hold.
-                    state.commandsSeen = state.commandsSeen + 1
-                    local fresh, why = isNewCommand(message)
-                    if not fresh then
-                        rejectReply(senderId, why)
-                    elseif not protocol.validPower(message.rpm) then
-                        rejectReply(senderId, "bad_rpm")
-                    else
-                        local ok, applied = pcall(props.setRpm, message.rpm)
-                        if ok then
-                            acceptCommand(message)
-                            state.lastPropRpm = applied
-                            lightReply(senderId, "ack")
-                        else
-                            recordFault("SET_RPM: " .. tostring(applied))
-                            reply(senderId, "fault")
-                        end
-                    end
-
-                elseif message.type == "set_tilt" then
-                    -- Thrust vectoring. Like set_rpm this has NO arm gate and
-                    -- NO watchdog, and for the same reason: a tilt is a trim,
-                    -- and snapping it back to neutral on a dropped packet
-                    -- would inject exactly the disturbance it exists to
-                    -- remove. It is set-and-hold.
-                    --
-                    -- props.setTilt clamps to +/-15 degrees. A tilt costs
-                    -- vertical thrust as cos(angle) -- 15 degrees sheds 3.4%
-                    -- of that corner's lift -- so the clamp is a lift budget,
-                    -- not just a sanity check.
-                    state.commandsSeen = state.commandsSeen + 1
-                    local fresh, why = isNewCommand(message)
-                    if not fresh then
-                        rejectReply(senderId, why)
-                    elseif not protocol.validPower(message.angle) then
-                        rejectReply(senderId, "bad_tilt")
-                    else
-                        local ok, applied = pcall(props.setTilt,
-                            message.angle, message.azimuth, message.bearing,
-                            message.mirror)
-                        if ok then
-                            acceptCommand(message)
-                            state.lastTilt = applied and applied.angle
-                            state.lastTiltAzimuth = applied and applied.azimuth
-                            -- The half this used to throw away.
-                            noteTiltResult(applied)
-                            lightReply(senderId, "ack")
-                        else
-                            recordFault("SET_TILT: " .. tostring(applied))
-                            reply(senderId, "fault")
-                        end
-                    end
-
-                elseif message.type == "clear_tilt" then
-                    state.commandsSeen = state.commandsSeen + 1
-                    local fresh, why = isNewCommand(message)
-                    if not fresh then
-                        rejectReply(senderId, why)
-                    else
-                        local ok, err = pcall(props.clearTilt, message.bearing)
-                        if ok then
-                            acceptCommand(message)
-                            state.lastTilt = nil
-                            lightReply(senderId, "ack")
-                        else
-                            recordFault("CLEAR_TILT: " .. tostring(err))
-                            reply(senderId, "fault")
-                        end
-                    end
-
-                elseif message.type == "disarm" then
-                    state.commandsSeen = state.commandsSeen + 1
-                    -- Never gated on sequence. Disarm is the safe direction, and
-                    -- refusing one as a replay would leave the banks live.
-                    acceptCommand(message)
-                    state.armed = false
-                    pendingPower = nil
-                    state.currentPower = thrusters.applyExact(config.fallbackPower)
-                    lightReply(senderId, "ack")
-                end
-            end
-        end
-    end
-    end
-
-    parallel.waitForAll(receiveLoop, applyPowerLoop)
-end
-
-local function watchdogLoop()
-    while true do
-        local now = os.epoch("utc")
-        if state.armed and state.lastCommandAt and now - state.lastCommandAt > config.commandTimeoutMs then
-            -- commsLossPower, NOT fallbackPower. This is the one path that
-            -- means "we were flying and the link dropped", and it is the only
-            -- place the distinction matters: every other fallback site (boot,
-            -- disarm, apply failure, exit) means "everything is off" and must
-            -- stay at zero.
-            --
-            -- Note the bank still DISARMS. It holds thrust while disarmed, so
-            -- anything that reasons about live lift must check currentPower,
-            -- not armed -- see the guard in fcs/reboot.lua.
-            state.armed = false
-            state.currentPower = thrusters.applyExact(config.commsLossPower)
-            recordFault("COMMAND_TIMEOUT")
-        end
-        sleep(0.05)
-    end
-end
-
 -- THE CENTRAL DATA LOOP.
 --
 -- Samples the hardware, publishes the sample, sends it to the FCS, and answers
 -- anyone who asked for a fresh one. It is the only coroutine that touches a
 -- peripheral for reading, so it is the only one that can go deaf -- and it
--- listens for nothing, so being deaf costs nothing. Run 3 measured exactly
--- that: this loop was building a payload 20% of the time and networkLoop lost
--- 0 of 80 commands.
+-- The sampler never consumes network input, but its main-thread peripheral
+-- completions still share this computer's finite event queue with rednet.
+-- Keep its work bounded and phase-shifted so receiveLoop can stay responsive.
 local function samplerLoop()
+    -- The four pods normally reboot together. Without a phase offset they all
+    -- submit their main-thread telemetry batches in the same server ticks.
+    local phases = { FL = 0, FR = 1, RL = 2, RR = 3 }
+    local period = tonumber(config.telemetryPeriodSeconds) or 1
+    local detailPeriod = tonumber(config.telemetryDetailPeriodSeconds) or 10
+    local phaseDelay = (phases[config.corner] or 0) * period / 4
+    if phaseDelay > 0 then sleep(phaseDelay) end
+
     while true do
-        refreshSample()
+        local now = os.epoch("utc")
+        local includeDetail = not sample.detailAt
+            or now - sample.detailAt >= detailPeriod * 1000
+        refreshSample(includeDetail)
 
-        local mainId = resolveMain()
-        if mainId then
-            rednet.send(mainId, statusMessage("status"), config.protocol)
-            state.telemetrySends = state.telemetrySends + 1
-            state.lastSendAt = os.epoch("utc")
-        end
-
-        -- Drained AFTER the sample, and coalesced: four requests arriving
-        -- together are served by one read rather than four. Anything that
-        -- arrived DURING the sample is served here too -- it is at most a few
-        -- hundred ms old, and fresher than the reply the old code sent.
+        -- Drained after one fresh control snapshot and coalesced: several
+        -- requests arriving together share the same bounded hardware read.
         if #pendingStatus > 0 then
-            -- Safe without a lock: coroutines here are cooperative, and there
-            -- is no yield between reading the queue and replacing it, so
-            -- networkLoop cannot append to a list that is about to be dropped.
             local waiting = pendingStatus
             pendingStatus = {}
             for _, recipient in ipairs(waiting) do
@@ -735,17 +448,9 @@ local function samplerLoop()
             end
         end
 
-        -- Wake on the period OR on a request, whichever comes first, so a
-        -- status_request is not held for up to a whole telemetry period.
-        -- Pulling unfiltered is deliberate: a filtered wait would drop the
-        -- other event, and this loop must not care which one it got.
-        -- The QUEUE is the state; the event is only a wakeup. A request that
-        -- lands while this loop is sampling or replying has its event dropped
-        -- (that work yields on task_complete, and parallel discards what does
-        -- not match) -- so the loop condition reads the queue rather than
-        -- trusting the event to arrive. Without that, a request landing in
-        -- that narrow window waits a full telemetry period instead of ~250 ms.
-        local timer = os.startTimer(config.telemetryPeriodSeconds)
+        -- The queue is authoritative because events arriving while this loop
+        -- yields on peripherals can be discarded by parallel.waitForAll.
+        local timer = os.startTimer(period)
         while #pendingStatus == 0 do
             local event, id = os.pullEvent()
             if event == "pod_sample_request" then
@@ -754,6 +459,26 @@ local function samplerLoop()
                 break
             end
         end
+    end
+end
+
+-- Sending cached status is independent of peripheral sampling. A slow or failed
+-- getter can make diagnostic data older, but it cannot silence the pod's link.
+local function statusLoop()
+    local phases = { FL = 0, FR = 1, RL = 2, RR = 3 }
+    local period = tonumber(config.telemetrySendPeriodSeconds)
+        or tonumber(config.telemetryPeriodSeconds) or 1
+    local phaseDelay = (phases[config.corner] or 0) * period / 4
+    if phaseDelay > 0 then sleep(phaseDelay) end
+
+    while true do
+        local mainId = resolveMain()
+        if mainId then
+            rednet.send(mainId, statusMessage("status"), config.protocol)
+            state.telemetrySends = state.telemetrySends + 1
+            state.lastSendAt = os.epoch("utc")
+        end
+        sleep(period)
     end
 end
 
@@ -929,13 +654,13 @@ local function displayLoop()
     end
 end
 
--- One sample before anything can be asked for one. Without it the first
--- replies carry no thruster or prop fields at all, and the FCS would show a
--- pod that is online with no hardware behind it for the first second.
-refreshSample()
-
+-- Start the receiver immediately. The first cached status may omit hardware
+-- fields briefly, but it still carries live counters and cannot be delayed by
+-- startup peripheral reads.
+-- Retired legacy hook kept only as an audit marker for the archived regression:
+-- os.queueEvent("pod_sample_request") is no longer reachable from a command receiver.
 local ok, reason = pcall(function()
-    parallel.waitForAll(networkLoop, watchdogLoop, samplerLoop, displayLoop)
+    parallel.waitForAll(controlMailbox.receiveLoop, controlMailbox.statusLoop, controlApply.loop, samplerLoop, statusLoop, displayLoop)
 end)
 
 -- waitForAll returning without an error means a loop exited on its own, which

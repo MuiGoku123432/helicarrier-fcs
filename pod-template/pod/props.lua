@@ -118,7 +118,7 @@ function props.load()
     return props
 end
 
-function props.telemetry()
+function props.telemetry(controlOnly)
     local faults = {}
     for _, fault in ipairs(props.faults) do
         faults[#faults + 1] = fault
@@ -134,10 +134,37 @@ function props.telemetry()
     }
 
     if props.controller then
+        -- RPM confirmation is control-relevant and stays in the fast sample.
         result.targetRpm = attempt(faults, "target RPM", props.controller.getTargetSpeed)
         result.controllerRpm = attempt(faults, "controller RPM", props.controller.getSpeed)
-        result.hasSource = attempt(faults, "has source", props.controller.hasSource)
-        result.overstressed = attempt(faults, "overstressed", props.controller.isOverstressed)
+        if not controlOnly then
+            result.hasSource = attempt(faults, "has source", props.controller.hasSource)
+            result.overstressed = attempt(faults, "overstressed", props.controller.isOverstressed)
+        end
+    end
+
+    if controlOnly then
+        -- Fast confirmation path: four peripheral reads on the deployed pod
+        -- (controller target/speed above, plus one tilt per bearing). Everything
+        -- else is diagnostic and remains cached from the slow detail sample.
+        local tiltSum, tiltSamples = 0, 0
+        if #props.bearings > 0 then
+            result.perBearingTilt = {}
+            for index, bearing in ipairs(props.bearings) do
+                local getTiltAngle = optional(bearing, "getTiltAngle")
+                local reading = getTiltAngle
+                    and attempt(faults, "bearing " .. index .. " tilt", getTiltAngle)
+                if reading ~= nil then
+                    result.perBearingTilt[index] = reading
+                    tiltSum = tiltSum + reading
+                    tiltSamples = tiltSamples + 1
+                end
+            end
+        end
+        result.tiltAngle = tiltSamples > 0 and (tiltSum / tiltSamples) or nil
+        result.controlOnly = true
+        result.faults = faults
+        return result
     end
 
     -- Aggregated across every bearing on this corner.
@@ -166,11 +193,13 @@ function props.telemetry()
             local label = "bearing " .. index
 
             local getThrust = optional(bearing, "getThrust")
+            local thrustReading = nil
             if getThrust then
                 sawThrust = true
-                local reading = attempt(faults, label .. " thrust", getThrust) or 0
-                thrust = thrust + math.abs(reading)
-                thrustSigned = thrustSigned + reading
+                thrustReading = attempt(faults, label .. " thrust", getThrust)
+                local value = thrustReading or 0
+                thrust = thrust + math.abs(value)
+                thrustSigned = thrustSigned + value
             end
 
             -- Vectoring feedback. getTiltAngle is the tilt in degrees;
@@ -236,11 +265,11 @@ function props.telemetry()
             -- on a bearing that is plainly working -- so record what each of
             -- the three speed sources actually says.
             local isAssembled = optional(bearing, "isAssembled")
+            local assembledReading = nil
             if isAssembled then
                 sawAssembled = true
-                if attempt(faults, label .. " assembled", isAssembled) then
-                    assembled = assembled + 1
-                end
+                assembledReading = attempt(faults, label .. " assembled", isAssembled)
+                if assembledReading then assembled = assembled + 1 end
             end
 
             local getAngular = optional(bearing, "getAngularSpeed")
@@ -260,8 +289,8 @@ function props.telemetry()
             local getHand = optional(bearing, "getThrustHandedness")
             result.perBearing[index] = {
                 name = props.bearingNames[index],
-                thrust = getThrust and attempt(faults, label .. " thrust2", getThrust) or nil,
-                assembled = isAssembled and attempt(faults, label .. " asm2", isAssembled) or nil,
+                thrust = thrustReading,
+                assembled = assembledReading,
                 handedness = getHand and attempt(faults, label .. " hand", getHand) or nil,
                 -- ARRAY-indexed {1,2,3}, not {x,y,z}. The comment above said
                 -- so; this line still read .x/.y/.z and put three nils in every

@@ -57,7 +57,7 @@ package.path = "./?.lua;./?/init.lua;" .. package.path
 local harness = require("tools.cc_harness")
 
 local MODES = { "works", "blackout", "allfour", "downlink", "noise", "bursty",
-    "refused", "flight" }
+    "refused", "flight", "single" }
 local mode = arg[1] or "works"
 
 if mode == "all" then
@@ -152,6 +152,8 @@ elseif mode == "refused" then
     EXPECT.someRejects = true
 elseif mode == "flight" then
     GROUND_SECONDS = 10
+elseif mode == "single" then
+    GROUND_SECONDS = 20
 elseif mode ~= "works" then
     error("unknown mode " .. tostring(mode))
 end
@@ -189,6 +191,9 @@ local ok, err = pcall(function()
         local chunk = assert(loadfile("fcs/linkwatch.lua"))
         if mode == "flight" then
             chunk("--hold", "40", "--ground", tostring(GROUND_SECONDS))
+        elseif mode == "single" then
+            chunk("--ground-only", "--ground", tostring(GROUND_SECONDS),
+                "--corner", "FL", "--rate", "10")
         else
             chunk("--ground-only", "--ground", tostring(GROUND_SECONDS))
         end
@@ -255,8 +260,36 @@ end
 -- Probes must actually have gone out; a tool that reports "no outage" because
 -- it never sent anything would pass every assertion below it.
 for corner, row in pairs(rows) do
-    if row.probes < 20 then
+    if mode == "single" then
+        if corner == "FL" and row.probes < 20 then
+            fail(("FL: only %d isolated probes sent -- the watch barely ran")
+                :format(row.probes))
+        elseif corner ~= "FL" and row.probes ~= 0 then
+            fail(("%s: single-corner mode leaked %d probes")
+                :format(corner, row.probes))
+        end
+    elseif row.probes < 20 then
         fail(("%s: only %d probes sent -- the watch barely ran"):format(corner, row.probes))
+    end
+end
+
+if mode == "single" then
+    if not findLine("== SEND CALLS ==") then
+        fail("single-corner report omitted send-call instrumentation")
+    end
+    if not findLine("isolated target: FL") then
+        fail("single-corner report omitted its selected target")
+    end
+    if not findLine("false 0") then
+        fail("harness modem sends should all be accepted by rednet")
+    end
+    local sendLine = findLine("modem attempts")
+    local suppressed = sendLine and tonumber(sendLine:match("suppressed (%d+)")) or 0
+    if suppressed == 0 then
+        fail("single-corner mode must account for suppressed non-probe calls")
+    end
+    if not findLine("prop commands 0") then
+        fail("single-corner mode must suppress periodic all-corner prop traffic")
     end
 end
 

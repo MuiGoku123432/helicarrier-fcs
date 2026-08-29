@@ -75,6 +75,12 @@ function payload.status(messageType, ctx)
     -- looked like.
     telemetry.sampleAt = sample.at
     telemetry.sampleAgeMs = (sample.at and ctx.now) and (ctx.now - sample.at) or nil
+    telemetry.sampleCount = sample.count
+    telemetry.sampleHealthy = sample.healthy
+    telemetry.sampleDurationMs = sample.durationMs
+    telemetry.detailAt = sample.detailAt
+    telemetry.detailAgeMs = (sample.detailAt and ctx.now)
+        and (ctx.now - sample.detailAt) or nil
 
     -- Live scalars. Never sampled. See rule 2 above.
     telemetry.corner = config.corner
