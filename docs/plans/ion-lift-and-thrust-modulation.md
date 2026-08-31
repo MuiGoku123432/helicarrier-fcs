@@ -120,7 +120,41 @@ contaminated points. The prior figures (k=0.223, p=0.521) survive both checks:
 ground hover 2.15 and 3/15 equilibrium at 113.4 against 115.7 observed. **Keep
 the prior constants until a run produces several drag-free points.**
 
-### The real blocker for this measurement
+### Resolved: the `ion_profile` pod mode
+
+Props were confounding the measurement, and adjustable prop RPM turns out to be
+the intended architecture rather than something to avoid: props give fine
+adjustable correction while ions carry overall vertical lift. So the pod gained
+a dedicated `ion_profile` mode rather than a relaxed `response_map_test`.
+
+Its envelope: ions across the full 0..1 range, prop RPM restricted to exactly
+0 or 8, and tilt and azimuth required to be **exactly zero**, so the mode can
+never be used to fly the craft laterally. Shutdown keeps the same exact-zero
+contract as every other mode.
+
+**Props run at 8 RPM, not 0.** Prop thrust is close to linear in RPM (122 RPM is
+about hover; 64 RPM measured 52.1% against a 52.5% linear prediction), so 8 RPM
+is about 6.6% of weight. Across a 100-block sweep that varies by 2.2% of weight,
+a tenth of one ion level -- negligible against the 22.3% per level. 8 RPM also
+keeps the gyroscopic bearings turning, which both `wiredframe_bearing_rpm8_run1`
+and `wiredframe_corner_map_run1` proved works. Zero is permitted by the
+validator but nothing is known about whether the bearings stabilise there, and
+an unstabilised craft under four corner thrusters can tumble.
+
+Removing the props' 52.1% moves hover from about 2.15/15 up to about 4.19/15,
+and makes every sub-hover level a much harder fall: level 0 goes from a 0.48g
+drop to 0.93g. Three guards were added for that:
+
+- The descent ladder stops two levels below the one that first flew, instead of
+  walking to level 0. Those two levels are all the measurement needs.
+- The descent ends early if the craft exceeds 8 blocks/s downward.
+- An arrest phase climbs until the fall is stopped before the shutdown burst.
+  `shutdownBurst` commands ion 0 and RPM 0, which from altitude is an unpowered
+  drop; runs 1 and 2 only survived it because they had already landed.
+
+### Superseded: the earlier blocker
+
+
 
 Props are what make T/W altitude-dependent. With props off, ion thrust is
 altitude-independent and the curve is a clean function of level alone -- one

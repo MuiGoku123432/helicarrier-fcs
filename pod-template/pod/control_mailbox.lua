@@ -9,6 +9,15 @@ mailbox.PROTOCOL = "helicarrier.control-frame.v1"
 mailbox.GROUND_BEARING_LIMIT_DEGREES = 5
 mailbox.GROUND_BEARING_PROP_RPM = 8
 
+-- Prop RPM permitted in ion_profile. Props make thrust roughly linearly in RPM
+-- (122 RPM is about hover, 64 RPM measured 52.1% of weight), so 8 RPM is about
+-- 6.6% of weight: small enough that the ion curve is measurable without the
+-- props confounding it, while still spinning the gyroscopic bearings, which
+-- wiredframe_bearing_rpm8_run1 and wiredframe_corner_map_run1 both proved work
+-- at this RPM. Zero is also allowed for a genuinely ion-only reading, but it
+-- leaves the craft with NO bearing stabilisation.
+mailbox.ION_PROFILE_PROP_RPM = 8
+
 local VALID_CORNERS = { FL = true, FR = true, RL = true, RR = true }
 local STATUS_OFFSET = { FL = 0.00, FR = 0.20, RL = 0.40, RR = 0.60 }
 
@@ -34,6 +43,43 @@ local function validMode(message, command)
     local function finite(value)
         return type(value) == "number" and value == value
             and value > -math.huge and value < math.huge
+    end
+
+    -- Ion lift measurement. Deliberately its own boundary rather than a relaxed
+    -- response_map_test: ions run the full range, props are held at a
+    -- near-zero-lift RPM so they do not confound the measurement, and there is
+    -- NO lateral authority at all. Tilt and azimuth must be exactly zero, so
+    -- this mode can never be used to fly the craft sideways.
+    if message.mode == "ion_profile" then
+        if message.armed ~= true then return false end
+
+        if command.shutdown == true then
+            return command.ionPower == 0
+                and command.fallbackIonPower == 0
+                and command.propRpm == 0
+                and command.tiltDegrees == 0
+                and command.azimuthDegrees == 0
+                and command.fallbackStopAfterMs == nil
+        end
+
+        if command.fallbackStopAfterMs ~= nil then
+            if not finite(command.fallbackStopAfterMs)
+                or command.fallbackStopAfterMs < 1000
+                or command.fallbackStopAfterMs > 60000 then
+                return false
+            end
+        end
+
+        return command.shutdown == false
+            and finite(command.ionPower)
+            and command.ionPower >= 0 and command.ionPower <= 1
+            and finite(command.fallbackIonPower)
+            and command.fallbackIonPower >= 0
+            and command.fallbackIonPower <= command.ionPower
+            and (command.propRpm == 0
+                or command.propRpm == mailbox.ION_PROFILE_PROP_RPM)
+            and command.tiltDegrees == 0
+            and command.azimuthDegrees == 0
     end
 
     local responseMode = message.mode == "response_map_test"

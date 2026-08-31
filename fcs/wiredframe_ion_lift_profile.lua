@@ -59,11 +59,25 @@ local STEP_SETTLE_SECONDS = 1.0   -- ignored after a step before measuring accel
 local STEP_MEASURE_SECONDS = 3.0  -- acceleration window used for the T/W estimate
 local START_LEVEL = 1
 local MAX_LEVEL = 15
--- NOT a free parameter. The pod mailbox validator hardcodes `command.propRpm
--- == 64` for both stationkeep and response_map_test modes, so any other value
--- is rejected at every pod and the run dies on invalid-frame counters. Changing
--- it means redeploying pod-template/pod/control_mailbox.lua to pods 2-5.
-local PROP_RPM = 64
+-- Props are what made run 2 unreadable. They carry 52.1% of weight at 64 RPM
+-- and their thrust falls with air pressure while ion thrust does not, so with
+-- props flying the measurement is a function of altitude as well as ion level
+-- and no clean ion curve exists.
+--
+-- Prop thrust is close to linear in RPM: 122 RPM is about hover and 64 RPM
+-- measures 52.1% of weight, which the linear fit puts at 52.5%. At 8 RPM props
+-- are therefore about 6.6% of weight, and across a 100-block sweep their
+-- variation is 2.2% of weight -- a tenth of one ion level. Negligible.
+--
+-- 8 RPM also keeps the gyroscopic bearings turning, which is what stabilises
+-- the craft. wiredframe_bearing_rpm8_run1 and wiredframe_corner_map_run1 both
+-- exercised the bearings at this RPM successfully.
+--
+-- 0 is permitted by the pod for a genuinely ion-only reading, but NOTHING is
+-- known about whether the bearings stabilise at zero, and an unstabilised craft
+-- under four corner thrusters can tumble. Do not use 0 without deciding that
+-- risk deliberately.
+local PROP_RPM = 8
 local FALLBACK_ION_POWER = 0.07
 local FALLBACK_STOP_AFTER_MS = 5000
 
@@ -74,7 +88,22 @@ local CEILING_BLOCKS = 220
 -- Stops the descent stepping any lower. Below this the harness holds its
 -- current level and waits for the operator rather than walking the craft into
 -- the ground.
-local FLOOR_BLOCKS = 8
+-- Descent guards. Removing the props' 52.1% of weight makes every sub-hover
+-- level a much harder fall than it was in runs 1 and 2: at 8 RPM level 0 is a
+-- 0.93g drop where at 64 RPM it was 0.48g. The old ladder walked all the way to
+-- level 0 and let the props soften the landing, which is no longer available.
+local FLOOR_BLOCKS = 30
+-- Ends the descent ladder if the craft is dropping this fast, whatever level it
+-- is on. Two levels below hover is all the measurement needs; the rest of the
+-- ladder is only risk.
+local MAX_DESCENT_SPEED = 8
+-- Levels below the lowest one that flew are never commanded on the way down.
+local DESCENT_LEVELS_BELOW_HOVER = 2
+-- Before shutting down, climb until the fall is arrested. shutdownBurst commands
+-- ion 0 and RPM 0, which from altitude is an unpowered drop; runs 1 and 2 only
+-- survived it because they had already landed.
+local ARREST_SPEED = 0.5
+local ARREST_TIMEOUT_SECONDS = 25
 
 -- Rise above which the craft is genuinely flying rather than unloading its
 -- contact with the ground. ionsweep.lua records a 0.077 block rise at 96.7% of
@@ -116,7 +145,7 @@ local CONFIRMATION = "ION-LIFT"
 -- Transport
 local CONTROL_CHANNEL, STATUS_CHANNEL = 42042, 42043
 local PROTOCOL = "helicarrier.control-frame.v1"
-local MODE = "response_map_test"
+local MODE = "ion_profile"
 local CORNERS = { "FL", "FR", "RL", "RR" }
 local CORNER_SET = { FL = true, FR = true, RL = true, RR = true }
 local SEND_INTERVAL_SECONDS = 0.25
@@ -407,9 +436,19 @@ if args[1] == "--self-test" then
         "airborne threshold must clear the measured contact-unloading rise")
     assert(GROUND_PROBE_SECONDS < DWELL_SECONDS)
 
-    assert(PROP_RPM == 64,
-        "the pod mailbox validator only accepts propRpm == 64; see the note "
-            .. "above PROP_RPM before changing this")
+    -- The pod's ion_profile validator accepts only these two prop RPMs.
+    assert(PROP_RPM == 8 or PROP_RPM == 0,
+        "ion_profile accepts prop RPM 8 or 0 only; see the note above PROP_RPM")
+    assert(MODE == "ion_profile",
+        "this harness must not run under a mode that permits lateral authority")
+    for _, level in ipairs({ 0, 1, 7, 15 }) do
+        local c = command(level)
+        assert(c.tiltDegrees == 0 and c.azimuthDegrees == 0,
+            "ion profile commands must carry no lateral authority")
+        assert(c.propRpm == PROP_RPM)
+        assert(c.fallbackIonPower <= c.ionPower,
+            "fallback must never exceed the commanded ion power")
+    end
     assert(START_LEVEL >= 1 and MAX_LEVEL <= 15 and START_LEVEL <= MAX_LEVEL)
     assert(FLOOR_BLOCKS < CEILING_BLOCKS)
     assert(STEP_SETTLE_SECONDS + STEP_MEASURE_SECONDS < DWELL_SECONDS,
@@ -538,6 +577,9 @@ local startedAt = os.epoch("utc")
 local records = {}
 local currentLevel
 local ceilingReached = false
+local descentSpeedReached = false
+local arrested = nil
+local liftLevel
 local DONE_EVENT = "ion_lift_done"
 
 local function abort(reason)
@@ -711,6 +753,10 @@ local function holdLevel(level, seconds, direction)
             and now - beganAt >= GROUND_PROBE_SECONDS * 1000 then
             break
         end
+        if direction == "down" and verticalVelocity() <= -MAX_DESCENT_SPEED then
+            descentSpeedReached = true
+            break
+        end
         if not rawSleep(SEND_INTERVAL_SECONDS, DONE_EVENT, requestStop) then break end
     end
 
@@ -820,7 +866,10 @@ local function senderLoop()
         for level = START_LEVEL, MAX_LEVEL do
             if stopRequested or abortReason then break end
             topLevel = level
-            holdLevel(level, DWELL_SECONDS, "up")
+            local record = holdLevel(level, DWELL_SECONDS, "up")
+            if not liftLevel and record.riseEnd > AIRBORNE_BLOCKS then
+                liftLevel = level
+            end
             if ceilingReached then
                 print(string.format(
                     "Ceiling +%d blocks reached at level %d/15; descending.",
@@ -832,16 +881,46 @@ local function senderLoop()
 
     -- Descend back down the same ladder.
     if not runError then
-        for level = topLevel - 1, 0, -1 do
+        -- Only descend a couple of levels below the one that first flew. Lower
+        -- levels add nothing the measurement needs and a great deal of fall.
+        local lowest = math.max(0,
+            (liftLevel or 1) - DESCENT_LEVELS_BELOW_HOVER)
+        for level = topLevel - 1, lowest, -1 do
             if stopRequested or abortReason then break end
             if rise() <= FLOOR_BLOCKS then
-                print(string.format(
-                    "Floor +%d blocks reached at level %d/15; holding.",
-                    FLOOR_BLOCKS, level + 1))
+                print(string.format("Floor +%d blocks reached; ending descent.",
+                    FLOOR_BLOCKS))
                 break
             end
             holdLevel(level, DWELL_SECONDS, "down")
+            if descentSpeedReached then
+                print(string.format(
+                    "Descending faster than %d blocks/s; ending descent.",
+                    MAX_DESCENT_SPEED))
+                break
+            end
         end
+    end
+
+    -- Never hand an unpowered craft back to gravity. Climb until the fall is
+    -- arrested before the exact-zero shutdown burst.
+    if not stopRequested and latestSample and verticalVelocity() < -ARREST_SPEED then
+        phase = "arrest"
+        local arrestLevel = math.max(topLevel, (liftLevel or 1) + 1)
+        print(string.format("Arresting descent at level %d/15 before shutdown.",
+            arrestLevel))
+        local stopAt = os.epoch("utc") + ARREST_TIMEOUT_SECONDS * 1000
+        while os.epoch("utc") < stopAt do
+            transmit(arrestLevel)
+            if verticalVelocity() >= -ARREST_SPEED then
+                arrested = true
+                break
+            end
+            if not rawSleep(SEND_INTERVAL_SECONDS, DONE_EVENT, requestStop) then break end
+        end
+        if arrested == nil then arrested = false end
+        print(arrested and "Descent arrested."
+            or "WARNING: descent NOT arrested before shutdown.")
     end
 
     if runError then print("RUN ERROR: " .. tostring(runError)) end
@@ -888,6 +967,10 @@ local lines = {
     "max_level=" .. tostring(MAX_LEVEL),
     "ceiling_blocks=" .. tostring(CEILING_BLOCKS),
     "ceiling_reached=" .. tostring(ceilingReached),
+    "descent_speed_reached=" .. tostring(descentSpeedReached),
+    "lift_level=" .. tostring(liftLevel),
+    "descent_arrested=" .. tostring(arrested),
+    "prop_rpm_note=props_at_" .. tostring(PROP_RPM) .. "rpm_near_zero_lift",
     "gravity_blocks_per_second2=" .. string.format("%.3f", GRAVITY_BLOCKS_PER_SECOND2),
     "hover_level=" .. (hoverLevel and string.format("%.3f", hoverLevel) or "not_bracketed"),
     "hover_note=" .. tostring(hoverNote),

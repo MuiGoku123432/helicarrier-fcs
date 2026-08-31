@@ -46,6 +46,12 @@ check(mailbox:find('message.mode == "ground_apply"', 1, true),
     "ground_apply must retain a dedicated validation boundary")
 check(mailbox:find('message.mode == "ground_bearing_test"', 1, true),
     "ground_bearing_test must have a separate validation boundary")
+check(mailbox:find('message.mode == "ion_profile"', 1, true),
+    "ion_profile must have a separate validation boundary")
+check(mailbox:find("mailbox.ION_PROFILE_PROP_RPM = 8", 1, true),
+    "ion profile prop RPM must remain explicit")
+check(mailbox:find("command.propRpm == mailbox.ION_PROFILE_PROP_RPM", 1, true),
+    "ion_profile must bound prop RPM to the explicit near-zero-lift value")
 check(mailbox:find("command.ionPower == 0", 1, true),
     "ground modes must reject non-zero ion power")
 check(mailbox:find("command.propRpm == 0", 1, true),

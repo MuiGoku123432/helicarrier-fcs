@@ -196,4 +196,45 @@ near(applied.tilt[1], 2, 1e-9, "stationkeep live tilt")
 near(applied.tilt[2], 90, 1e-9, "stationkeep live azimuth")
 assert(applied.ionZero == nil, "stationkeep was routed through ground zero-ion")
 
+-- ion_profile: ions free, props pinned near zero lift, NO lateral authority.
+local function ionProfileFrame(overrides)
+    local corners = {}
+    for _, corner in ipairs({ "FL", "FR", "RL", "RR" }) do
+        local c = {
+            ionPower = 0.5, fallbackIonPower = 0.07, fallbackStopAfterMs = 5000,
+            propRpm = 8, tiltDegrees = 0, azimuthDegrees = 0, shutdown = false,
+        }
+        for k, v in pairs(overrides or {}) do c[k] = v end
+        corners[corner] = c
+    end
+    return {
+        protocol = "helicarrier.control-frame.v1", kind = "control_frame",
+        mode = "ion_profile", armed = true, session = "ion-test",
+        sequence = 1, sentAt = 1000, validForMs = 750, corners = corners,
+    }
+end
+
+assert(mailbox().acceptFrame(ionProfileFrame(), 1000) == true,
+    "ion_profile must accept full-range ions at the bounded prop RPM")
+assert(mailbox().acceptFrame(ionProfileFrame({ ionPower = 1.0 }), 1000) == true,
+    "ion_profile must allow the top ion level")
+assert(mailbox().acceptFrame(ionProfileFrame({ propRpm = 0 }), 1000) == true,
+    "ion_profile must allow a genuinely ion-only run")
+assert(mailbox().acceptFrame(ionProfileFrame({ propRpm = 64 }), 1000) == false,
+    "ion_profile must reject the flight prop RPM")
+assert(mailbox().acceptFrame(ionProfileFrame({ propRpm = 9 }), 1000) == false,
+    "ion_profile must reject an unbounded prop RPM")
+assert(mailbox().acceptFrame(ionProfileFrame({ tiltDegrees = 1 }), 1000) == false,
+    "ion_profile must have no lateral authority whatsoever")
+assert(mailbox().acceptFrame(ionProfileFrame({ azimuthDegrees = 90 }), 1000) == false,
+    "ion_profile must reject any azimuth")
+assert(mailbox().acceptFrame(ionProfileFrame({ ionPower = 1.5 }), 1000) == false,
+    "ion_profile must keep ion power inside 0..1")
+assert(mailbox().acceptFrame(ionProfileFrame({ fallbackIonPower = 0.9 }), 1000) == false,
+    "ion_profile fallback must not exceed the commanded ion power")
+
+-- The flight modes must be unaffected by the new boundary.
+assert(mailbox().acceptFrame(accepted, 1000) == true,
+    "stationkeep must still accept its own envelope after adding ion_profile")
+
 print("stationkeep controller/protocol: PASS")
