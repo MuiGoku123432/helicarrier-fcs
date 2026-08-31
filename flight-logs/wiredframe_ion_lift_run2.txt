@@ -1,0 +1,39 @@
+WIRED ION LIFT PROFILE RESULT
+session=1-ionlift-1788212488824
+overall=PASS
+termination=complete
+run_error=nil
+abort_reason=nil
+shutdown_error=nil
+duration_seconds=129.271
+dwell_seconds=30
+step_measure_seconds=3
+prop_rpm=64
+start_level=1
+max_level=15
+ceiling_blocks=220
+ceiling_reached=true
+gravity_blocks_per_second2=4.400
+hover_level=3.552
+hover_bracket=3/15(-1.922)..4/15(1.557)
+airborne_blocks=0.5
+levels_recorded=6
+frames_sent=534
+samples=626
+final_sequence=534
+modem=bottom
+sublevel=global
+
+# direction level state ion_command held_s rise_start rise_end vy_start vy_end peak_vy accel thrust_to_weight
+# only rows marked airborne are thrust measurements; grounded rows measure the floor
+level up 1 grounded 0.0717 8.00 0.0001 0.0014 0.0010 0.0151 0.0628 -0.009120 0.997927
+level up 2 grounded 0.1383 8.00 0.0014 0.0266 0.0151 -0.0857 0.0873 -0.005798 0.998682
+level up 3 transition 0.2050 30.25 0.0266 122.5520 -0.0857 0.4828 7.0319 1.284205 1.291865
+level up 4 airborne 0.2717 13.25 122.5520 220.5045 0.4828 9.7351 9.8932 1.557322 1.353937
+level down 3 airborne 0.2050 30.25 220.5045 90.6908 9.7351 -2.8299 9.7351 -1.921831 0.563220
+level down 2 grounded 0.1383 30.00 90.6908 0.0924 -2.8299 0.0514 0.7256 -1.293805 0.705953
+
+FL applied=534 ion=0 rpm=0 missing=0 duplicate=0 order=0 invalid=0 expired=0 errors=0 fallback=0 stops=0
+FR applied=534 ion=0 rpm=0 missing=0 duplicate=0 order=0 invalid=0 expired=0 errors=0 fallback=0 stops=0
+RL applied=534 ion=0 rpm=0 missing=0 duplicate=0 order=0 invalid=0 expired=0 errors=0 fallback=0 stops=0
+RR applied=534 ion=0 rpm=0 missing=0 duplicate=0 order=0 invalid=0 expired=0 errors=0 fallback=0 stops=0

@@ -92,6 +92,19 @@ local AIRBORNE_BLOCKS = 0.5
 -- briefly and move on instead of burning a full dwell sitting on the floor.
 local GROUND_PROBE_SECONDS = 8
 
+-- Prop thrust falls with air pressure on a 250-block scale height while ion
+-- thrust does not, so T/W is a function of BOTH level and altitude and there is
+-- no single hover level. Run 2 interpolated 3/15 measured at 220 blocks against
+-- 4/15 measured at 122 blocks, where props differ by 32%, and reported a
+-- meaningless 3.552. Two levels may only be compared if they were measured at
+-- nearly the same altitude.
+local HOVER_COMPARE_MAX_ALTITUDE_GAP = 25
+
+-- Acceleration is only (T - W)/m while the craft is near rest. Run 2's descent
+-- readings were taken at +9.7 and -2.8 blocks/s, where drag is a large part of
+-- the measured value. Readings above this speed are recorded but never fitted.
+local DRAG_FREE_SPEED = 1.0
+
 -- Only for the indicative T/W column. Estimated from drift-test run 6, where
 -- level 3/15 (about 1.19 of weight) produced roughly 0.83 blocks/s^2 early in
 -- the climb. The hover-level result does not depend on this value.
@@ -239,48 +252,67 @@ end
 -- ---------------------------------------------------------------------------
 
 -- Interpolates the level at which vertical acceleration crosses zero, i.e.
--- where thrust equals weight. Unlike the T/W column this does not depend on the
--- configured gravity, which is why it is the result this test exists for.
+-- where thrust equals weight AT THE ALTITUDE THE READINGS WERE TAKEN.
 --
--- ONLY airborne records may feed it. A grounded craft reads ~0 acceleration at
--- every level because the floor is carrying it, so grounded samples both
--- fabricate a crossing near the bottom of the ladder and hide the real one. Run
--- 1 failed to bracket for exactly this reason: nothing ever read negative,
--- because the ground never let it.
+-- There is no single hover level for this craft. Prop thrust falls with air
+-- pressure while ion thrust does not, so hover level rises with altitude. Two
+-- levels may therefore only be compared if they were measured at nearly the
+-- same height, and the answer must be reported with that height attached.
 --
--- Both legs contribute. The descent supplies the sub-hover levels, since by then
--- the craft is high enough to actually fall.
+-- Rows are excluded unless they are "airborne": a grounded craft reads ~0
+-- acceleration at every level because the floor carries it, and a reading taken
+-- at speed is mostly drag. Run 1 failed to bracket because the ground never let
+-- anything read negative; run 2 bracketed across a 98-block altitude gap and
+-- produced a meaningless answer. Both are guarded here, and the function
+-- returns WHY it refused rather than a number nobody can trust.
 local function hoverLevelFrom(records)
-    local byLevel = {}
+    local usable = {}
     for _, record in ipairs(records) do
-        if record.state == "airborne" and record.acceleration then
-            -- Prefer the descent reading: it is measured in settled flight,
-            -- while an ascent reading can still carry the previous step.
-            local existing = byLevel[record.level]
+        if record.state == "airborne" and record.acceleration
+            and record.measureRise then
+            local existing = usable[record.level]
             if not existing or record.direction == "down" then
-                byLevel[record.level] = record
+                usable[record.level] = record
             end
         end
     end
 
     local levels = {}
-    for level in pairs(byLevel) do levels[#levels + 1] = level end
+    for level in pairs(usable) do levels[#levels + 1] = level end
     table.sort(levels)
+    if #levels < 2 then
+        return nil, "fewer than two drag-free airborne levels"
+    end
 
+    local rejectedForAltitude = false
     for index = 2, #levels do
-        local below, above = byLevel[levels[index - 1]], byLevel[levels[index]]
+        local below, above = usable[levels[index - 1]], usable[levels[index]]
         if below.acceleration < 0 and above.acceleration >= 0 then
-            local span = above.acceleration - below.acceleration
-            if span > 0 then
-                return below.level
-                    + (0 - below.acceleration) / span * (above.level - below.level),
-                    string.format("%d/15(%.3f)..%d/15(%.3f)",
-                        below.level, below.acceleration, above.level, above.acceleration)
+            local gap = math.abs(above.measureRise - below.measureRise)
+            if gap > HOVER_COMPARE_MAX_ALTITUDE_GAP then
+                rejectedForAltitude = true
+            else
+                local span = above.acceleration - below.acceleration
+                if span > 0 then
+                    local level = below.level
+                        + (0 - below.acceleration) / span
+                            * (above.level - below.level)
+                    return level, string.format(
+                        "%d/15(a=%.3f,y=%.1f)..%d/15(a=%.3f,y=%.1f) gap %.1f blocks",
+                        below.level, below.acceleration, below.measureRise,
+                        above.level, above.acceleration, above.measureRise, gap)
+                end
             end
-            return nil, nil
         end
     end
-    return nil, nil
+
+    if rejectedForAltitude then
+        return nil, string.format(
+            "bracket found but the two levels were measured more than %d blocks "
+                .. "apart; prop thrust differs too much to compare them",
+            HOVER_COMPARE_MAX_ALTITUDE_GAP)
+    end
+    return nil, "no sign change across drag-free airborne levels"
 end
 
 if args[1] == "--self-test" then
@@ -327,14 +359,17 @@ if args[1] == "--self-test" then
         "grounded and transition rows must not produce a hover level")
 
     local flying = {
-        { level = 1, direction = "down", state = "airborne", acceleration = -2.0 },
-        { level = 2, direction = "down", state = "airborne", acceleration = -0.5 },
-        { level = 3, direction = "down", state = "airborne", acceleration = 1.5 },
+        { level = 1, direction = "down", state = "airborne",
+          acceleration = -2.0, measureRise = 100 },
+        { level = 2, direction = "down", state = "airborne",
+          acceleration = -0.5, measureRise = 102 },
+        { level = 3, direction = "down", state = "airborne",
+          acceleration = 1.5, measureRise = 104 },
     }
-    local level, bracket = hoverLevelFrom(flying)
+    local level, note = hoverLevelFrom(flying)
     assert(level and math.abs(level - 2.25) < 1e-9,
-        "airborne rows must bracket hover by interpolation")
-    assert(bracket and bracket:find("2/15") and bracket:find("3/15"))
+        "airborne rows at matched altitude must bracket hover")
+    assert(note and note:find("2/15") and note:find("3/15"))
 
     -- Mixed: the grounded ascent rows must not shift the answer.
     local mixed = {}
@@ -344,6 +379,30 @@ if args[1] == "--self-test" then
     assert(mixedLevel and math.abs(mixedLevel - 2.25) < 1e-9,
         "grounded rows must not perturb the airborne fit")
 
+    -- Run 2's actual failure: a real sign change, but measured 98 blocks apart.
+    -- Props differ by a third across that gap, so this must refuse, not answer.
+    local spread = {
+        { level = 3, direction = "down", state = "airborne",
+          acceleration = -1.922, measureRise = 220.5 },
+        { level = 4, direction = "up", state = "airborne",
+          acceleration = 1.557, measureRise = 122.6 },
+    }
+    local spreadLevel, spreadNote = hoverLevelFrom(spread)
+    assert(spreadLevel == nil,
+        "levels measured far apart in altitude must not be interpolated")
+    assert(spreadNote and spreadNote:find("apart"), "the refusal must say why")
+
+    -- A reading taken at speed is mostly drag and must be excluded upstream.
+    local dragged = {
+        { level = 2, direction = "down", state = "airborne_dragged",
+          acceleration = -1.29, measureRise = 90 },
+        { level = 4, direction = "up", state = "airborne",
+          acceleration = 1.56, measureRise = 92 },
+    }
+    assert(hoverLevelFrom(dragged) == nil,
+        "drag-contaminated rows must not be fitted")
+
+    assert(DRAG_FREE_SPEED > 0 and HOVER_COMPARE_MAX_ALTITUDE_GAP > 0)
     assert(AIRBORNE_BLOCKS > 0.077,
         "airborne threshold must clear the measured contact-unloading rise")
     assert(GROUND_PROBE_SECONDS < DWELL_SECONDS)
@@ -612,6 +671,7 @@ local function holdLevel(level, seconds, direction)
     local riseAtStart, velocityAtStart = rise(), verticalVelocity()
     local velocityAtMeasureStart, velocityAtMeasureEnd
     local measuredFrom, measuredTo
+    local riseAtMeasureStart, riseAtMeasureEnd
     local peakVelocity, minVelocity = velocityAtStart, velocityAtStart
 
     while os.epoch("utc") < stopAt do
@@ -624,9 +684,11 @@ local function holdLevel(level, seconds, direction)
         if vy < minVelocity then minVelocity = vy end
         if velocityAtMeasureStart == nil and now >= measureFrom then
             velocityAtMeasureStart, measuredFrom = vy, now
+            riseAtMeasureStart = rise()
         end
         if velocityAtMeasureStart ~= nil and now <= measureTo then
             velocityAtMeasureEnd, measuredTo = vy, now
+            riseAtMeasureEnd = rise()
         end
 
         if not latestTelemetryAt
@@ -659,17 +721,27 @@ local function holdLevel(level, seconds, direction)
             / ((measuredTo - measuredFrom) / 1000)
     end
 
-    -- A reading is only a thrust measurement if the craft was already flying
-    -- for the whole dwell. Grounded levels measure the floor; the level that
-    -- lifts off measures a transition and is dirty at both ends.
+    -- Classify on the MEASUREMENT WINDOW, not the end of the dwell. Run 2's
+    -- descent from 90 blocks to the ground was marked "grounded" because it
+    -- finished on the floor, discarding a reading that was taken at 90 blocks
+    -- in free flight. What matters is where the craft was while the
+    -- acceleration was being sampled.
     local riseEnd = rise()
+    local measureLow = math.min(riseAtMeasureStart or riseAtStart,
+        riseAtMeasureEnd or riseAtStart)
     local state
-    if riseEnd <= AIRBORNE_BLOCKS then
-        state = "grounded"
-    elseif riseAtStart <= AIRBORNE_BLOCKS then
-        state = "transition"
+    if measureLow <= AIRBORNE_BLOCKS then
+        state = riseEnd > AIRBORNE_BLOCKS and "transition" or "grounded"
     else
         state = "airborne"
+    end
+
+    -- Drag is a large part of the measured acceleration at speed, so a reading
+    -- taken while moving fast is recorded but must never be fitted.
+    local measureSpeed = math.max(math.abs(velocityAtMeasureStart or 0),
+        math.abs(velocityAtMeasureEnd or 0))
+    if state == "airborne" and measureSpeed > DRAG_FREE_SPEED then
+        state = "airborne_dragged"
     end
 
     local record = {
@@ -680,6 +752,8 @@ local function holdLevel(level, seconds, direction)
         heldSeconds = (os.epoch("utc") - beganAt) / 1000,
         riseStart = riseAtStart,
         riseEnd = riseEnd,
+        measureRise = riseAtMeasureStart,
+        measureSpeed = measureSpeed,
         velocityStart = velocityAtStart,
         velocityEnd = verticalVelocity(),
         peakVelocity = peakVelocity,
@@ -794,7 +868,7 @@ end
 
 local endedAt = os.epoch("utc")
 
-local hoverLevel, hoverBracket = hoverLevelFrom(records)
+local hoverLevel, hoverNote = hoverLevelFrom(records)
 
 local overall = not runError and not abortReason and not shutdownError
 local lines = {
@@ -816,7 +890,9 @@ local lines = {
     "ceiling_reached=" .. tostring(ceilingReached),
     "gravity_blocks_per_second2=" .. string.format("%.3f", GRAVITY_BLOCKS_PER_SECOND2),
     "hover_level=" .. (hoverLevel and string.format("%.3f", hoverLevel) or "not_bracketed"),
-    "hover_bracket=" .. tostring(hoverBracket),
+    "hover_note=" .. tostring(hoverNote),
+    "hover_compare_max_altitude_gap=" .. tostring(HOVER_COMPARE_MAX_ALTITUDE_GAP),
+    "drag_free_speed=" .. tostring(DRAG_FREE_SPEED),
     "airborne_blocks=" .. tostring(AIRBORNE_BLOCKS),
     "levels_recorded=" .. tostring(#records),
     "frames_sent=" .. tostring(framesSent),
@@ -825,15 +901,16 @@ local lines = {
     "modem=" .. tostring(modemName),
     "sublevel=" .. tostring(sublevelSource),
     "",
-    "# direction level state ion_command held_s rise_start rise_end vy_start vy_end peak_vy accel thrust_to_weight",
+    "# direction level state ion_command held_s measure_rise measure_speed rise_start rise_end vy_start vy_end peak_vy accel thrust_to_weight",
     "# only rows marked airborne are thrust measurements; grounded rows measure the floor",
 }
 
 for _, record in ipairs(records) do
     lines[#lines + 1] = string.format(
-        "level %s %d %s %.4f %.2f %.4f %.4f %.4f %.4f %.4f %s %s",
+        "level %s %d %s %.4f %.2f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %s %s",
         record.direction, record.level, record.state,
         record.commandedPower, record.heldSeconds,
+        record.measureRise or -1, record.measureSpeed or -1,
         record.riseStart, record.riseEnd, record.velocityStart, record.velocityEnd,
         record.peakVelocity,
         record.acceleration and string.format("%.6f", record.acceleration) or "nil",

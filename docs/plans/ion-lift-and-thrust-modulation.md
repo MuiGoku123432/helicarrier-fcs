@@ -80,6 +80,59 @@ harness assumes for its indicative T/W column. That reading spans the
 ground-to-flight transition so it is not clean, but the next run should settle
 it and the constant should be updated from airborne data.
 
+**Run 2 (2026-08-31) passed, and showed the test cannot answer the question as
+posed.** `flight-logs/wiredframe_ion_lift_run2.txt`. Clean run: 534/534 frames,
+zero faults, grounded levels probed and skipped, descent leg reached, ceiling
+hit at +220 blocks. It reported `hover_level=3.552`. **That number is an
+artifact.**
+
+The same ion level gave opposite results at different heights:
+
+| 3/15 ascending | from 0.03 blocks | climbed to 122.55 | a = +1.284 |
+|---|---|---|---|
+| 3/15 descending | from 220.50 blocks | fell to 90.69 | a = -1.922 |
+
+It bracketed 3/15 measured at 220 blocks against 4/15 measured at 122 blocks.
+Props lose 32% of their thrust across that gap, so the interpolation compared
+two effectively different craft.
+
+**There is no single hover level.** Prop thrust falls with air pressure and ion
+thrust does not, so hover level is a function of altitude. Any answer must carry
+the height it was measured at. The harness now refuses to interpolate across
+more than `HOVER_COMPARE_MAX_ALTITUDE_GAP` (25 blocks) and reports why.
+
+Two further defects the run exposed, both fixed:
+
+- Rows were classified by where the craft ENDED the dwell, so the descent from
+  90 blocks to the ground was marked `grounded` and its perfectly good 90-block
+  reading was discarded. Classification now uses the measurement window.
+- Acceleration is only `(T - W)/m` near rest. Run 2's descent readings were
+  taken at +9.7 and -2.8 blocks/s, where drag dominates. Only one of three
+  points (`up 4`, at +0.48 blocks/s) was clean. Readings above `DRAG_FREE_SPEED`
+  are now recorded as `airborne_dragged` and never fitted.
+
+**On the thrust constants.** Fitting `a = g(kL + p*exp(-y/250) - 1)` to run 2's
+three points gives k=0.165, p=0.791, g=10.8, which reproduces the independently
+measured 3/15 equilibrium at 115.7 blocks to within 3%. But it puts ground hover
+at 1.27/15, and run 2 shows 2/15 failing to lift off the ground at all, so the
+fit is refuted by the run's own liftoff evidence and is being dragged by the two
+contaminated points. The prior figures (k=0.223, p=0.521) survive both checks:
+ground hover 2.15 and 3/15 equilibrium at 113.4 against 115.7 observed. **Keep
+the prior constants until a run produces several drag-free points.**
+
+### The real blocker for this measurement
+
+Props are what make T/W altitude-dependent. With props off, ion thrust is
+altitude-independent and the curve is a clean function of level alone -- one
+measurement per level, no altitude confound, no atmosphere model needed.
+
+**That run cannot be commanded today.** `control_mailbox.lua` requires
+`command.propRpm == 64` for stationkeep and response_map_test, and the only
+modes permitting `propRpm == 0` also force `ionPower == 0`. So there is no way
+to run ions without props, which is both the clean measurement AND the
+architecture this plan is aiming at. A pod-side change is on the critical path
+for both.
+
 Caveats built into the harness:
 
 - The sweep is **altitude-bounded, not level-bounded**. Upper levels accelerate
