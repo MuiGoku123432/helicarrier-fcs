@@ -229,6 +229,7 @@ Known rollback copies:
 - `/pod/main.lua.pre-shadow-mailbox-20260829-v1`
 - `/fcs/wiredframe_response_map_test.lua.pre-zero-tilt-readback-20260829-v1`
 - `/pod/control_apply.lua.pre-write-elision-20260830-v1` on pods 2-5 (SHA-256 `2b8c074a...`)
+- `/fcs/wired_stationkeep_protocol.lua.pre-highpower-20260831` on FCS-DEV (SHA-256 `3243666f...`, the run-3 baseline `HIGH_POWER=0.20`)
 
 Known deployment hashes recorded at the time:
 
@@ -242,7 +243,7 @@ Known deployment hashes recorded at the time:
 | FCS `sensor_rate_test.lua` | `76f26c31` |
 | FCS `stationkeep_control.lua` | `836e7d315286877be5a408a7c1d0a18d19b85a74417f1f640208d5d3231efed2` (run-3 baseline) |
 | FCS `wiredframe_stationkeep.lua` | `2106005d9a246ca29a147bd7e0c9de1b31f08a7b475f9104c25536222ed83abd` (signed-trace runner) |
-| FCS `wired_stationkeep_protocol.lua` | `3243666f92ce9cd997713f0d2451ea99d6f69336dfd5e8c54c8a8f77b2a38861` (unchanged during tuning) |
+| FCS `wired_stationkeep_protocol.lua` | `67f7bf3e4049ec974886873a7be09a0555f84b4817ff3bc5b02f1545a04a4955` (deployed 2026-08-31; `HIGH_POWER` raised 0.20 -> 0.27, ion level 3/15 -> 4/15, for flight-height testing) |
 
 Verify live files before relying on these values after any manual server-side change.
 

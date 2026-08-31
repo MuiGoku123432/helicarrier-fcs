@@ -6,7 +6,10 @@ protocol.CONTROL_CHANNEL = 42042
 protocol.STATUS_CHANNEL = 42043
 protocol.CORNERS = { "FL", "FR", "RL", "RR" }
 protocol.PROP_RPM = 64
-protocol.HIGH_POWER = 0.20
+-- Ion output is quantised to fifteenths (applied = floor(commanded * 15) / 15),
+-- so the smallest real increase to the high pulse is one level: 3/15 -> 4/15.
+-- Raised for flight-height testing; low and fallback levels are unchanged.
+protocol.HIGH_POWER = 0.27
 protocol.LOW_POWER = 0.14
 protocol.FALLBACK_POWER = 0.07
 protocol.FALLBACK_STOP_AFTER_MS = 5000

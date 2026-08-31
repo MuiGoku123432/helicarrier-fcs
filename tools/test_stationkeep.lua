@@ -190,7 +190,7 @@ local applyInstance = applyModule.new(applyMailbox, {}, {
     bearingPropRpm = 64,
 })
 assert(applyInstance.applyLatest() == true)
-near(applied.ion[1], 0.20, 1e-9, "stationkeep live ion")
+near(applied.ion[1], protocol.HIGH_POWER, 1e-9, "stationkeep live ion")
 near(applied.rpm[1], 64, 1e-9, "stationkeep live RPM")
 near(applied.tilt[1], 2, 1e-9, "stationkeep live tilt")
 near(applied.tilt[2], 90, 1e-9, "stationkeep live azimuth")
