@@ -96,7 +96,7 @@ The active pod runtime accepts separate, explicitly bounded modes:
 - `ground_bearing_test`: disarmed, ion power 0, propeller RPM 8, azimuth 0, and bearing tilt limited to `+/-5` degrees.
 - `response_map_test`: armed test envelope with ion power from 0 through 1, fallback ion power no greater than the commanded value, propeller RPM exactly 64, azimuth from 0 through 360 degrees, and tilt limited to `+/-1` degree. Its explicit shutdown frame requires every actuator field to be exactly zero.
 
-The response-map sender currently exposes only `--ground-check`: ion power 0, tilt 0, RPM 64 for a 30-second spool window, followed by exact-zero shutdown and fallback verification. Flight pulses remain locked in the sender even though the pod-side mode has bounded nonzero fields.
+The response-map sender still exposes only `--ground-check`: ion power 0, tilt 0, RPM 64 for a 30-second spool window, followed by exact-zero shutdown and fallback verification. A separate `fcs/wiredframe_ground_ion_test.lua` harness now exposes `--ground-ion-check`. It requires the operator to type `GROUND-ION`, proves fresh clean zero-ion acknowledgements from all four pods before applying power, commands ion power 0.14 for five seconds at RPM 64 with tilt and azimuth exactly zero, then deliberately stops frames to prove the two fallback stages before sending exact-zero shutdown. Neutral hover and all tilt pulses remain locked.
 
 A valid frame also needs `kind="control_frame"`, a non-empty session, a positive integer sequence, a timestamp, and a validity window between 50 and 5000 ms. Duplicate, older, malformed, wrong-protocol, expired, or unsafe frames are refused or counted. When the last safe applied command becomes stale, the pod performs the mode-specific local fallback once and records it.
 
@@ -238,11 +238,12 @@ The ground gate passed (`wiredframe_response_map_ground_run5.txt`), the control-
 
 Immediate sequence:
 
-1. Choose and document safe `fallbackIonPower` and `fallbackStopAfterMs` values. Both are FCS policy; the pod deliberately holds no opinion.
-2. Implement and run a separately gated grounded nonzero-ion test, then prove neutral hover before introducing tilt. Run 9 validates the transport and write-elision path but does not authorize a flight pulse.
-3. Map one axis and one sign at a time with paired `+/-1` degree pulses and a return to the same safe baseline. Measure command-to-ack, command-to-motion latency, angular acceleration, X/Z acceleration, vertical coupling, and recovery.
-4. Build the live loop around the slower of the measured sensor layer and the changing-state actuator latency. Stagger reads by layer and keep mass, centre of mass, and inertia off the control cycle.
-5. Use the plant map to implement shadow-only roll/pitch rate damping before applying any closed-loop correction. Then add the slower attitude reference, X/Z velocity hold, and finally slow bounded mass/authority adaptation.
+1. The provisional first-pulse policy is `fallbackIonPower=0.07` and `fallbackStopAfterMs=5000`. The thruster driver quantises these commands to fifteenths: the grounded test commands 0.14 (level 2/15) and falls back to 0.07 (level 1/15). Both are below the documented 0.195 hover command. These values belong to FCS policy, not the pod, and remain provisional until live motion data validates descent behavior.
+2. Deploy and run `/fcs/wiredframe_ground_ion_test.lua --ground-ion-check` only while grounded and restrained. Require `overall=PASS`, fresh clean precheck acknowledgements, nonzero application at all four pods, both fallback stages, exact-zero shutdown, and zero transport/application faults.
+3. Only after that grounded report passes, implement and run a separate low-altitude neutral-hover proof with live pose/velocity/rate aborts. The grounded harness deliberately does not expose a hover flag, and no tilt pulse is authorized yet.
+4. Map one axis and one sign at a time with paired `+/-1` degree pulses and a return to the same safe baseline. Measure command-to-ack, command-to-motion latency, angular acceleration, X/Z acceleration, vertical coupling, and recovery.
+5. Build the live loop around the slower of the measured sensor layer and the changing-state actuator latency. Stagger reads by layer and keep mass, centre of mass, and inertia off the control cycle.
+6. Use the plant map to implement shadow-only roll/pitch rate damping before applying any closed-loop correction. Then add the slower attitude reference, X/Z velocity hold, and finally slow bounded mass/authority adaptation.
 
 The detailed staged plan and acceptance gates are in `docs/stationkeeping-control-contract.md`.
 
