@@ -239,9 +239,9 @@ Known deployment hashes recorded at the time:
 
 | File | Recorded SHA-256 prefix |
 |---|---|
-| pod `main.lua` | `8e90c52a` |
+| pod `main.lua` | `804f7044...` on pods 2-5, deployed 2026-08-31 (passes `ION_PROFILE_PROP_RPM` through). **Requires a pod reboot.** |
 | pod `control_mailbox.lua` | `cde48f99...` on pods 2-5, deployed 2026-08-31 with the `ion_profile` mode. **Requires a pod reboot to take effect**; until then the pods still run `5cd1274f...`. Previous file kept as `control_mailbox.lua.pre-ionprofile-20260831`. |
-| pod `control_apply.lua` | `26a6ac0b` on pods 2-5; rebooted and live-verified by response-map ground run 9 |
+| pod `control_apply.lua` | `75c98cf1...` on pods 2-5, deployed 2026-08-31 with the `ion_profile` live-ion route. Previous file kept as `control_apply.lua.pre-ionprofile-20260831`. **Requires a pod reboot.** |
 | FCS `wiredframe_actuator_test.lua` | `5bde2f6e` |
 | FCS `wiredframe_response_map_test.lua` | `198129a1` (local/live verified 2026-08-30) |
 | FCS `sensor_rate_test.lua` | `76f26c31` |

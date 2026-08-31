@@ -152,6 +152,20 @@ drop to 0.93g. Three guards were added for that:
   `shutdownBurst` commands ion 0 and RPM 0, which from altitude is an unpowered
   drop; runs 1 and 2 only survived it because they had already landed.
 
+**A new pod mode is two changes, not one.** The first `ion_profile` flight had
+the ions never come on at all. `control_mailbox.lua` had been taught to ACCEPT
+the mode, but `control_apply.lua` decides how to APPLY it and routes anything
+that is not `response_map_test` or `stationkeep` down a deliberate zero-ion
+path: `applied.ionPower = responseMode and applyIon(...) or applyIonZero(0)`.
+Its own `safeControlEntry` also returned false for the unknown mode. The repo's
+existing `tools/test_stationkeep.lua` warns about precisely this -- "the mailbox
+accepting a mode is not enough" -- and the warning was not heeded.
+
+Both are fixed, and `tools/test_stationkeep.lua` now asserts that `ion_profile`
+reaches the live ion path with the right power, the right prop RPM, and exactly
+zero tilt. That assertion was checked against the broken build first and does
+fail there, so it is a real regression test rather than a decorative one.
+
 ### Superseded: the earlier blocker
 
 

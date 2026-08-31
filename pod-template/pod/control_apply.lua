@@ -25,6 +25,7 @@ function apply.new(controlMailbox, thrusterApi, dependencies)
             end
             return propsApi.setRpm(rpm)
         end
+    local ionProfilePropRpm = dependencies.ionProfilePropRpm or 8
     local applyTilt = dependencies.applyTilt
         or function(angle, azimuth)
             if not propsApi or type(propsApi.setTilt) ~= "function" then
@@ -129,6 +130,29 @@ function apply.new(controlMailbox, thrusterApi, dependencies)
                 and command.azimuthDegrees == 0
         end
 
+        -- Ion lift measurement. Ions run the full range; props are pinned to
+        -- the near-zero-lift RPM the mailbox validated; there is no lateral
+        -- authority at all, so tilt and azimuth must be exactly zero.
+        if entry.mode == "ion_profile" then
+            if command.shutdown == true then
+                return command.ionPower == 0
+                    and command.fallbackIonPower == 0
+                    and command.propRpm == 0
+                    and command.tiltDegrees == 0
+                    and command.azimuthDegrees == 0
+            end
+            return command.shutdown == false
+                and finite(command.ionPower)
+                and command.ionPower >= responseIonMin
+                and command.ionPower <= responseIonMax
+                and finite(command.fallbackIonPower)
+                and command.fallbackIonPower >= responseIonMin
+                and command.fallbackIonPower <= command.ionPower
+                and (command.propRpm == 0 or command.propRpm == ionProfilePropRpm)
+                and command.tiltDegrees == 0
+                and command.azimuthDegrees == 0
+        end
+
         local responseMode = entry.mode == "response_map_test"
         local stationkeepMode = entry.mode == "stationkeep"
         if responseMode or stationkeepMode then
@@ -200,8 +224,14 @@ function apply.new(controlMailbox, thrusterApi, dependencies)
             local command = entry.command
             local responseMode = entry.mode == "response_map_test"
                 or entry.mode == "stationkeep"
-            local bearingMode = entry.mode == "ground_bearing_test" or responseMode
-            local ionPower = responseMode
+            -- ion_profile is a live-ion mode. Without this it falls through to
+            -- the zero-ion path that unknown modes intentionally receive, and
+            -- the thrusters never come on at all.
+            local ionProfileMode = entry.mode == "ion_profile"
+            local liveIonMode = responseMode or ionProfileMode
+            local bearingMode = entry.mode == "ground_bearing_test"
+                or responseMode or ionProfileMode
+            local ionPower = liveIonMode
                 and (forceSafe and command.fallbackIonPower or command.ionPower)
                 or 0
             -- These expressions preserve the proven ground behavior exactly.
@@ -213,11 +243,19 @@ function apply.new(controlMailbox, thrusterApi, dependencies)
                 -- leveling the bearings and applying controlled descent.
                 propRpm = command.propRpm
                 azimuth = forceSafe and 0 or command.azimuthDegrees
+            elseif ionProfileMode then
+                -- Keep the props at their validated near-zero-lift RPM even in
+                -- fallback: they carry almost no lift but they are what spins
+                -- the gyroscopic bearings, and cutting them mid-fallback would
+                -- remove the craft's stabilisation exactly when it is
+                -- descending. Ions still drop to the fallback power above.
+                propRpm = command.propRpm
+                azimuth = 0
             end
 
             local applied = {}
             local writeAt = startedAt
-            if responseMode and forceSafe then
+            if liveIonMode and forceSafe then
                 if bearingMode then
                     applied.tilt = timed("tilt", tilt, azimuth, applyTilt, tilt, azimuth)
                     applied.tiltDegrees = tilt
@@ -226,7 +264,7 @@ function apply.new(controlMailbox, thrusterApi, dependencies)
                 end
                 applied.ionPower = timed("ion", ionPower, nil, applyIon, ionPower)
             else
-                applied.ionPower = responseMode
+                applied.ionPower = liveIonMode
                     and timed("ion", ionPower, nil, applyIon, ionPower)
                     or timed("ion", 0, nil, applyIonZero, 0)
                 if bearingMode then

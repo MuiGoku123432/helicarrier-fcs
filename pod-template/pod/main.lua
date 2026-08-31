@@ -20,6 +20,7 @@ local controlApply = require("pod.control_apply").new(controlMailbox, thrusters,
     props = props,
     bearingLimit = controlMailboxModule.GROUND_BEARING_LIMIT_DEGREES,
     bearingPropRpm = controlMailboxModule.GROUND_BEARING_PROP_RPM,
+    ionProfilePropRpm = controlMailboxModule.ION_PROFILE_PROP_RPM,
 })
 
 local VALID_CORNERS = { FL = true, FR = true, RL = true, RR = true }

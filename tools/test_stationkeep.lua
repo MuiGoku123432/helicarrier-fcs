@@ -233,6 +233,57 @@ assert(mailbox().acceptFrame(ionProfileFrame({ ionPower = 1.5 }), 1000) == false
 assert(mailbox().acceptFrame(ionProfileFrame({ fallbackIonPower = 0.9 }), 1000) == false,
     "ion_profile fallback must not exceed the commanded ion power")
 
+-- Mailbox acceptance is NOT enough. The apply layer routes unknown modes to a
+-- deliberate zero-ion path, so ion_profile must be proven to reach the LIVE ion
+-- path or the thrusters simply never come on -- which is exactly what happened
+-- on the first ion_profile flight.
+local ionApplied = {}
+local function ionRecord(name)
+    return function(a, b) ionApplied[name] = { a, b }; return true end
+end
+local ionEntry = {
+    mode = "ion_profile",
+    session = "ion-apply-test",
+    sequence = 1,
+    receivedAt = 1000,
+    validForMs = 750,
+    command = {
+        ionPower = 0.6050, fallbackIonPower = 0.07, fallbackStopAfterMs = 5000,
+        propRpm = 8, tiltDegrees = 0, azimuthDegrees = 0, shutdown = false,
+    },
+}
+local ionApply = applyModule.new({
+    latest = function() return ionEntry end,
+    recordApply = function() end,
+    recordExpired = function() end,
+    recordFallback = function() end,
+    recordFallbackStop = function() end,
+}, {}, {
+    epoch = function() return 1100 end,
+    sleep = function() end,
+    applyIon = ionRecord("ion"),
+    applyIonZero = ionRecord("ionZero"),
+    applyZero = ionRecord("zero"),
+    applyRpm = ionRecord("rpm"),
+    applyRpmZero = ionRecord("rpmZero"),
+    applyTilt = ionRecord("tilt"),
+    readBearingState = function() return {} end,
+    responseIonMin = 0,
+    responseIonMax = 1,
+    responsePropRpm = 64,
+    responseBearingLimit = 1,
+    bearingLimit = 1,
+    bearingPropRpm = 8,
+    ionProfilePropRpm = 8,
+})
+assert(ionApply.applyLatest() == true,
+    "ion_profile must be accepted by the apply layer's own safety check")
+assert(ionApplied.ionZero == nil,
+    "ion_profile must NOT be routed through the ground zero-ion path")
+near(ionApplied.ion[1], 0.6050, 1e-9, "ion_profile live ion power")
+near(ionApplied.rpm[1], 8, 1e-9, "ion_profile prop RPM")
+near(ionApplied.tilt[1], 0, 1e-9, "ion_profile tilt must be exactly zero")
+
 -- The flight modes must be unaffected by the new boundary.
 assert(mailbox().acceptFrame(accepted, 1000) == true,
     "stationkeep must still accept its own envelope after adding ion_profile")
