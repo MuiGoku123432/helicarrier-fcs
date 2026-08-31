@@ -14,8 +14,13 @@ local protocol = require("pod.protocol")
 local thrusters = require("pod.thrusters")
 local props = require("pod.props")
 local payload = require("pod.payload")
-local controlMailbox = require("pod.control_mailbox").new(config)
-local controlApply = require("pod.control_apply").new(controlMailbox, thrusters)
+local controlMailboxModule = require("pod.control_mailbox")
+local controlMailbox = controlMailboxModule.new(config)
+local controlApply = require("pod.control_apply").new(controlMailbox, thrusters, {
+    props = props,
+    bearingLimit = controlMailboxModule.GROUND_BEARING_LIMIT_DEGREES,
+    bearingPropRpm = controlMailboxModule.GROUND_BEARING_PROP_RPM,
+})
 
 local VALID_CORNERS = { FL = true, FR = true, RL = true, RR = true }
 if not VALID_CORNERS[config.corner] then

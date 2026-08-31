@@ -459,6 +459,39 @@ function props.setTilt(angle, azimuth, index, mirror)
              mirror = (mirror ~= false), bearings = applied }
 end
 
+-- Sample physical gyro state locally. These reads do not add modem traffic;
+-- callers can cache the result and include it in their normal status packet.
+function props.readBearingState()
+    local readings = {}
+
+    for bearingIndex, bearing in ipairs(props.bearings) do
+        local reading = {}
+
+        local function sample(methodName)
+            local method = optional(bearing, methodName)
+            if not method then
+                return nil, methodName .. " absent"
+            end
+
+            local ok, value = pcall(method)
+            if not ok then
+                return nil, tostring(value)
+            end
+            return value, nil
+        end
+
+        reading.tiltDegrees, reading.tiltError = sample("getTiltAngle")
+        reading.stabilizationStrength, reading.stabilizationError = sample("getStabilizationStrength")
+        reading.rotationSpeed, reading.rotationError = sample("getRotationSpeed")
+        reading.active, reading.activeError = sample("isActive")
+        reading.thrustVector, reading.thrustVectorError = sample("getThrustVector")
+        reading.manualTarget, reading.manualTargetError = sample("getManualTarget")
+        readings[bearingIndex] = reading
+    end
+
+    return readings
+end
+
 function props.clearTilt(index)
     local cleared = {}
     for bearingIndex, bearing in ipairs(props.bearings) do

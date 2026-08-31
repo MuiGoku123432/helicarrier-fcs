@@ -67,7 +67,7 @@ assert(mailbox.acceptFrame(frame(2), clock))
 clock = 400
 assert(mailbox.acceptFrame(frame(3), clock))
 assert(actuator.applyLatest())
-assert(#writes == 2 and writes[2] == 0)
+assert(#writes == 1) -- same successful zero is elided
 
 local status = mailbox.snapshot()
 assert(status.received == 3)
@@ -85,7 +85,7 @@ assert(not actuator.applyLatest())
 assert(status.appliedSequence == 3)
 assert(actuator.enforceStaleFallback())
 assert(not actuator.enforceStaleFallback())
-assert(#writes == 3 and writes[3] == 0)
+assert(#writes == 1) -- already-zero fallback is recorded without a duplicate write
 
 status = mailbox.snapshot()
 assert(status.expiredBeforeApply == 1)

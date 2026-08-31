@@ -20,7 +20,7 @@ The controller does not need to force roll to exactly zero. A small steady attit
 
 This document plans control development after the direct-wired command path. It does not authorize flight or non-zero actuation by itself.
 
-The current proven boundary is exact-zero ion application in `ground_apply` mode. Non-zero bearing, propeller, azimuth, and ion commands require new explicit modes, bounds, tests, and rollback steps.
+The current proven boundary includes lossless grounded RPM 64 propeller/bearing actuation, physical zero-tilt readback, explicit shutdown, and local fallback in `response_map_test`, repeated as formal PASS in ground runs 5-8. No nonzero-ion flight data exists. Grounded nonzero ion, neutral hover, and paired tilt pulses remain separate gates with explicit bounds, aborts, and rollback steps.
 
 Position hold is deferred. Velocity hold can make motion nearly imperceptible, but small velocity bias can still accumulate into position drift over time. A later position loop may convert X/Z position error into a slow, bounded velocity request.
 
@@ -73,6 +73,22 @@ The loops are separated by purpose and timescale:
 - optional position hold reacts slowest.
 
 Exact update rates and bandwidth ratios must come from measured sensor noise, delay, and actuator response. They must not be copied blindly from the old Rednet-era flight scripts.
+
+### Measured read budget
+
+Every CC:Sable global-API call on FCS-DEV costs one server tick, roughly 50 ms, independent of which call it is; the cost is main-thread scheduling latency, not computation. Each layer's achievable rate is therefore set by how many quantities it samples per cycle, and the timescale separation above is bought by sampling less in the fast loop rather than by running the same read set faster:
+
+| Layer | Reads per cycle | Sensor-read ceiling |
+|---|---|---|
+| Rate damping (inner) | `getAngularVelocity` only | ~20 Hz |
+| Attitude reference | + `getLogicalPose` | ~10 Hz |
+| X/Z velocity hold | + `getVelocity` | ~6.67 Hz |
+
+Sampling all three together measured 149.8 ms per cycle, or 6.67 Hz, and a fixed 10 Hz cadence missed every deadline by exactly one tick. Mass, centre of mass, and the inertia tensor must stay off the control cycle entirely: the exploratory probe reading fourteen methods achieved only 2.5 Hz. Evidence: `flight-logs/sensor_rate_hub_on.txt` and `sensor_rate_hub_off.txt`.
+
+Adding a second computer to read sensors does not raise these rates and must not be used to try; see the communications architecture for the measurement that rejected it.
+
+These are sensor-read ceilings, not achievable closed-loop output rates. Run 8 measured a full pod write at about 200 ms (`ion` ~55 ms, `rpm` ~45 ms, two-bearing `tilt` ~100 ms); with the apply-loop sleep, the current changing-state path is roughly 250 ms, or 4-5 Hz. Design and tune against the slower active layer. Local write-elision can make unchanged fields cheap, but it does not raise the worst-case rate when all fields change, and its live improvement must be measured against run 8 before flight.
 
 ## Coordinate and sign contract
 
@@ -193,7 +209,7 @@ Each phase is a gate. Do not start the next phase merely because the previous co
 
 ### Phase 0 — Preserve the proven transport baseline
 
-Status: complete for exact-zero ion application.
+Status: complete for direct transport, exact-zero ion application, bounded grounded bearing motion, RPM 64 spool-up, explicit shutdown, and local fallback. Nonzero-ion flight remains unproven.
 
 Deliverables:
 
@@ -218,6 +234,8 @@ Regression gate before later phases:
 ### Phase 1 — Extend the pod apply layer by actuator family
 
 Goal: make bearings and propellers available without widening the existing exact-zero mode.
+
+Status: complete for the grounded envelopes. Runs 5-8 formally pass the RPM 64 ground gate with physical readback, shutdown, and fallback.
 
 Work:
 
@@ -261,6 +279,10 @@ Measure for each relevant command:
 
 Use paired positive/negative probes and return to the same safe baseline between them. Log enough settling time to distinguish fast direct force from slow hull reorientation.
 
+Expect and check one specific asymmetry: at zero commanded tilt, RL reports its per-bearing-index thrust orientation inverted relative to FL, FR, and RR, and FR's bearing-1 rotation sign is inverted relative to the other three (`flight-logs/wiredframe_response_map_ground_run5.txt`). If allocation maps by bearing index, an identical command may deflect RL opposite to the rest. Read an unexpected RL sign as this orientation map before changing any gain.
+
+Current timing evidence: `flight-logs/wiredframe_response_map_ground_run8.txt` measures `apply_mean_ms` near 200 ms per pod, with ion about 55 ms, RPM about 45 ms, tilt about 100 ms, and readback about 0.2 ms. Including the apply-loop sleep, use 4-5 Hz as the present full-write actuator ceiling. The next gate is a write-elision ground regression compared by `apply_mean_ms` and per-stage timings, followed by sender-owned fallback selection, grounded nonzero ion, neutral hover, and only then paired `+/-1` degree pulses.
+
 Exit gate:
 
 - signs are repeatable;
@@ -278,7 +300,8 @@ Work:
 - compute roll/pitch rates from the best available sensor source;
 - time-align attitude, velocity, and pod acknowledgement;
 - reject invalid and stale samples;
-- measure stationary bias/noise and in-motion lag;
+- measure in-motion noise and lag, not stationary noise: a resting CC:Sable physics body deactivates and reads exact zero, so a grounded sample yields a noise floor of zero and would justify an arbitrarily small deadband;
+- confirm `getLinearVelocity` actually tracks motion before using it as the velocity-hold input. It read exactly zero in every grounded sample while `getVelocity` showed float noise; if it stays pinned at zero in flight, use `getVelocity`. A source stuck at zero produces zero error forever and a loop that never corrects;
 - record raw and filtered values together.
 
 Shadow tests:
@@ -464,7 +487,7 @@ Every result should include:
 - requested and achieved send rate;
 - per-pod first/last/received/applied sequence;
 - missing, duplicate, reordered, invalid, replaced, coalesced, expired, error, and fallback counts;
-- receive-to-apply latency and maximum actuator-call duration;
+- receive-to-apply latency, `apply_mean_ms`, per-stage ion/RPM/tilt timings, and maximum actuator-call duration;
 - raw and filtered sensor timestamps;
 - attitude, angular rates, X/Z velocity, altitude, and vertical velocity;
 - requested controller targets and each controller's contribution;
@@ -512,7 +535,7 @@ This makes it possible to shadow-test a controller, substitute a plant model, re
 
 - Which sensor source gives the cleanest and least delayed roll/pitch rates?
 - What is the stationary X/Z velocity noise floor and bias?
-- What command rate is useful after real bearing and propeller application is active?
+- How much does live write-elision improve the roughly 4-5 Hz current full-write actuator ceiling when only a subset of fields changes?
 - Which actuator combination provides the cleanest horizontal force with the least vertical/attitude coupling?
 - Does pitch require active rate damping, or is it already sufficiently damped at the new build state?
 - How much steady roll/pitch offset is required for zero horizontal velocity?

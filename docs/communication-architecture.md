@@ -99,7 +99,7 @@ The receive loop performs no actuator peripheral calls.
 - recording the applied sequence, duration, errors, and coalesced sequences;
 - issuing a local safe fallback after the command becomes stale.
 
-The current stage invokes the real ion-thruster API with exact zero. Bearing, propeller, azimuth, and non-zero ion application remain future extensions.
+The apply worker now supports exact-zero ion writes, bounded ground bearing tests at RPM 8, and the `response_map_test` envelope used for RPM 64 spool-up and future bounded response pulses. It applies propeller RPM, bearing tilt/azimuth, ion power, explicit shutdown, and a mode-specific stale fallback only after the mailbox has validated the complete command. Local write-elision skips a stage only when its requested value equals the last successfully written value; a session change or either stale-fallback stage invalidates the cache so the next command rewrites every field. Cached tilt results exclude diagnostic readback so an elided write cannot make an old sample look fresh. The FCS sender still locks flight pulses; pod-side capability is not by itself permission to actuate in flight.
 
 ### Pod runtime
 
@@ -131,17 +131,17 @@ A control frame is a Lua table with this conceptual shape:
 {
   protocol = "helicarrier.control-frame.v1",
   kind = "control_frame",
-  mode = "shadow" or "ground_apply",
-  armed = false,
+  mode = "shadow", "ground_apply", "ground_bearing_test", or "response_map_test",
+  armed = false, -- true only for the bounded response_map_test envelope
   session = "non-empty-run-identifier",
   sequence = 1,
   sentAt = 0,
   validForMs = 500,
   corners = {
-    FL = { ionPower = 0, propRpm = 0, tiltDegrees = 0, azimuthDegrees = 0 },
-    FR = { ionPower = 0, propRpm = 0, tiltDegrees = 0, azimuthDegrees = 0 },
-    RL = { ionPower = 0, propRpm = 0, tiltDegrees = 0, azimuthDegrees = 0 },
-    RR = { ionPower = 0, propRpm = 0, tiltDegrees = 0, azimuthDegrees = 0 },
+    FL = { ionPower = 0, fallbackIonPower = 0, propRpm = 0, tiltDegrees = 0, azimuthDegrees = 0, shutdown = true },
+    FR = { ionPower = 0, fallbackIonPower = 0, propRpm = 0, tiltDegrees = 0, azimuthDegrees = 0, shutdown = true },
+    RL = { ionPower = 0, fallbackIonPower = 0, propRpm = 0, tiltDegrees = 0, azimuthDegrees = 0, shutdown = true },
+    RR = { ionPower = 0, fallbackIonPower = 0, propRpm = 0, tiltDegrees = 0, azimuthDegrees = 0, shutdown = true },
   },
 }
 ```
@@ -217,6 +217,13 @@ Acknowledgements are diagnostic and supervisory. They are not permission for the
 
 The successful tests used a requested 10 Hz sender. That is the current demonstrated command rate, not a requirement that every actuator must physically update at exactly 10 Hz.
 
+The sender rate is not the binding constraint. Two measurements now bound the loop from opposite ends:
+
+- **Sensing (FCS-DEV).** Every CC:Sable global-API call costs one server tick, ~50 ms, whatever the call does. Five different methods each measured a 49.1-49.9 ms mean over 60 calls. A three-read control cycle therefore runs at 6.67 Hz, and a fixed 10 Hz cadence missed every deadline by exactly one tick. See `flight-logs/sensor_rate_hub_on.txt` and `sensor_rate_hub_off.txt`, and the control-rate budget in `HANDOFF.md`.
+- **Applying (pods).** Run 8 measured full-write `apply_mean_ms` near 200 ms: ion roughly 55 ms, RPM roughly 45 ms, and the two-bearing tilt write roughly 100 ms. The twelve-call diagnostic readback was already on its slow lane and cost only about 0.2 ms. With the apply-loop sleep, a changing-state iteration is about 250 ms, so the current actuator ceiling is roughly 4-5 Hz. Local write-elision is intended to remove unchanged stages, but its live rate improvement is not yet measured.
+
+Coalescing at these ratios is the latest-wins mailbox behaving correctly, not loss. Do not raise the send rate to compensate for either bound; a faster sender cannot make a tick-quantized sensor or a slow actuator call finish sooner, and the halved-send-rate experiment already showed send rate is not what governs delivery.
+
 A future production controller should choose its rate and validity window from measured values:
 
 1. sensor update interval and jitter;
@@ -244,7 +251,29 @@ The validity window must be long enough for expected jitter but short enough tha
 - Permits a real exact-zero ion-thruster write.
 - Rejects any non-zero actuator field.
 
-Future modes must be introduced as separate, explicitly named safety envelopes. Do not silently widen `ground_apply` to accept flight commands.
+### `ground_bearing_test`
+
+- Requires `armed == false` and ion power 0.
+- Requires propeller RPM 8 and azimuth 0.
+- Permits bearing tilt only within `+/-5` degrees.
+- Uses zero RPM, zero tilt, and zero ion power as the local fallback.
+
+### `response_map_test`
+
+- Requires `armed == true`.
+- Bounds ion power to 0 through 1 and requires fallback ion power to be no greater than the requested value.
+- Requires propeller RPM exactly 64, tilt within `+/-1` degree, and azimuth in the supported 0-through-360 range.
+- Defines an explicit shutdown frame with every actuator field exactly zero.
+- Uses zero tilt/azimuth while retaining the validated propeller baseline before applying the bounded fallback ion value if a live command becomes stale.
+- Accepts an optional `fallbackStopAfterMs` in the range 1000-60000, which declares how long the descent state above may run before the pod writes exact zero. Absent, the descent holds indefinitely. It must not appear on a shutdown frame, which is already the zero state.
+
+`fallbackStopAfterMs` is sender policy: a pod cannot tell from local state whether it is still airborne, so it must not invent a descent duration. The pod owns only enforcement, and both stages are counted separately in the acknowledgement (`fallbackCount`, `fallbackStops`).
+
+The ground gate passed formally and repeatedly in `flight-logs/wiredframe_response_map_ground_run5.txt` through `wiredframe_response_map_ground_run8.txt`. This proves communications and grounded actuation, not nonzero-ion flight. Before any tilt pulse, verify write-elision with another ground gate, choose fallback policy, run a grounded nonzero-ion test, and prove neutral hover. Future production flight modes must remain separate named safety envelopes; do not silently widen `ground_apply` or a diagnostic mode.
+
+### Do not add a sensor computer to buy control rate
+
+Reading CC:Sable state on a separate computer and forwarding it to FCS-DEV was measured and rejected. The per-call cost is main-thread scheduling latency, not a per-computer budget: identical runs with the monitor hub running and stopped differ by under a tenth of a millisecond on every method and produce the same 6.67 Hz. There is nothing to offload. Extra computers could only read different quantities during the same tick, and collecting those results costs at least one more tick over the modem plus the event-queue exposure this whole transport exists to avoid. Stagger reads by loop rate instead.
 
 ## Failure behavior
 
@@ -272,6 +301,15 @@ The pod counts and ignores it. It does not rewind the actuator state.
 
 FCS-DEV stops receiving fresh acknowledgement from that corner and must leave or enter the appropriate safe state. Other pods must not compensate indefinitely without a separately designed degraded-mode controller.
 
+### Sender stops while the pod is flying
+
+The pod's stale-link response is two-stage and entirely local, requiring nothing from FCS-DEV at the time it fires:
+
+1. **Descent** at `validForMs`: level bearings to zero tilt and azimuth, hold the commanded propeller RPM, apply `fallbackIonPower`. Propeller RPM is *not* cut -- descent comes from the reduced ion value.
+2. **Stop** at `fallbackStopAfterMs` after stage 1, only if that field was declared: exact-zero ion, RPM, and tilt, written through the same exact-zero path ground shutdown proves, so no mode's command values can reach the terminal write.
+
+Each stage fires once per command. Without a declared allowance the pod descends and holds, which is the proven ground behavior and the safe default for an unattended pod that may still be airborne.
+
 ## Why direct modem frames replaced Rednet commands
 
 The legacy path treated actuator updates as many independent messages. Rednet can transmit one logical send through every open modem and through recipient and repeat channels. Deduplication occurs after modem events have already entered the computer event queue. Under aggregate four-corner traffic, that creates more event pressure than the logical command count suggests.
@@ -294,6 +332,7 @@ The control channel is now direct-modem traffic, but regular flight telemetry st
 When telemetry is consolidated, preserve these rules:
 
 - publish cached snapshots rather than answering high-rate polls;
+- keep confirmation reads off the actuator write path: bearing readback is twelve peripheral calls and now samples on its own lane at most once per second, with the mailbox latching the last sample and reporting its age, rather than running on every write;
 - stagger pod transmissions;
 - send only measurements needed by control, safety, diagnosis, or the operator;
 - separate fast control-critical state from slow device-health detail;
@@ -303,14 +342,16 @@ When telemetry is consolidated, preserve these rules:
 
 ## Extension path to flight control
 
-The protocol should grow by capability, not by bypassing validation:
+The protocol grows by capability, not by bypassing validation:
 
 1. keep `shadow` for non-actuating regression tests;
 2. keep `ground_apply` permanently exact-zero;
-3. add a named, disarmed bearing-test mode with very small bounded tilt/azimuth;
-4. add a named, restrained propeller-test mode with bounded RPM and slew;
-5. add a named low-power ion-test mode with bounded power and slew;
-6. add an armed flight mode only after local limits, freshness, acknowledgement, mixer bounds, and abort behavior are verified together.
+3. retain the proven `ground_bearing_test` envelope for independent corner/sign regressions;
+4. regression-test write-elision against the run 8 RPM 64 ground baseline, using `apply_mean_ms` and per-stage timings;
+5. choose the sender-owned fallback policy, run grounded nonzero ion, and prove neutral hover;
+6. use `response_map_test` for paired, lowest-authority `+/-1` degree flight pulses with explicit abort and baseline-return phases;
+7. use the measured plant map to shadow-test rate damping and mixing;
+8. add a production armed flight mode only after local limits, freshness, acknowledgement, mixer bounds, state quality, and abort behavior are verified together.
 
 Each new mode needs:
 
@@ -331,8 +372,20 @@ Each new mode needs:
 | `flight-logs/wiredframe_test_run1.txt` | 301 | 301 received, zero errors | Standalone direct transport |
 | `flight-logs/wiredframe_shadow_run1.txt` | 601 | 601 received, zero errors | Production pod workload, no actuation |
 | `flight-logs/wiredframe_actuator_run1.txt` | 301 | 301 received and applied, zero errors | Production workload plus real exact-zero ion calls |
+| `flight-logs/wiredframe_bearing_rpm8_run1.txt` | 152 | 152 received per pod; all `0,+5,0,-5,0` physical phases observed | Bounded bearing application and local physical readback |
+| `flight-logs/wiredframe_corner_map_run1.txt` | 551 | 551 received per pod; every active corner moved while inactive corners stayed at zero | Independent four-corner addressing and sign map |
+| `flight-logs/wiredframe_response_map_ground_run3.txt` | 351 | 351 received per pod; active stabilized bearings settled near rotation magnitude 19.2 | RPM 64 spool-up, physical bearing state, shutdown, and fallback; printed FAIL was the corrected nil-zero-angle reporter predicate |
+| `flight-logs/wiredframe_response_map_ground_run4.txt` | 350 | 350 received per pod, zero faults; printed FAIL on `1:tilt` | The corrected predicate had never reached FCS-DEV; a deploy was recorded that did not happen |
+| `flight-logs/wiredframe_response_map_ground_run5.txt` | 352 | 352 received per pod; `overall=PASS`, every corner PASS, 1408/1408 aggregate | Formal ground-gate pass with physical readback on every sample |
+| `flight-logs/wiredframe_response_map_ground_run6.txt` | 351 | 351 received per pod; `overall=PASS`, zero faults, 1404/1404 aggregate | Repeatability after moving readback off the write path |
+| `flight-logs/wiredframe_response_map_ground_run7.txt` | 350 | 350 received per pod; `overall=PASS`, zero faults, 1400/1400 aggregate | Second repeatability pass on the current pod runtime |
+| `flight-logs/wiredframe_response_map_ground_run8.txt` | 350 | 350 received per pod; `overall=PASS`, zero faults, 1400/1400 aggregate | Pre-write-elision timing baseline with `apply_mean_ms` and per-stage timings |
 
-The last run measured maximum application times of 114 ms FL, 109 ms FR, 106 ms RL, and 110 ms RR. One fallback per pod after the sender stopped was expected and passed.
+Run 3 had zero transport or application faults and maximum application times from 228 through 245 ms. CC:Sable returned `tiltAngle=nil` at exact zero deflection while thrust vectors were vertical. The ground-gate verifier therefore accepts missing angle only when the applied target is exactly zero and the physical thrust vector lies within 0.005 of the vertical unit vector; nonzero-tilt checks still require numeric angle readback.
+
+Runs 5-8 closed and repeated the gate: zero missing, duplicate, out-of-order, invalid, expired, or apply-error events on any corner; physical readback passing on every sample; shutdown seen on all four corners; and every pod finishing at ion 0, RPM 0, tilt 0 with one fallback.
+
+Received counts across runs 3-8 varied from 350 through 352 while `missing` stayed 0 throughout. That count tracks `frames_sent`, which moves with sender loop timing. A received count below a round number is not evidence of loss when `missing` is zero.
 
 ## Architectural invariants
 

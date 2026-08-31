@@ -6,6 +6,8 @@ local mailbox = {}
 mailbox.CONTROL_CHANNEL = 42042
 mailbox.STATUS_CHANNEL = 42043
 mailbox.PROTOCOL = "helicarrier.control-frame.v1"
+mailbox.GROUND_BEARING_LIMIT_DEGREES = 5
+mailbox.GROUND_BEARING_PROP_RPM = 8
 
 local VALID_CORNERS = { FL = true, FR = true, RL = true, RR = true }
 local STATUS_OFFSET = { FL = 0.00, FR = 0.20, RL = 0.40, RR = 0.60 }
@@ -27,14 +29,70 @@ end
 
 local function validMode(message, command)
     if message.mode == "shadow" then return message.armed == false end
-    if message.mode ~= "ground_apply" or message.armed ~= false then return false end
+    if type(command) ~= "table" then return false end
 
-    -- First live actuator stage: perform real ion writes at exact zero output.
-    -- Non-zero thrust, RPM, tilt, and azimuth cannot cross this boundary.
-    return command.ionPower == 0
-        and command.propRpm == 0
-        and command.tiltDegrees == 0
-        and command.azimuthDegrees == 0
+    local function finite(value)
+        return type(value) == "number" and value == value
+            and value > -math.huge and value < math.huge
+    end
+
+    if message.mode == "response_map_test" then
+        if message.armed ~= true then return false end
+
+        if command.shutdown == true then
+            return command.ionPower == 0
+                and command.fallbackIonPower == 0
+                and command.propRpm == 0
+                and command.tiltDegrees == 0
+                and command.azimuthDegrees == 0
+                and command.fallbackStopAfterMs == nil
+        end
+
+        -- Optional second-stage fallback. Absent means the pod holds the
+        -- descent state indefinitely, which is the proven ground behavior.
+        -- Present, it must be long enough to be a landing allowance rather
+        -- than a cutout racing the first stage.
+        if command.fallbackStopAfterMs ~= nil then
+            if not finite(command.fallbackStopAfterMs)
+                or command.fallbackStopAfterMs < 1000
+                or command.fallbackStopAfterMs > 60000 then
+                return false
+            end
+        end
+
+        return command.shutdown == false
+            and finite(command.ionPower)
+            and command.ionPower >= 0 and command.ionPower <= 1
+            and finite(command.fallbackIonPower)
+            and command.fallbackIonPower >= 0
+            and command.fallbackIonPower <= command.ionPower
+            and command.propRpm == 64
+            and finite(command.tiltDegrees)
+            and command.tiltDegrees >= -1 and command.tiltDegrees <= 1
+            and finite(command.azimuthDegrees)
+            and command.azimuthDegrees >= 0 and command.azimuthDegrees < 360
+    end
+
+    if message.armed ~= false then return false end
+
+    if message.mode == "ground_apply" then
+        -- Preserve the proven exact-zero ion-only safety boundary.
+        return command.ionPower == 0
+            and command.propRpm == 0
+            and command.tiltDegrees == 0
+            and command.azimuthDegrees == 0
+    end
+
+    if message.mode == "ground_bearing_test" then
+        -- Keep ions off and allow only the bounded low-RPM physical gyro test.
+        return command.ionPower == 0
+            and command.propRpm == mailbox.GROUND_BEARING_PROP_RPM
+            and command.azimuthDegrees == 0
+            and command.tiltDegrees >= -mailbox.GROUND_BEARING_LIMIT_DEGREES
+            and command.tiltDegrees <= mailbox.GROUND_BEARING_LIMIT_DEGREES
+    end
+
+    return false
 end
 
 local function blankState()
@@ -51,14 +109,26 @@ local function blankState()
         replacements = 0,
         mailbox = nil,
         appliedSequence = nil,
+        appliedMode = nil,
+        appliedIonPower = nil,
+        appliedPropRpm = nil,
+        appliedTiltDegrees = nil,
+        appliedAzimuthDegrees = nil,
+        appliedBearingState = nil,
+        appliedBearingStateAt = nil,
         applyCount = 0,
         applyErrors = 0,
         actuatorCalls = 0,
         coalesced = 0,
         expiredBeforeApply = 0,
         fallbackCount = 0,
+        fallbackStops = 0,
         lastApplyMs = nil,
         maxApplyMs = 0,
+        applyMsTotal = 0,
+        stageTotals = { ion = 0, rpm = 0, tilt = 0, readback = 0 },
+        stageMax = { ion = 0, rpm = 0, tilt = 0, readback = 0 },
+        stageCounts = { ion = 0, rpm = 0, tilt = 0, readback = 0 },
         lastApplyError = nil,
     }
 end
@@ -154,9 +224,12 @@ function mailbox.new(config, dependencies)
             validForMs = message.validForMs,
             command = {
                 ionPower = command.ionPower,
+                fallbackIonPower = command.fallbackIonPower,
                 propRpm = command.propRpm,
                 tiltDegrees = command.tiltDegrees,
                 azimuthDegrees = command.azimuthDegrees,
+                shutdown = command.shutdown,
+                fallbackStopAfterMs = command.fallbackStopAfterMs,
             },
         }
         return true
@@ -166,7 +239,7 @@ function mailbox.new(config, dependencies)
         return state.mailbox
     end
 
-    function instance.recordApply(entry, startedAt, endedAt, ok, applyError)
+    function instance.recordApply(entry, startedAt, endedAt, ok, applyError, applyReport)
         if not entry or entry.session ~= state.session then return false end
         if state.appliedSequence and entry.sequence <= state.appliedSequence then return false end
 
@@ -176,8 +249,44 @@ function mailbox.new(config, dependencies)
         local elapsed = math.max(0, endedAt - startedAt)
         state.lastApplyMs = elapsed
         state.maxApplyMs = math.max(state.maxApplyMs, elapsed)
+        state.applyMsTotal = state.applyMsTotal + elapsed
         if ok then
             state.appliedSequence = entry.sequence
+            state.appliedMode = entry.mode
+            state.appliedIonPower = entry.command.ionPower
+            state.appliedPropRpm = entry.command.propRpm
+            state.appliedTiltDegrees = entry.command.tiltDegrees
+            state.appliedAzimuthDegrees = entry.command.azimuthDegrees
+            local timings = applyReport and applyReport.timings or nil
+            if type(timings) == "table" then
+                for _, stage in ipairs({ "ion", "rpm", "tilt" }) do
+                    local value = timings[stage]
+                    if type(value) == "number" then
+                        state.stageTotals[stage] = state.stageTotals[stage] + value
+                        state.stageCounts[stage] = state.stageCounts[stage] + 1
+                        if value > state.stageMax[stage] then
+                            state.stageMax[stage] = value
+                        end
+                    end
+                end
+                -- Counted separately: only some applies carry a readback, so a
+                -- mean over all applies would understate what one costs.
+                if timings.readbackCount then
+                    local value = timings.readback or 0
+                    state.stageTotals.readback = state.stageTotals.readback + value
+                    state.stageCounts.readback = state.stageCounts.readback + 1
+                    if value > state.stageMax.readback then
+                        state.stageMax.readback = value
+                    end
+                end
+            end
+
+            local readback = applyReport and applyReport.tilt
+                and applyReport.tilt.readback or nil
+            if readback then
+                state.appliedBearingState = readback
+                state.appliedBearingStateAt = endedAt
+            end
             state.applyCount = state.applyCount + 1
             state.lastApplyError = nil
         else
@@ -204,6 +313,26 @@ function mailbox.new(config, dependencies)
         end
     end
 
+    -- Second-stage fallback is recorded separately from the descent stage so a
+    -- report can tell "levelled and descending" apart from "stopped".
+    function instance.recordFallbackStop(startedAt, endedAt, ok, applyError)
+        state.fallbackStops = state.fallbackStops + 1
+        state.actuatorCalls = state.actuatorCalls + 1
+        local elapsed = math.max(0, endedAt - startedAt)
+        state.lastApplyMs = elapsed
+        state.maxApplyMs = math.max(state.maxApplyMs, elapsed)
+        if not ok then
+            state.applyErrors = state.applyErrors + 1
+            state.lastApplyError = tostring(applyError)
+        end
+    end
+
+    local function stageMean(stage)
+        local count = state.stageCounts[stage]
+        if not count or count == 0 then return nil end
+        return state.stageTotals[stage] / count
+    end
+
     function instance.statusMessage()
         local current = state.mailbox
         local reportedAt = epoch()
@@ -224,14 +353,34 @@ function mailbox.new(config, dependencies)
             mailboxSequence = current and current.sequence or nil,
             mailboxAgeMs = current and (reportedAt - current.receivedAt) or nil,
             appliedSequence = state.appliedSequence,
+            appliedMode = state.appliedMode,
+            appliedIonPower = state.appliedIonPower,
+            appliedPropRpm = state.appliedPropRpm,
+            appliedTiltDegrees = state.appliedTiltDegrees,
+            appliedAzimuthDegrees = state.appliedAzimuthDegrees,
+            appliedBearingState = state.appliedBearingState,
+            appliedBearingStateAgeMs = state.appliedBearingStateAt
+                and (reportedAt - state.appliedBearingStateAt) or nil,
             applyCount = state.applyCount,
             applyErrors = state.applyErrors,
             actuatorCalls = state.actuatorCalls,
             coalesced = state.coalesced,
             expiredBeforeApply = state.expiredBeforeApply,
             fallbackCount = state.fallbackCount,
+            fallbackStops = state.fallbackStops,
             lastApplyMs = state.lastApplyMs,
             maxApplyMs = state.maxApplyMs,
+            meanApplyMs = state.applyCount > 0
+                and (state.applyMsTotal / state.applyCount) or nil,
+            stageMeanIonMs = stageMean("ion"),
+            stageMeanRpmMs = stageMean("rpm"),
+            stageMeanTiltMs = stageMean("tilt"),
+            stageMeanReadbackMs = stageMean("readback"),
+            stageMaxIonMs = state.stageMax.ion,
+            stageMaxRpmMs = state.stageMax.rpm,
+            stageMaxTiltMs = state.stageMax.tilt,
+            stageMaxReadbackMs = state.stageMax.readback,
+            readbackApplies = state.stageCounts.readback,
             lastApplyError = state.lastApplyError,
             reportedAt = reportedAt,
             mailboxOnly = current and current.mode == "shadow" or false,
