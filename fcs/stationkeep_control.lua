@@ -5,7 +5,10 @@ local stationkeep = {}
 
 stationkeep.DEFAULTS = {
     velocityGain = 0.80,
-    positionGain = 0.015,
+    -- Run 2 proved the loop stable but showed a long 22-block recapture arc.
+    -- A 50% position-term increase remains far below the 6-degree envelope
+    -- while overcoming the wired plant's small-command response threshold sooner.
+    positionGain = 0.0225,
     integralGain = 0.010,
     deadbandSpeed = 0.08,
     positionDeadband = 0.50,

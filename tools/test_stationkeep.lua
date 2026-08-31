@@ -22,6 +22,25 @@ local first = controller.update({
 assert(first.valid and first.tiltDegrees > 0, "right drift must command lateral tilt")
 near(first.azimuthDegrees, 180, 1e-6, "right-drift wired-plant correction azimuth")
 
+local recapture = stationkeep.new()
+local recaptureOutput
+for _ = 1, 40 do
+    recaptureOutput = recapture.update({
+        velocityX = 0,
+        velocityZ = 0,
+        positionErrorX = 20,
+        positionErrorZ = 0,
+        quaternion = identity,
+    }, 0.25)
+end
+assert(recaptureOutput.valid)
+assert(recaptureOutput.tiltDegrees >= 0.45
+        and recaptureOutput.tiltDegrees <= 0.75,
+    "20-block position recapture must be stronger but remain sub-degree: "
+        .. tostring(recaptureOutput.tiltDegrees))
+near(recaptureOutput.azimuthDegrees, 180, 1e-6,
+    "position recapture wired-plant correction azimuth")
+
 -- Deterministic biased plant: without control, 0.18 acceleration and 0.06
 -- drag settle at +3 blocks/s. The controller must remove that velocity and
 -- pull the craft back toward its captured X target.
