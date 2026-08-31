@@ -129,7 +129,9 @@ function apply.new(controlMailbox, thrusterApi, dependencies)
                 and command.azimuthDegrees == 0
         end
 
-        if entry.mode == "response_map_test" then
+        local responseMode = entry.mode == "response_map_test"
+        local stationkeepMode = entry.mode == "stationkeep"
+        if responseMode or stationkeepMode then
             if command.shutdown == true then
                 return command.ionPower == 0
                     and command.fallbackIonPower == 0
@@ -138,6 +140,7 @@ function apply.new(controlMailbox, thrusterApi, dependencies)
                     and command.azimuthDegrees == 0
             end
 
+            local tiltLimit = stationkeepMode and 6 or responseBearingLimit
             return command.shutdown == false
                 and finite(command.ionPower)
                 and command.ionPower >= responseIonMin
@@ -147,8 +150,8 @@ function apply.new(controlMailbox, thrusterApi, dependencies)
                 and command.fallbackIonPower <= command.ionPower
                 and command.propRpm == responsePropRpm
                 and finite(command.tiltDegrees)
-                and command.tiltDegrees >= -responseBearingLimit
-                and command.tiltDegrees <= responseBearingLimit
+                and command.tiltDegrees >= -tiltLimit
+                and command.tiltDegrees <= tiltLimit
                 and finite(command.azimuthDegrees)
                 and command.azimuthDegrees >= 0
                 and command.azimuthDegrees < 360
@@ -196,6 +199,7 @@ function apply.new(controlMailbox, thrusterApi, dependencies)
         local ok, result = pcall(function()
             local command = entry.command
             local responseMode = entry.mode == "response_map_test"
+                or entry.mode == "stationkeep"
             local bearingMode = entry.mode == "ground_bearing_test" or responseMode
             local ionPower = responseMode
                 and (forceSafe and command.fallbackIonPower or command.ionPower)

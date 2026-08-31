@@ -36,7 +36,9 @@ local function validMode(message, command)
             and value > -math.huge and value < math.huge
     end
 
-    if message.mode == "response_map_test" then
+    local responseMode = message.mode == "response_map_test"
+    local stationkeepMode = message.mode == "stationkeep"
+    if responseMode or stationkeepMode then
         if message.armed ~= true then return false end
 
         if command.shutdown == true then
@@ -49,9 +51,8 @@ local function validMode(message, command)
         end
 
         -- Optional second-stage fallback. Absent means the pod holds the
-        -- descent state indefinitely, which is the proven ground behavior.
-        -- Present, it must be long enough to be a landing allowance rather
-        -- than a cutout racing the first stage.
+        -- descent state indefinitely. Present, it must be long enough to be a
+        -- landing allowance rather than a cutout racing the first stage.
         if command.fallbackStopAfterMs ~= nil then
             if not finite(command.fallbackStopAfterMs)
                 or command.fallbackStopAfterMs < 1000
@@ -60,6 +61,7 @@ local function validMode(message, command)
             end
         end
 
+        local bearingLimit = stationkeepMode and 6 or 1
         return command.shutdown == false
             and finite(command.ionPower)
             and command.ionPower >= 0 and command.ionPower <= 1
@@ -68,7 +70,8 @@ local function validMode(message, command)
             and command.fallbackIonPower <= command.ionPower
             and command.propRpm == 64
             and finite(command.tiltDegrees)
-            and command.tiltDegrees >= -1 and command.tiltDegrees <= 1
+            and command.tiltDegrees >= -bearingLimit
+            and command.tiltDegrees <= bearingLimit
             and finite(command.azimuthDegrees)
             and command.azimuthDegrees >= 0 and command.azimuthDegrees < 360
     end
