@@ -1,0 +1,22 @@
+WIRED STATIONKEEP RESULT
+session=1-stationkeep-1788203147875
+termination=operator
+trace_count=33
+trace=t=0.0,ex=+0.00,ez=+0.00,vx=+0.00,vz=+0.00,tilt=0.00,az=0;t=5.2,ex=+0.04,ez=+0.00,vx=+0.09,vz=+0.00,tilt=0.07,az=356;t=10.3,ex=+0.80,ez=+3.15,vx=+0.26,vz=+0.70,tilt=0.67,az=66;t=15.3,ex=+2.12,ez=+6.66,vx=+0.26,vz=+0.70,tilt=0.78,az=66;t=20.3,ex=+2.42,ez=+10.14,vx=-0.18,vz=+0.70,tilt=0.83,az=89;t=25.5,ex=+0.85,ez=+13.90,vx=-0.26,vz=+0.70,tilt=0.96,az=99;t=30.7,ex=+0.23,ez=+16.01,vx=+0.13,vz=+0.00,tilt=0.63,az=86;t=35.8,ex=+1.92,ez=+16.01,vx=+0.44,vz=+0.00,tilt=0.61,az=44;t=41.0,ex=+4.18,ez=+16.01,vx=+0.26,vz=+0.00,tilt=0.57,az=51;t=46.0,ex=+4.32,ez=+16.01,vx=-0.18,vz=+0.00,tilt=0.49,az=88;t=51.3,ex=+3.02,ez=+17.17,vx=-0.26,vz=+0.70,tilt=0.81,az=94;t=56.5,ex=+2.75,ez=+20.97,vx=+0.18,vz=+0.70,tilt=1.22,az=77;t=61.5,ex=+3.93,ez=+22.52,vx=+0.26,vz=+0.00,tilt=0.90,az=65;t=66.5,ex=+4.86,ez=+22.52,vx=+0.00,vz=+0.00,tilt=0.75,az=72;t=71.5,ex=+4.37,ez=+22.52,vx=-0.18,vz=+0.00,tilt=0.75,az=86;t=76.8,ex=+3.55,ez=+22.52,vx=-0.09,vz=+0.00,tilt=0.77,az=82;t=82.0,ex=+3.65,ez=+22.52,vx=+0.09,vz=+0.00,tilt=0.82,az=72;t=87.3,ex=+4.48,ez=+22.52,vx=+0.09,vz=+0.00,tilt=0.84,az=71;t=92.3,ex=+4.62,ez=+22.52,vx=-0.09,vz=+0.00,tilt=0.84,az=80;t=97.5,ex=+3.88,ez=+22.52,vx=-0.18,vz=+0.00,tilt=0.86,az=86;t=102.8,ex=+3.41,ez=+22.52,vx=+0.00,vz=+0.00,tilt=0.89,az=77;t=108.0,ex=+3.71,ez=+22.52,vx=+0.09,vz=+0.00,tilt=0.93,az=72;t=113.0,ex=+4.11,ez=+22.52,vx=+0.00,vz=+0.00,tilt=0.94,az=76;t=118.3,ex=+3.89,ez=+22.52,vx=-0.09,vz=+0.00,tilt=0.95,az=80;t=123.5,ex=+3.43,ez=+22.52,vx=-0.09,vz=+0.00,tilt=0.97,az=81;t=128.5,ex=+3.17,ez=+20.95,vx=+0.00,vz=+0.00,tilt=0.76,az=76;t=133.5,ex=+3.47,ez=+20.36,vx=+0.09,vz=+0.00,tilt=0.85,az=70;t=138.7,ex=+3.65,ez=+19.42,vx=+0.00,vz=+0.00,tilt=0.97,az=76;t=143.8,ex=+3.33,ez=+18.74,vx=-0.09,vz=+0.00,tilt=0.96,az=80;t=149.0,ex=+2.86,ez=+18.18,vx=-0.09,vz=+0.00,tilt=0.96,az=81;t=154.0,ex=+2.74,ez=+17.35,vx=+0.00,vz=+0.00,tilt=0.97,az=77;t=159.0,ex=+3.07,ez=+16.63,vx=+0.00,vz=+0.00,tilt=0.97,az=76;t=164.0,ex=+3.07,ez=+15.63,vx=+0.00,vz=-0.70,tilt=0.89,az=75
+overall=PASS
+run_error=nil
+abort_reason=nil
+shutdown_error=nil
+duration_seconds=175.919
+frames_sent=720
+samples=866
+max_horizontal_speed=0.786118
+max_position_error=23.036153
+max_tilt_command=1.294172
+final_sequence=720
+modem=bottom
+sublevel=global
+FL applied=720 missing=0 duplicate=0 order=0 invalid=0 expired=0 errors=0 fallback=0 stops=0
+FR applied=720 missing=0 duplicate=0 order=0 invalid=0 expired=0 errors=0 fallback=0 stops=0
+RL applied=720 missing=0 duplicate=0 order=0 invalid=0 expired=0 errors=0 fallback=0 stops=0
+RR applied=720 missing=0 duplicate=0 order=0 invalid=0 expired=0 errors=0 fallback=0 stops=0

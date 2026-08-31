@@ -1,11 +1,21 @@
 <!-- generated-by: gsd-doc-writer -->
 # Helicarrier FCS handoff
 
-Last updated: 2026-08-30
+Last updated: 2026-08-31
 
 ## Read this first
 
 The communications problem is no longer the blocker it was at the start of the investigation.
+
+### Proven operational FCS baseline
+
+The direct-wired stationkeeping system is now the operational baseline for this carrier. Live run 3 (`flight-logs/wiredframe_stationkeep_run3.txt`, session `1-stationkeep-1788203667879`) passed after 126.082 seconds and an operator stop. FCS-DEV sent 521 complete four-corner frames; FL, FR, RL, and RR each applied all 521 with zero missing, duplicate, out-of-order, invalid, expired, apply-error, fallback, or fallback-stop events. Shutdown completed cleanly with `run_error=nil`, `abort_reason=nil`, and `shutdown_error=nil`.
+
+The controller held maximum horizontal speed to 0.750938 blocks/s, limited peak position error to 18.832382 blocks while arresting the inherited drift, and used at most 1.327737 degrees of tilt. The signed trace shows the craft stopped its persistent rightward motion, held near-zero X/Z velocity, and began returning to the captured position. This is the frozen proven configuration for ordinary stationkeeping: `positionGain=0.0225`, `velocityGain=0.80`, `integralGain=0.010`, a 0.15 degree/s command-vector slew limit, and a 6 degree absolute tilt cap.
+
+The production controller is `fcs/stationkeep_control.lua`; the live runner and report writer are `fcs/wiredframe_stationkeep.lua`; and `fcs/wired_stationkeep_protocol.lua` preserves the direct batched-frame contract. The deployed controller SHA-256 is `836e7d315286877be5a408a7c1d0a18d19b85a74417f1f640208d5d3231efed2`. Run 3 is archived with SHA-256 `489f22a80d936127595eda3bb8c105951c9ae26ce6e773b4acbfb9373cc09567`.
+
+Treat changes to controller signs, gains, coordinate transforms, protocol fields, pod validation, or fallback behavior as changes to this baseline. Keep the run-3 controller rollback (`stationkeep_control.lua.pre-recapture-tune-20260831-v1`) until a later configuration has repeated live evidence.
 
 The old command path used many Rednet messages and could amplify each logical command across multiple open modems and repeat channels. Those messages entered a fixed-size ComputerCraft event queue before Rednet could deduplicate them. Under all-corner command traffic, frames were silently lost before the pod command handler saw them. The result looked like unreliable bearings, slow game ticks, or a mysterious per-tick modem limit, but the decisive tests ruled those explanations out.
 
@@ -20,7 +30,7 @@ The direct-wired command path is now proven through physical bearing and propell
 
 Run 3's printed `FAIL` was a harness false negative: CC:Sable returned `tiltAngle=nil` at exact zero deflection even though the measured thrust vectors were vertical `(0, +/-1, 0)`. The harness accepts that missing value only for the exact-zero ground gate and only when the physical vector is within a strict near-vertical tolerance; a nonzero-tilt test still requires a numeric angle, and `--self-test` pins that a missing angle cannot excuse a deflected bearing.
 
-**The ground gate has now passed repeatedly.** `flight-logs/wiredframe_response_map_ground_run5.txt` through `wiredframe_response_map_ground_run9.txt` all recorded `overall=PASS`. Each run delivered every sent frame to every pod with zero missing, duplicate, out-of-order, invalid, expired, or apply-error events; physical readback passed on every sample, shutdown was seen on all four corners, and each pod finished at ion 0, RPM 0, tilt 0 with one fallback. Run 8 delivered 350/350 frames per pod (1400 aggregate) and established the pre-write-elision timing baseline. After the write-elision deployment and guarded pod reboot, run 9 delivered 352/352 frames per pod (1408 aggregate), reduced mean apply time from roughly 200 ms to 0.7-1.0 ms, and reduced coalescing from roughly 208-209 frames per pod to 1-2. Rare frames that performed real peripheral writes still peaked at 198-253 ms. Communications and grounded propeller/bearing actuation are no longer the blocker. No nonzero-ion flight data exists yet.
+**The ground gate has now passed repeatedly.** `flight-logs/wiredframe_response_map_ground_run5.txt` through `wiredframe_response_map_ground_run9.txt` all recorded `overall=PASS`. Each run delivered every sent frame to every pod with zero missing, duplicate, out-of-order, invalid, expired, or apply-error events; physical readback passed on every sample, shutdown was seen on all four corners, and each pod finished at ion 0, RPM 0, tilt 0 with one fallback. Run 8 delivered 350/350 frames per pod (1400 aggregate) and established the pre-write-elision timing baseline. After the write-elision deployment and guarded pod reboot, run 9 delivered 352/352 frames per pod (1408 aggregate), reduced mean apply time from roughly 200 ms to 0.7-1.0 ms, and reduced coalescing from roughly 208-209 frames per pod to 1-2. Rare frames that performed real peripheral writes still peaked at 198-253 ms. Communications, pod application, powered hover, and direct-wired stationkeeping are no longer blockers. The operational run-3 baseline above supersedes the earlier pre-flight status in this historical ground-gate narrative.
 
 Two process notes from that sequence, both worth keeping:
 
@@ -29,15 +39,15 @@ Two process notes from that sequence, both worth keeping:
 
 ## Current project goal
 
-Build a flight-control system that:
+The first operational goal is achieved: the carrier has a direct-wired controller that arrests passive horizontal drift, holds near-zero X/Z velocity, and slowly returns toward a captured X/Z position while preserving bounded tilt and clean shutdown.
 
-1. damps roll and pitch rates without requiring the hull to sit at exactly zero roll;
-2. holds horizontal X/Z velocity at zero, or close enough to be visually imperceptible, whenever no movement command is active;
-3. accepts a non-zero X/Z velocity target when the ship is intentionally commanded to move;
-4. remains stable as the ship's mass and actuator authority change while structures are added; and
-5. fails safely when commands, sensors, or actuators become stale or invalid.
+Future work should extend this proven baseline rather than replace it:
 
-Velocity hold is not position hold. A later, slower position-hold layer may create velocity requests, but it is outside the first stationkeeping milestone.
+1. integrate explicit pilot movement targets with bumpless return to stationkeeping;
+2. improve and validate roll/pitch damping and slow attitude reference under larger disturbances;
+3. repeat the operational hold after meaningful symmetric and asymmetric load changes;
+4. exercise stale-sensor, stale-pod, and actuator-fault behavior in the integrated controller; and
+5. keep all controller and transport changes measurable, reversible, and compatible with the run-3 baseline.
 
 ## Computer and corner map
 
@@ -95,6 +105,7 @@ The active pod runtime accepts separate, explicitly bounded modes:
 - `ground_apply`: disarmed and exact-zero actuator fields only.
 - `ground_bearing_test`: disarmed, ion power 0, propeller RPM 8, azimuth 0, and bearing tilt limited to `+/-5` degrees.
 - `response_map_test`: armed test envelope with ion power from 0 through 1, fallback ion power no greater than the commanded value, propeller RPM exactly 64, azimuth from 0 through 360 degrees, and tilt limited to `+/-1` degree. Its explicit shutdown frame requires every actuator field to be exactly zero.
+- `stationkeep`: operational direct-wired hold mode at propeller RPM 64 with the proven high/low vertical duty commands, per-corner bearing azimuth, and tilt bounded to `+/-6` degrees. FCS-DEV owns the controller and sends one complete frame; pods retain the same validation, latest-wins application, freshness, acknowledgement, and exact-zero shutdown semantics.
 
 The response-map sender still exposes only `--ground-check`: ion power 0, tilt 0, RPM 64 for a 30-second spool window, followed by exact-zero shutdown and fallback verification. A separate `fcs/wiredframe_ground_ion_test.lua` harness now exposes `--ground-ion-check`. It requires the operator to type `GROUND-ION`, proves fresh clean zero-ion acknowledgements from all four pods before applying power, commands ion power 0.14 for five seconds at RPM 64 with tilt and azimuth exactly zero, then deliberately stops frames to prove the two fallback stages before sending exact-zero shutdown. Neutral hover and all tilt pulses remain locked.
 
@@ -122,6 +133,8 @@ Some legacy source and historical logs remain in the repository for evidence. Th
 | `flight-logs/wiredframe_corner_map_run1.txt` | Independent FL/FR/RL/RR `+5,0,-5,0` mapping | 551/551 received per pod; 2204/2204 deliveries | Corner addressing and bearing signs are independent and repeatable |
 | `flight-logs/wiredframe_response_map_ground_run3.txt` | All bearings RPM 64, ion 0, tilt 0 for 30 seconds | 351/351 received per pod; rotation settled near `+/-19.2`; safe shutdown | Flight-baseline propeller spool and physical bearing activity work; printed FAIL was only the corrected nil-zero-tilt predicate |
 | `flight-logs/wiredframe_response_map_ground_run5.txt` through `wiredframe_response_map_ground_run9.txt` | Repeated RPM 64 ground gates after the predicate, timing instrumentation, and write-elision fixes | 350-352 received per pod per run, zero faults, every run `overall=PASS`; run 9 delivered 1408 aggregate with 0.7-1.0 ms mean apply time | Grounded communications, physical readback, shutdown, and fallback are repeatable; run 8 is the pre-write-elision baseline and run 9 confirms write-elision under live load |
+| `flight-logs/wiredframe_stationkeep_run2.txt` | First corrected-direction operational hold, 175.919 seconds | 720/720 applied per pod, zero faults, max speed 0.786118, max position error 23.036153, max tilt 1.294172 degrees | Corrected direct-plant sign arrests the former runaway and returns toward the captured X/Z position |
+| `flight-logs/wiredframe_stationkeep_run3.txt` | Tuned operational hold, 126.082 seconds | 521/521 applied per pod, zero faults, max speed 0.750938, max position error 18.832382, max tilt 1.327737 degrees | Proven operational FCS baseline; stronger position recapture retained stability and clean shutdown |
 
 The legacy all-corner tests are useful negative evidence:
 
@@ -180,9 +193,11 @@ Pod-side actuator peripherals have their own measured ceiling. In run 8, bearing
 
 Write-elision now skips a peripheral stage when its requested value equals the last successfully written value. The cache is invalidated after every stale fallback and every session change, so the next live command reasserts all fields. Pod computers 2-5 were rebooted into the verified module and run 9 confirmed it under live load: mean apply time fell from roughly 200 ms in run 8 to 0.7-1.0 ms, while coalescing fell from roughly 208-209 frames per pod to 1-2. Rare frames that actually changed actuator state still took as much as 198-253 ms, so flight-loop rate must remain bounded by measured changing-state latency rather than the unchanged-frame mean.
 
-## Open questions requiring a moving ship
+## Moving-ship sensor findings
 
-Neither can be answered from grounded data, and both gate the velocity-hold layer:
+The operational stationkeeping runs resolved the practical gate: the active runner's X/Z velocity input tracked motion, drove correction in the expected world direction, and returned to zero-valued samples as the craft settled. The signed run-3 trace exposes the sensor's coarse steps directly (notably Z values of `0.00` and `+/-0.70` blocks/s), so future filtering and gain changes must preserve that quantization rather than assume a smooth noise floor.
+
+The original pre-flight questions remain below for historical context:
 
 - **Does `getLinearVelocity` track?** It returned exactly `0.000000000` in every sample of every grounded run, while `getVelocity` showed float noise. On a stationary ship both are consistent with working correctly. If `getLinearVelocity` stays pinned at zero in motion it is unusable as the velocity-hold input and `getVelocity` must be used instead. Confirm this on the first pulse that produces motion.
 - **What is the real noise floor?** A resting physics body deactivates and reads exact zero: the response probe showed ~1e-6 noise for five samples and then exact zeros from t=2.4 s onward. The design rule "measure the sensor noise floor before choosing a velocity deadband" therefore cannot be satisfied on the ground. Size the deadband from in-flight data only.
@@ -225,12 +240,27 @@ Known deployment hashes recorded at the time:
 | FCS `wiredframe_actuator_test.lua` | `5bde2f6e` |
 | FCS `wiredframe_response_map_test.lua` | `198129a1` (local/live verified 2026-08-30) |
 | FCS `sensor_rate_test.lua` | `76f26c31` |
+| FCS `stationkeep_control.lua` | `836e7d315286877be5a408a7c1d0a18d19b85a74417f1f640208d5d3231efed2` (run-3 baseline) |
+| FCS `wiredframe_stationkeep.lua` | `2106005d9a246ca29a147bd7e0c9de1b31f08a7b475f9104c25536222ed83abd` (signed-trace runner) |
+| FCS `wired_stationkeep_protocol.lua` | `3243666f92ce9cd997713f0d2451ea99d6f69336dfd5e8c54c8a8f77b2a38861` (unchanged during tuning) |
 
 Verify live files before relying on these values after any manual server-side change.
 
 Both current FCS harnesses support `--self-test`, which runs offline with no CC APIs, no modem, and no actuation. Run it after deploying to confirm the file that loaded is the file you sent.
 
 ## Next work
+
+Keep run 3 frozen as the operational stationkeeping baseline. The next production work is integration and repeatability, not another gain increase:
+
+1. repeat the same hold after a meaningful ship load or geometry change and compare the signed trace;
+2. add an explicit bounded pilot X/Z velocity target with a bumpless transition back to the captured position;
+3. exercise stale-sensor, stale-pod, and operator-abort paths while confirming exact-zero shutdown on all corners;
+4. improve roll/pitch damping only from measured disturbance data; and
+5. do not change the direct protocol, pod validator, plant sign, or baseline gains without a saved comparison run and rollback.
+
+## Historical development sequence
+
+The sequence below led to the operational baseline and is retained as provenance. Its ground/first-flight gates are complete; do not treat it as the current task list.
 
 Do not return to broad communications optimization unless a direct-frame regression is measured. Bearing addressing, bounded tilt, RPM 64 spool-up, receive/apply separation, and local fallback are now established.
 

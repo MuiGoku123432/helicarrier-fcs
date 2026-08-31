@@ -1,18 +1,18 @@
-# Helicarrier FCS: wireless pod data foundation
+# Helicarrier FCS
 
-This package uses five Advanced Computers:
+A ComputerCraft flight-control system for a Create-powered Minecraft helicarrier, using one FCS computer and four independently safe actuator pods.
 
 ```text
-FCS-DEV  Main telemetry/FCS computer
-ENG-FL   Front-left ion pod
-ENG-FR   Front-right ion pod
-ENG-RL   Rear-left ion pod
-ENG-RR   Rear-right ion pod
+FCS-DEV  Computer 1, sensing and whole-craft control
+ENG-FL   Computer 2, front-left actuator pod
+ENG-FR   Computer 3, front-right actuator pod
+ENG-RL   Computer 4, rear-left actuator pod
+ENG-RR   Computer 5, rear-right actuator pod
 ```
 
-The main computer gathers CC:Sable data, logs propeller and pod telemetry, and provides manual test commands. Each pod owns everything on its own corner -- the ion thrusters, the Rotation Speed Controller, and the prop bearing -- on one short local wired network, and relays the propellers to FCS-DEV over the wireless link.
+The operational controller gathers CC:Sable state on FCS-DEV, computes bounded vertical and X/Z stationkeeping commands, and sends one complete four-corner frame over the shared wired modem network. Each pod validates the same frame, extracts its corner, stores only the newest fresh command, applies peripherals in an independent worker, reports cumulative status, and retains local stale-command fallback.
 
-FCS-DEV holds no propeller peripherals of its own. It needs only a wireless modem (plus a wired modem if you attach optional energy/power meters).
+Legacy wireless telemetry and manual tools remain available, but the operational actuator command path is direct wired protocol `helicarrier.control-frame.v1` on channels 42042 and 42043.
 
 ## Critical safety warning
 
@@ -203,4 +203,40 @@ FCS-DEV writes combined Sable, propeller, power, and pod telemetry to:
 /fcs/logs/flight_<UTC milliseconds>.csv
 ```
 
-No automatic hover controller is enabled yet. The next stage uses the same wireless `banks` interface to send four bank powers from the attitude and altitude controllers.
+## Operational stationkeeping baseline
+
+The direct-wired controller is operational on the current carrier. Run 3 (`flight-logs/wiredframe_stationkeep_run3.txt`) is the frozen baseline:
+
+- 521 complete frames sent and 521 applied by every pod;
+- zero missing, duplicate, reordered, invalid, expired, apply-error, fallback, or fallback-stop events;
+- maximum horizontal speed 0.750938 blocks/s;
+- maximum captured-position error 18.832382 blocks while arresting the inherited drift;
+- maximum commanded tilt 1.327737 degrees; and
+- clean operator stop followed by exact-zero shutdown.
+
+The baseline controller uses `velocityGain=0.80`, `positionGain=0.0225`, `integralGain=0.010`, a 0.15 degree/s command slew, and a 6 degree tilt cap. Do not change its plant sign, gains, protocol, pod validation, or fallback behavior without retaining the run-3 configuration and producing a saved comparison run.
+
+On FCS-DEV, run the deployed stationkeeping script with its `--stationkeep` flag. Press Ctrl+T for an operator stop; the runner records `termination=operator`, sends the exact-zero shutdown burst, and writes `/fcs/wiredframe_stationkeep_result.txt`.
+
+## Development and verification
+
+Run the complete host-side Lua suite with LuaJIT:
+
+```bash
+for f in tools/test_*.lua; do luajit "$f" || exit 1; done
+```
+
+The stationkeeping controller and direct protocol regression can be run alone with:
+
+```bash
+luajit tools/test_stationkeep.lua
+```
+
+See:
+
+- `HANDOFF.md` for the current operational state and rollback hashes;
+- `docs/architecture/overview.md` for the system map;
+- `docs/communication-architecture.md` for frame, mailbox, acknowledgement, and fallback contracts;
+- `docs/stationkeeping-control-contract.md` for controller bounds and live acceptance evidence;
+- `docs/guides/getting-started.md` for installation and first-run steps; and
+- `docs/testing/overview.md` for the test strategy.

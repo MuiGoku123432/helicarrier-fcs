@@ -7,6 +7,8 @@ The helicarrier uses one central flight-control computer and four local pod comp
 
 This architecture is optimized for control freshness and bounded failure behavior. It does not try to deliver every intermediate command. If the actuator worker is temporarily slower than the sender, the next safe action is to skip superseded commands and apply the newest still-valid state.
 
+The same architecture now carries the operational `stationkeep` controller. Run 3 sent 521 complete frames and every pod applied all 521 with zero transport or application faults, while the controller held horizontal speed below 0.751 blocks/s and returned toward its captured X/Z position. No protocol replacement was required: stationkeeping extends the existing mode-specific validation and command payload while preserving batching, sequencing, freshness, latest-wins application, acknowledgement, and exact-zero shutdown.
+
 ## Design goals
 
 - One physical command transmission represents the complete four-corner control state.
@@ -99,7 +101,7 @@ The receive loop performs no actuator peripheral calls.
 - recording the applied sequence, duration, errors, and coalesced sequences;
 - issuing a local safe fallback after the command becomes stale.
 
-The apply worker now supports exact-zero ion writes, bounded ground bearing tests at RPM 8, and the `response_map_test` envelope used for RPM 64 spool-up and future bounded response pulses. It applies propeller RPM, bearing tilt/azimuth, ion power, explicit shutdown, and a mode-specific stale fallback only after the mailbox has validated the complete command. Local write-elision skips a stage only when its requested value equals the last successfully written value; a session change or either stale-fallback stage invalidates the cache so the next command rewrites every field. Cached tilt results exclude diagnostic readback so an elided write cannot make an old sample look fresh. The FCS sender still locks flight pulses; pod-side capability is not by itself permission to actuate in flight.
+The apply worker now supports exact-zero ion writes, bounded ground bearing tests at RPM 8, the `response_map_test` envelope used for RPM 64 characterization, and the operational `stationkeep` envelope used for bounded powered X/Z hold. It applies propeller RPM, bearing tilt/azimuth, ion power, explicit shutdown, and a mode-specific stale fallback only after the mailbox has validated the complete command. Local write-elision skips a stage only when its requested value equals the last successfully written value; a session change or either stale-fallback stage invalidates the cache so the next command rewrites every field. Cached tilt results exclude diagnostic readback so an elided write cannot make an old sample look fresh. The FCS sender still locks flight pulses; pod-side capability is not by itself permission to actuate in flight.
 
 ### Pod runtime
 
@@ -131,7 +133,7 @@ A control frame is a Lua table with this conceptual shape:
 {
   protocol = "helicarrier.control-frame.v1",
   kind = "control_frame",
-  mode = "shadow", "ground_apply", "ground_bearing_test", or "response_map_test",
+  mode = "shadow", "ground_apply", "ground_bearing_test", "response_map_test", or "stationkeep",
   armed = false, -- true only for the bounded response_map_test envelope
   session = "non-empty-run-identifier",
   sequence = 1,
@@ -220,7 +222,7 @@ The successful tests used a requested 10 Hz sender. That is the current demonstr
 The sender rate is not the binding constraint. Two measurements now bound the loop from opposite ends:
 
 - **Sensing (FCS-DEV).** Every CC:Sable global-API call costs one server tick, ~50 ms, whatever the call does. Five different methods each measured a 49.1-49.9 ms mean over 60 calls. A three-read control cycle therefore runs at 6.67 Hz, and a fixed 10 Hz cadence missed every deadline by exactly one tick. See `flight-logs/sensor_rate_hub_on.txt` and `sensor_rate_hub_off.txt`, and the control-rate budget in `HANDOFF.md`.
-- **Applying (pods).** Run 8 measured full-write `apply_mean_ms` near 200 ms: ion roughly 55 ms, RPM roughly 45 ms, and the two-bearing tilt write roughly 100 ms. The twelve-call diagnostic readback was already on its slow lane and cost only about 0.2 ms. With the apply-loop sleep, a changing-state iteration is about 250 ms, so the current actuator ceiling is roughly 4-5 Hz. Write-elision has been installed on pods 2-5 but is pending pod reboot; its live rate improvement is not yet measured.
+- **Applying (pods).** Run 8 measured full-write `apply_mean_ms` near 200 ms: ion roughly 55 ms, RPM roughly 45 ms, and the two-bearing tilt write roughly 100 ms. The twelve-call diagnostic readback was already on its slow lane and cost only about 0.2 ms. With the apply-loop sleep, a changing-state iteration is about 250 ms, so the current actuator ceiling is roughly 4-5 Hz. Write-elision is installed and live on pods 2-5. Ground run 9 reduced unchanged-frame mean apply time to roughly 0.7-1.0 ms and coalescing to 1-2 frames per pod, while rare frames that performed real peripheral changes still took roughly 198-253 ms. Operational control therefore continues to budget against changing-state latency rather than the cheap unchanged-frame path.
 
 Coalescing at these ratios is the latest-wins mailbox behaving correctly, not loss. Do not raise the send rate to compensate for either bound; a faster sender cannot make a tick-quantized sensor or a slow actuator call finish sooner, and the halved-send-rate experiment already showed send rate is not what governs delivery.
 
@@ -269,7 +271,18 @@ The validity window must be long enough for expected jitter but short enough tha
 
 `fallbackStopAfterMs` is sender policy: a pod cannot tell from local state whether it is still airborne, so it must not invent a descent duration. The pod owns only enforcement, and both stages are counted separately in the acknowledgement (`fallbackCount`, `fallbackStops`).
 
-The ground gate passed formally and repeatedly in `flight-logs/wiredframe_response_map_ground_run5.txt` through `wiredframe_response_map_ground_run8.txt`. This proves communications and grounded actuation, not nonzero-ion flight. Before any tilt pulse, verify write-elision with another ground gate, choose fallback policy, run a grounded nonzero-ion test, and prove neutral hover. Future production flight modes must remain separate named safety envelopes; do not silently widen `ground_apply` or a diagnostic mode.
+### `stationkeep`
+
+- Requires the armed direct-wired stationkeeping frame and the same protocol/session/sequence/freshness validation as every other live mode.
+- Commands propeller RPM 64, a bounded high/low vertical duty state, and finite bearing tilt/azimuth for all four corners.
+- Limits tilt to `+/-6` degrees at both the FCS controller and pod validation boundary.
+- Leaves whole-craft sensing, position/velocity control, plant-sign handling, and command allocation on FCS-DEV; pods only validate and apply their own corner.
+- Uses the same newest-state mailbox and cumulative status channel; the protocol does not acquire a request/reply control path.
+- Requires every actuator field to be exactly zero in an explicit shutdown frame.
+
+Run 3 is the proven operational baseline: 521/521 applications on every pod, zero transport/application faults, clean operator termination, and clean exact-zero shutdown. The protocol module SHA-256 remained `3243666f92ce9cd997713f0d2451ea99d6f69336dfd5e8c54c8a8f77b2a38861` through both controller tuning runs.
+
+The ground gate passed formally and repeatedly in `flight-logs/wiredframe_response_map_ground_run5.txt` through `wiredframe_response_map_ground_run9.txt`. Those reports prove grounded communications and actuation; later grounded-ion, neutral-hover, guarded-hover, and stationkeeping reports supplied the moving-ship evidence. Production flight remains a separate named safety envelope: do not silently widen `ground_apply` or a diagnostic mode.
 
 ### Do not add a sensor computer to buy control rate
 
@@ -347,11 +360,11 @@ The protocol grows by capability, not by bypassing validation:
 1. keep `shadow` for non-actuating regression tests;
 2. keep `ground_apply` permanently exact-zero;
 3. retain the proven `ground_bearing_test` envelope for independent corner/sign regressions;
-4. regression-test write-elision against the run 8 RPM 64 ground baseline, using `apply_mean_ms` and per-stage timings;
-5. choose the sender-owned fallback policy, run grounded nonzero ion, and prove neutral hover;
-6. use `response_map_test` for paired, lowest-authority `+/-1` degree flight pulses with explicit abort and baseline-return phases;
-7. use the measured plant map to shadow-test rate damping and mixing;
-8. add a production armed flight mode only after local limits, freshness, acknowledgement, mixer bounds, state quality, and abort behavior are verified together.
+4. retain run 9 as the live write-elision regression and changing-state timing reference;
+5. retain the grounded-ion, neutral-hover, and guarded-hover reports as the powered-flight provenance;
+6. use `stationkeep` as the operational armed hold mode with the run-3 gains, sign convention, bounds, trace, and rollback;
+7. add pilot movement targets, load-change validation, and broader disturbance/fault testing as bounded extensions of that baseline; and
+8. require a saved comparison run before changing protocol fields, pod validation, controller sign, gains, or fallback behavior.
 
 Each new mode needs:
 
@@ -380,6 +393,8 @@ Each new mode needs:
 | `flight-logs/wiredframe_response_map_ground_run6.txt` | 351 | 351 received per pod; `overall=PASS`, zero faults, 1404/1404 aggregate | Repeatability after moving readback off the write path |
 | `flight-logs/wiredframe_response_map_ground_run7.txt` | 350 | 350 received per pod; `overall=PASS`, zero faults, 1400/1400 aggregate | Second repeatability pass on the current pod runtime |
 | `flight-logs/wiredframe_response_map_ground_run8.txt` | 350 | 350 received per pod; `overall=PASS`, zero faults, 1400/1400 aggregate | Pre-write-elision timing baseline with `apply_mean_ms` and per-stage timings |
+| `flight-logs/wiredframe_stationkeep_run2.txt` | 720 | 720 applied per pod, zero faults, clean shutdown | First corrected-direction operational X/Z hold |
+| `flight-logs/wiredframe_stationkeep_run3.txt` | 521 | 521 applied per pod, zero faults, clean operator stop and shutdown | Frozen operational FCS baseline with tuned position recapture |
 
 Run 3 had zero transport or application faults and maximum application times from 228 through 245 ms. CC:Sable returned `tiltAngle=nil` at exact zero deflection while thrust vectors were vertical. The ground-gate verifier therefore accepts missing angle only when the applied target is exactly zero and the physical thrust vector lies within 0.005 of the vertical unit vector; nonzero-tilt checks still require numeric angle readback.
 

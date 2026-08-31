@@ -18,11 +18,30 @@ The controller does not need to force roll to exactly zero. A small steady attit
 
 ## Scope boundary
 
-This document plans control development after the direct-wired command path. It does not authorize flight or non-zero actuation by itself.
+This document records both the staged development contract and the configuration now proven in live operation. The direct-wired command path, powered hover, bounded horizontal correction, near-zero X/Z velocity hold, slow captured-position return, operator abort, and exact-zero shutdown are implemented and verified for the current carrier.
 
-The current proven boundary includes lossless grounded RPM 64 propeller/bearing actuation, physical zero-tilt readback, explicit shutdown, and local fallback in `response_map_test`, repeated as formal PASS in ground runs 5-8. No nonzero-ion flight data exists. Grounded nonzero ion, neutral hover, and paired tilt pulses remain separate gates with explicit bounds, aborts, and rollback steps.
+This operational baseline does not claim every future item in the original roadmap is complete. Explicit pilot velocity targets, representative load-change validation, integrated fault injection, and broader roll/pitch disturbance testing remain future work.
 
-Position hold is deferred. Velocity hold can make motion nearly imperceptible, but small velocity bias can still accumulate into position drift over time. A later position loop may convert X/Z position error into a slow, bounded velocity request.
+## Proven operational baseline
+
+Run 3 (`flight-logs/wiredframe_stationkeep_run3.txt`, session `1-stationkeep-1788203667879`) is the frozen stationkeeping baseline:
+
+| Measurement | Result |
+|---|---:|
+| Duration | 126.082 seconds, operator terminated |
+| Frames and samples | 521 complete frames, 614 state samples |
+| Per-pod application | 521/521 on FL, FR, RL, and RR |
+| Transport/application faults | zero missing, duplicate, reordered, invalid, expired, apply-error, fallback, and fallback-stop events |
+| Maximum horizontal speed | 0.750938 blocks/s |
+| Maximum captured-position error | 18.832382 blocks |
+| Maximum commanded tilt | 1.327737 degrees |
+| Finalization | `overall=PASS`; run, abort, and shutdown errors all nil |
+
+The trace shows the controller arresting the prior persistent drift, holding near-zero X/Z velocity, and returning toward the captured X/Z position. Relative to run 2, the final position-gain tune reduced peak position error from 23.036153 to 18.832382 blocks without increasing peak speed and with only 0.034 degrees additional peak tilt.
+
+The baseline controller settings are `velocityGain=0.80`, `positionGain=0.0225`, `integralGain=0.010`, `deadbandSpeed=0.08`, `positionDeadband=0.50`, `slewDegreesPerSecond=0.15`, and `maxTiltDegrees=6.0`. The direct wired plant uses the verified inverted synthetic-vector convention at the controller/actuator boundary. The controller SHA-256 is `836e7d315286877be5a408a7c1d0a18d19b85a74417f1f640208d5d3231efed2`; the archived report SHA-256 is `489f22a80d936127595eda3bb8c105951c9ae26ce6e773b4acbfb9373cc09567`.
+
+Any change to gains, sign, coordinates, safety caps, protocol fields, pod validation, or fallback semantics needs a comparison run and rollback. Preserve `stationkeep_control.lua.pre-recapture-tune-20260831-v1` as the exact pre-tune run-2 controller.
 
 ## Control contract
 
@@ -88,7 +107,7 @@ Sampling all three together measured 149.8 ms per cycle, or 6.67 Hz, and a fixed
 
 Adding a second computer to read sensors does not raise these rates and must not be used to try; see the communications architecture for the measurement that rejected it.
 
-These are sensor-read ceilings, not achievable closed-loop output rates. Run 8 measured a full pod write at about 200 ms (`ion` ~55 ms, `rpm` ~45 ms, two-bearing `tilt` ~100 ms); with the apply-loop sleep, the current changing-state path is roughly 250 ms, or 4-5 Hz. Design and tune against the slower active layer. Write-elision is installed on pods 2-5 but pending reboot; it can make unchanged fields cheap, does not raise the worst-case rate when all fields change, and its live improvement must be measured against run 8 before flight.
+These are sensor-read ceilings, not achievable closed-loop output rates. Run 8 measured a full pod write at about 200 ms (`ion` ~55 ms, `rpm` ~45 ms, two-bearing `tilt` ~100 ms); with the apply-loop sleep, the current changing-state path is roughly 250 ms, or 4-5 Hz. Design and tune against the slower active layer. Write-elision is installed and live on pods 2-5. Ground run 9 reduced unchanged-frame mean apply time to roughly 0.7-1.0 ms and coalescing to 1-2 frames per pod. It does not raise the worst-case changing-state rate: real peripheral-change frames still reached roughly 198-253 ms, so control remains designed around that slower path.
 
 ## Coordinate and sign contract
 
@@ -205,6 +224,8 @@ Abort must command and verify a defined safe state. A pod's local stale fallback
 
 ## Development phases
 
+**Status note:** The phase sequence below is the original goal-backward development plan. The direct production rewrite ultimately combined the practical vertical, velocity, and slow position-return behavior into the bounded `stationkeep` mode. Runs 2 and 3 prove that integrated path on the current craft. Items concerning pilot movement targets, load adaptation, and wider disturbance/fault envelopes remain open even though operational stationkeeping is available.
+
 Each phase is a gate. Do not start the next phase merely because the previous code exists; start it only after the previous acceptance evidence passes.
 
 ### Phase 0 — Preserve the proven transport baseline
@@ -281,7 +302,7 @@ Use paired positive/negative probes and return to the same safe baseline between
 
 Expect and check one specific asymmetry: at zero commanded tilt, RL reports its per-bearing-index thrust orientation inverted relative to FL, FR, and RR, and FR's bearing-1 rotation sign is inverted relative to the other three (`flight-logs/wiredframe_response_map_ground_run5.txt`). If allocation maps by bearing index, an identical command may deflect RL opposite to the rest. Read an unexpected RL sign as this orientation map before changing any gain.
 
-Current timing evidence: `flight-logs/wiredframe_response_map_ground_run8.txt` measures `apply_mean_ms` near 200 ms per pod, with ion about 55 ms, RPM about 45 ms, tilt about 100 ms, and readback about 0.2 ms. Including the apply-loop sleep, use 4-5 Hz as the present full-write actuator ceiling. The next gate is a write-elision ground regression compared by `apply_mean_ms` and per-stage timings, followed by sender-owned fallback selection, grounded nonzero ion, neutral hover, and only then paired `+/-1` degree pulses.
+Timing evidence begins with `flight-logs/wiredframe_response_map_ground_run8.txt`: full writes averaged near 200 ms per pod, with ion about 55 ms, RPM about 45 ms, tilt about 100 ms, and readback about 0.2 ms. Run 9 then verified write-elision under live load, and the later powered/hover/stationkeeping sequence closed the original motion gates. Changing-state calls still bound the control path, so retain a conservative 4-5 Hz actuator budget even when unchanged frames are cheap.
 
 Exit gate:
 
@@ -382,6 +403,8 @@ Exit gate:
 - enable/disable and target changes are smooth.
 
 ### Phase 6 — Add X/Z horizontal velocity hold
+
+Status: complete for the zero-command operational case on the current carrier. Run 3 proves near-zero X/Z velocity hold plus slow return toward the captured position. Explicit non-zero pilot velocity targets and load-change repeatability remain open.
 
 Goal: drive horizontal velocity toward the requested target.
 
@@ -548,7 +571,9 @@ Resolve these in the indicated phases. Do not answer them with fixed constants c
 
 ## Definition of done
 
-The first stationkeeping milestone is complete when repeated live tests show all of the following:
+The current carrier has met the narrower operational baseline: direct-wired all-corner application, bounded powered hold, near-zero passive X/Z velocity, captured-position return, clean operator stop, and exact-zero shutdown are supported by runs 2 and 3. The broader milestone below remains the definition of done for intentional movement targets, load adaptation, and expanded-envelope production validation.
+
+The broader stationkeeping milestone is complete when repeated live tests show all of the following:
 
 - all four pods receive and apply fresh direct-wired frames without unexplained loss;
 - local fallback and FCS abort behavior are verified;
