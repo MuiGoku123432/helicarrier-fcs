@@ -20,7 +20,7 @@ The direct-wired command path is now proven through physical bearing and propell
 
 Run 3's printed `FAIL` was a harness false negative: CC:Sable returned `tiltAngle=nil` at exact zero deflection even though the measured thrust vectors were vertical `(0, +/-1, 0)`. The harness accepts that missing value only for the exact-zero ground gate and only when the physical vector is within a strict near-vertical tolerance; a nonzero-tilt test still requires a numeric angle, and `--self-test` pins that a missing angle cannot excuse a deflected bearing.
 
-**The ground gate has now passed repeatedly.** `flight-logs/wiredframe_response_map_ground_run5.txt` through `wiredframe_response_map_ground_run8.txt` all recorded `overall=PASS`. Each run delivered every sent frame to every pod with zero missing, duplicate, out-of-order, invalid, expired, or apply-error events; physical readback passed on every sample, shutdown was seen on all four corners, and each pod finished at ion 0, RPM 0, tilt 0 with one fallback. Run 8 delivered 350/350 frames per pod (1400 aggregate) and is the timing baseline for write-elision. Communications and grounded propeller/bearing actuation are no longer the blocker. No nonzero-ion flight data exists yet.
+**The ground gate has now passed repeatedly.** `flight-logs/wiredframe_response_map_ground_run5.txt` through `wiredframe_response_map_ground_run9.txt` all recorded `overall=PASS`. Each run delivered every sent frame to every pod with zero missing, duplicate, out-of-order, invalid, expired, or apply-error events; physical readback passed on every sample, shutdown was seen on all four corners, and each pod finished at ion 0, RPM 0, tilt 0 with one fallback. Run 8 delivered 350/350 frames per pod (1400 aggregate) and established the pre-write-elision timing baseline. After the write-elision deployment and guarded pod reboot, run 9 delivered 352/352 frames per pod (1408 aggregate), reduced mean apply time from roughly 200 ms to 0.7-1.0 ms, and reduced coalescing from roughly 208-209 frames per pod to 1-2. Rare frames that performed real peripheral writes still peaked at 198-253 ms. Communications and grounded propeller/bearing actuation are no longer the blocker. No nonzero-ion flight data exists yet.
 
 Two process notes from that sequence, both worth keeping:
 
@@ -121,7 +121,7 @@ Some legacy source and historical logs remain in the repository for evidence. Th
 | `flight-logs/wiredframe_bearing_rpm8_run1.txt` | All bearings at RPM 8 with `0,+5,0,-5,0` tilt phases | 152/152 received per pod; all physical phases observed | Bounded bearing application and physical readback work |
 | `flight-logs/wiredframe_corner_map_run1.txt` | Independent FL/FR/RL/RR `+5,0,-5,0` mapping | 551/551 received per pod; 2204/2204 deliveries | Corner addressing and bearing signs are independent and repeatable |
 | `flight-logs/wiredframe_response_map_ground_run3.txt` | All bearings RPM 64, ion 0, tilt 0 for 30 seconds | 351/351 received per pod; rotation settled near `+/-19.2`; safe shutdown | Flight-baseline propeller spool and physical bearing activity work; printed FAIL was only the corrected nil-zero-tilt predicate |
-| `flight-logs/wiredframe_response_map_ground_run5.txt` through `wiredframe_response_map_ground_run8.txt` | Repeated RPM 64 ground gates after the predicate and timing instrumentation fixes | 350-352 received per pod per run, zero faults, every run `overall=PASS` | Grounded communications, physical readback, shutdown, and fallback are repeatable; run 8 is the pre-write-elision timing baseline |
+| `flight-logs/wiredframe_response_map_ground_run5.txt` through `wiredframe_response_map_ground_run9.txt` | Repeated RPM 64 ground gates after the predicate, timing instrumentation, and write-elision fixes | 350-352 received per pod per run, zero faults, every run `overall=PASS`; run 9 delivered 1408 aggregate with 0.7-1.0 ms mean apply time | Grounded communications, physical readback, shutdown, and fallback are repeatable; run 8 is the pre-write-elision baseline and run 9 confirms write-elision under live load |
 
 The legacy all-corner tests are useful negative evidence:
 
@@ -178,7 +178,7 @@ Slow-changing quantities -- mass, centre of mass, inertia tensor -- must stay of
 
 Pod-side actuator peripherals have their own measured ceiling. In run 8, bearing readback cost only about 0.2 ms for twelve calls, while the three write stages averaged roughly 55 ms for ion, 45 ms for RPM, and 100 ms for the two-bearing tilt write. The write itself therefore averaged about 200 ms; with the apply-loop sleep, a full changing-state path is roughly 250 ms, or about **4 applies/s**. Treat 4-5 Hz as the current end-to-end actuator ceiling even though individual sensor layers can sample faster. `max_apply_ms` is not a tuning metric; compare `apply_mean_ms` and the per-stage timing line.
 
-Write-elision now skips a peripheral stage when its requested value equals the last successfully written value. The cache is invalidated after every stale fallback and every session change, so the next live command reasserts all fields. The verified module has been written to pod computers 2-5, but the pods have not rebooted yet, so it is installed but not active or live-measured; run 8 remains the comparison baseline.
+Write-elision now skips a peripheral stage when its requested value equals the last successfully written value. The cache is invalidated after every stale fallback and every session change, so the next live command reasserts all fields. Pod computers 2-5 were rebooted into the verified module and run 9 confirmed it under live load: mean apply time fell from roughly 200 ms in run 8 to 0.7-1.0 ms, while coalescing fell from roughly 208-209 frames per pod to 1-2. Rare frames that actually changed actuator state still took as much as 198-253 ms, so flight-loop rate must remain bounded by measured changing-state latency rather than the unchanged-frame mean.
 
 ## Open questions requiring a moving ship
 
@@ -221,7 +221,7 @@ Known deployment hashes recorded at the time:
 |---|---|
 | pod `main.lua` | `8e90c52a` |
 | pod `control_mailbox.lua` | `9f67aaa8` |
-| pod `control_apply.lua` | `26a6ac0b` on pods 2-5; reboot pending |
+| pod `control_apply.lua` | `26a6ac0b` on pods 2-5; rebooted and live-verified by response-map ground run 9 |
 | FCS `wiredframe_actuator_test.lua` | `5bde2f6e` |
 | FCS `wiredframe_response_map_test.lua` | `198129a1` (local/live verified 2026-08-30) |
 | FCS `sensor_rate_test.lua` | `76f26c31` |
@@ -238,14 +238,11 @@ The ground gate passed (`wiredframe_response_map_ground_run5.txt`), the control-
 
 Immediate sequence:
 
-1. Local verification and file deployment of write-elision are complete. Pods 2-5 contain SHA-256 `26a6ac0b...`, with verified rollback copies at `2b8c074a...`; the running pod processes still have the old module loaded.
-2. While the craft is grounded and carrying no ion thrust, run `/fcs/reboot.lua all` on FCS-DEV and type `REBOOT` when its live-thrust guard asks for confirmation. Do not use `--force` unless the displayed state has been independently verified safe.
-3. Re-run `/fcs/wiredframe_response_map_test.lua --ground-check`. Require `overall=PASS`, zero transport/application faults, physical readback on every sample, clean shutdown, and one fallback per pod. Compare `apply_mean_ms` and each ion/RPM/tilt stage against `flight-logs/wiredframe_response_map_ground_run8.txt`; do not use `max_apply_ms` as the tuning signal.
-4. Choose and document safe `fallbackIonPower` and `fallbackStopAfterMs` values. Both are FCS policy; the pod deliberately holds no opinion.
-5. Run the first grounded nonzero-ion test, then prove neutral hover before introducing tilt. No existing report authorizes a flight pulse yet.
-6. Map one axis and one sign at a time with paired `+/-1` degree pulses and a return to the same safe baseline. Measure command-to-ack, command-to-motion latency, angular acceleration, X/Z acceleration, vertical coupling, and recovery.
-7. Build the live loop around the slower of the measured sensor layer and the roughly 4-5 Hz actuator ceiling. Stagger reads by layer and keep mass, centre of mass, and inertia off the control cycle.
-8. Use the plant map to implement shadow-only roll/pitch rate damping before applying any closed-loop correction. Then add the slower attitude reference, X/Z velocity hold, and finally slow bounded mass/authority adaptation.
+1. Choose and document safe `fallbackIonPower` and `fallbackStopAfterMs` values. Both are FCS policy; the pod deliberately holds no opinion.
+2. Implement and run a separately gated grounded nonzero-ion test, then prove neutral hover before introducing tilt. Run 9 validates the transport and write-elision path but does not authorize a flight pulse.
+3. Map one axis and one sign at a time with paired `+/-1` degree pulses and a return to the same safe baseline. Measure command-to-ack, command-to-motion latency, angular acceleration, X/Z acceleration, vertical coupling, and recovery.
+4. Build the live loop around the slower of the measured sensor layer and the changing-state actuator latency. Stagger reads by layer and keep mass, centre of mass, and inertia off the control cycle.
+5. Use the plant map to implement shadow-only roll/pitch rate damping before applying any closed-loop correction. Then add the slower attitude reference, X/Z velocity hold, and finally slow bounded mass/authority adaptation.
 
 The detailed staged plan and acceptance gates are in `docs/stationkeeping-control-contract.md`.
 
@@ -296,7 +293,7 @@ Before any new actuator test:
 1. Confirm the craft is grounded, restrained if appropriate, and disarmed.
 2. Confirm all four pods and FCS-DEV are connected to the intended wired network.
 3. Confirm pod startup loads the current mailbox and apply modules.
-4. Confirm FCS-DEV sees fresh acknowledgements from FL, FR, RL, and RR. Note that `ready=false` was reported by all four corners in ground runs 3 through 8 while every other counter was clean and runs 5-8 passed; the response-map harness never sets that field. Treat `ready` as unwired until it is either implemented or removed, and do not gate a run on it.
+4. Confirm FCS-DEV sees fresh acknowledgements from FL, FR, RL, and RR. Note that `ready=false` was reported by all four corners in ground runs 3 through 9 while every other counter was clean and runs 5-9 passed; the response-map harness never sets that field. Treat `ready` as unwired until it is either implemented or removed, and do not gate a run on it.
 5. Confirm each pod reports zero missing, invalid, expired, and apply-error counts before the test.
 6. Use a new session identifier for every run.
 7. Start with exact zero, then the smallest bounded command that can produce a measurable response.
