@@ -245,6 +245,7 @@ Known deployment hashes recorded at the time:
 | FCS `wiredframe_actuator_test.lua` | `5bde2f6e` |
 | FCS `wiredframe_response_map_test.lua` | `198129a1` (local/live verified 2026-08-30) |
 | FCS `sensor_rate_test.lua` | `76f26c31` |
+| FCS `wiredframe_ion_lift_profile.lua` | `53e62c9a3bdce3c02fbbc0a38434d60659635ef1e467d419ec9f07bb3f4f3bd2` (ion lift profile harness; deployed 2026-08-31, not yet flown) |
 | FCS `stationkeep_control.lua` | `71246e7c30a9c5f8c4742f69da473e76e87b33a55df646f16f48ce31b56f03b8` (deployed 2026-08-31; `slewDegreesPerSecond` promoted 0.15 -> 0.45 on the run-5/run-6 comparison. Run-3 baseline was `836e7d31...`.) |
 | FCS `wiredframe_stationkeep.lua` | `c83c7814a351f80fe04e6d8de2a5bee8aaddeceba58b177b54d126068614134c` (signed-trace runner, `--drift-test` mode, altitude in the trace; deployed 2026-08-31). Pre-drift-test runner was `2106005d...`. |
 | FCS `wired_stationkeep_protocol.lua` | `3243666f92ce9cd997713f0d2451ea99d6f69336dfd5e8c54c8a8f77b2a38861` (run-3 baseline; briefly changed on 2026-08-31 and reverted, see below) |
