@@ -232,6 +232,7 @@ Known rollback copies:
 - `/fcs/wired_stationkeep_protocol.lua.pre-highpower-20260831` and `.pre-lowfloor-20260831` on FCS-DEV (SHA-256 `3243666f...` and `67f7bf3e...`, from the reverted 2026-08-31 height experiment)
 - `/fcs/stationkeep_control.lua.pre-lowfloor-20260831` on FCS-DEV (SHA-256 `836e7d31...`, the run-3 baseline controller)
 - `/fcs/wiredframe_stationkeep.lua.pre-drifttest-20260831` on FCS-DEV (SHA-256 `2106005d...`, runner without the `--drift-test` mode)
+- `/fcs/wiredframe_stationkeep.lua.pre-slewbump-20260831` on FCS-DEV (SHA-256 `08de9cbd...`, drift-test mode at the baseline 0.15 slew and without altitude in the trace)
 
 Known deployment hashes recorded at the time:
 
@@ -244,7 +245,7 @@ Known deployment hashes recorded at the time:
 | FCS `wiredframe_response_map_test.lua` | `198129a1` (local/live verified 2026-08-30) |
 | FCS `sensor_rate_test.lua` | `76f26c31` |
 | FCS `stationkeep_control.lua` | `836e7d315286877be5a408a7c1d0a18d19b85a74417f1f640208d5d3231efed2` (run-3 baseline; briefly changed on 2026-08-31 and reverted, see below) |
-| FCS `wiredframe_stationkeep.lua` | `08de9cbd23741e4bcb88b806e4a71a32648a017c32c458b77e76c545a6180415` (signed-trace runner plus the `--drift-test` mode; deployed 2026-08-31). Pre-drift-test runner was `2106005d...`. |
+| FCS `wiredframe_stationkeep.lua` | `a07d7b287c9117c00ef3affbd78fe66516bbb8c5d168d1023b46f9c5cd044ace` (signed-trace runner, `--drift-test` mode, raised drift-test slew, altitude in the trace; deployed 2026-08-31). Pre-drift-test runner was `2106005d...`. |
 | FCS `wired_stationkeep_protocol.lua` | `3243666f92ce9cd997713f0d2451ea99d6f69336dfd5e8c54c8a8f77b2a38861` (run-3 baseline; briefly changed on 2026-08-31 and reverted, see below) |
 
 Verify live files before relying on these values after any manual server-side change.
@@ -319,6 +320,48 @@ complaint about drift data quality.
 
 Plain `--stationkeep` is unchanged and still runs the proven run-3
 configuration.
+
+### Drift-test run 5 (2026-08-31): the lateral loop is slew-limited
+
+`flight-logs/wiredframe_stationkeep_run5_drifttest.txt`. 388 seconds to a clean
+operator stop, `overall=PASS`, and 1567/1567 frames applied at all four pods
+with zero transport or apply faults. The mode did its job: with thrust pegged
+rather than duty-cycled, no vertical disturbance entered the lateral loop.
+
+Result: **Z converged, X did not.** Z ran out to +33.86 blocks by t=45 arresting
+the inherited drift, recaptured over roughly 210 seconds to +0.69, and then held
+flat with `vz=0.00` for the final 120 seconds. X held a sustained limit cycle of
++/-16 blocks at a ~37 second period, with mean `|ex|` drifting up from 8.50 to
+9.61 across the tail. It is a stable oscillation, not a slow convergence.
+
+The cause is the command-vector slew limit, not the gains:
+
+| Measure | Value |
+|---|---|
+| Median command slew rate | 0.148 deg/s against a 0.15 limit |
+| Samples above 90% of the limit | 28/36 (78%) |
+| Peak tilt commanded | 2.30 deg, only 38% of the 6 deg cap |
+| Minimum tilt after t=200 | 1.22 deg -- never relaxes toward zero |
+
+Reversing a 2 degree command means 4 degrees of vector travel, which is 26.7
+seconds at 0.15 deg/s against an observed half-period of 15-20 seconds. The
+command can never turn around inside a half-cycle, so it stays phase-lagged and
+sustains the oscillation. Tilt authority is not the constraint; slew rate is.
+
+**Change made:** the drift test now overrides `slewDegreesPerSecond` to 0.45,
+which reverses that command in about 9 seconds, roughly a quarter period. The
+override is scoped to `--drift-test`; plain `--stationkeep` keeps the frozen
+run-3 value of 0.15 until a comparison run justifies promoting it. `--self-test`
+asserts both that the override reaches the controller and that the baseline
+default is untouched.
+
+The runner also now records altitude, which run 5 could not: `rise` and `vy` are
+in each trace entry, and the result adds `max_rise`, `min_rise`,
+`max_vertical_speed`, `mean_climb_blocks_per_second`, and
+`slew_degrees_per_second`.
+
+Still open: the integrator (`integralGain=0.010`) has not been isolated as a
+contributor. Change slew alone and re-run before touching it.
 
 ## Next work
 

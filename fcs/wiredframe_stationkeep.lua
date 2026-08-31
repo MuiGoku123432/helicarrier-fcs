@@ -50,6 +50,21 @@ local BRAKE_COMPLETE_SPEED = 0.12
 local DRIFT_TEST_CEILING = 200
 local DRIFT_TEST_PEG_KIND = "high"
 
+-- Drift-test run 5 showed the lateral loop in a sustained limit cycle: X held
+-- a +/-16 block, ~37 second oscillation that never decayed. The cause was the
+-- command-vector slew limit, not the gains. The command sat at 87% of the
+-- 0.15 deg/s limit on average and above 90% of it in 78% of samples, while
+-- using only 38% of the 6 degree tilt cap: reversing a 2 degree command needs
+-- 4 degrees of vector travel, which is 26.7 seconds at 0.15 deg/s against an
+-- observed half-period of 15-20 seconds. The command could never turn around
+-- inside a half-cycle, so it was permanently phase-lagged.
+--
+-- 0.45 deg/s reverses that command in ~9 seconds, about a quarter period.
+--
+-- This override applies to the drift test ONLY. Plain --stationkeep keeps the
+-- frozen run-3 value of 0.15 until a comparison run justifies promoting this.
+local DRIFT_TEST_SLEW_DEGREES_PER_SECOND = 0.45
+
 -- Broad creative-world runtime envelope. These are genuine loss-of-control
 -- stops, not proof-test pass/fail thresholds.
 local MAX_RISE = 10
@@ -274,6 +289,29 @@ if args[1] == "--self-test" then
         hullTilt = MAX_HULL_TILT + 1, angularSpeed = 0,
     }, true), "drift test must keep hull tilt stop armed")
 
+    -- The raised slew must actually reach the controller, and must not leak
+    -- into the frozen baseline configuration.
+    assert(DRIFT_TEST_SLEW_DEGREES_PER_SECOND
+        > stationkeep.DEFAULTS.slewDegreesPerSecond)
+    local function firstStepTilt(options)
+        local instance = stationkeep.new(options)
+        return instance.update({
+            velocityX = 5, velocityZ = 0,
+            positionErrorX = 0, positionErrorZ = 0,
+            quaternion = { w = 1, x = 0, y = 0, z = 0 },
+        }, 1.0).tiltDegrees
+    end
+    local baselineStep = firstStepTilt(nil)
+    local driftStep = firstStepTilt({
+        slewDegreesPerSecond = DRIFT_TEST_SLEW_DEGREES_PER_SECOND,
+    })
+    assert(math.abs(baselineStep - stationkeep.DEFAULTS.slewDegreesPerSecond) < 1e-6,
+        "baseline slew must remain the frozen run-3 value")
+    assert(math.abs(driftStep - DRIFT_TEST_SLEW_DEGREES_PER_SECOND) < 1e-6,
+        "drift test slew override must reach the controller")
+    assert(stationkeep.DEFAULTS.slewDegreesPerSecond == 0.15,
+        "constructing with an override must not mutate the shared defaults")
+
     print("wired stationkeep self-test: PASS")
     return
 end
@@ -297,6 +335,9 @@ if driftTest then
     print("The craft CLIMBS for the whole run; it does not hold altitude.")
     print(string.format("Altitude limits stood down; ceiling backstop %d blocks.",
         DRIFT_TEST_CEILING))
+    print(string.format("Command slew raised to %.2f deg/s (baseline is %.2f).",
+        DRIFT_TEST_SLEW_DEGREES_PER_SECOND,
+        stationkeep.DEFAULTS.slewDegreesPerSecond))
     print("Horizontal, tilt, and angular stops remain armed.")
 else
     print("Holds current X/Z and altitude until stopped.")
@@ -317,7 +358,10 @@ closeChannels()
 modem.open(protocol.STATUS_CHANNEL)
 
 local session = tostring(os.getComputerID()) .. "-stationkeep-" .. tostring(os.epoch("utc"))
-local controller = stationkeep.new()
+local activeSlew = driftTest and DRIFT_TEST_SLEW_DEGREES_PER_SECOND or nil
+local controller = stationkeep.new(driftTest
+    and { slewDegreesPerSecond = activeSlew } or nil)
+activeSlew = activeSlew or stationkeep.DEFAULTS.slewDegreesPerSecond
 local active = true
 local stopRequested = false
 local abortReason
@@ -340,6 +384,11 @@ local samples = 0
 local framesSent = 0
 local startedAt = os.epoch("utc")
 local maxHorizontalSpeed = 0
+-- Drift-test runs climb for the whole run, so altitude is a reported result
+-- rather than a held setpoint. Run 5 could not answer how high it went.
+local maxRise = 0
+local minRise = 0
+local maxVerticalSpeed = 0
 local maxTiltCommand = 0
 local maxPositionError = 0
 local flightTrace = {}
@@ -434,6 +483,10 @@ local function telemetryLoop()
                 samples = samples + 1
                 maxHorizontalSpeed = math.max(maxHorizontalSpeed,
                     latestMetrics.horizontalSpeed)
+                maxRise = math.max(maxRise, latestMetrics.rise)
+                minRise = math.min(minRise, latestMetrics.rise)
+                maxVerticalSpeed = math.max(maxVerticalSpeed,
+                    math.abs(latestMetrics.verticalVelocity))
                 local positionError = math.sqrt(latestMetrics.positionErrorX ^ 2
                     + latestMetrics.positionErrorZ ^ 2)
                 maxPositionError = math.max(maxPositionError, positionError)
@@ -587,15 +640,18 @@ local function senderLoop()
                 local velocityX = latestSample.linearVelocity.x
                 local velocityZ = latestSample.linearVelocity.z
                 local traceEntry = string.format(
-                    "t=%.1f,ex=%+.2f,ez=%+.2f,vx=%+.2f,vz=%+.2f,tilt=%.2f,az=%.0f",
+                    "t=%.1f,ex=%+.2f,ez=%+.2f,vx=%+.2f,vz=%+.2f,tilt=%.2f,az=%.0f"
+                        .. ",rise=%+.2f,vy=%+.2f",
                     (now - phaseStartedAt) / 1000,
                     errorX, errorZ, velocityX, velocityZ,
-                    finalOutput.tiltDegrees, finalOutput.azimuthDegrees)
+                    finalOutput.tiltDegrees, finalOutput.azimuthDegrees,
+                    latestMetrics.rise, latestMetrics.verticalVelocity)
                 flightTrace[#flightTrace + 1] = traceEntry
                 print(string.format(
-                    "hold ex=%+.2f ez=%+.2f vx=%+.2f vz=%+.2f speed=%.2f vy=%+.2f tilt=%.2f az=%.0f vertical=%s/%s",
+                    "hold ex=%+.2f ez=%+.2f vx=%+.2f vz=%+.2f speed=%.2f rise=%+.2f vy=%+.2f tilt=%.2f az=%.0f vertical=%s/%s",
                     errorX, errorZ, velocityX, velocityZ,
-                    latestMetrics.horizontalSpeed, latestMetrics.verticalVelocity,
+                    latestMetrics.horizontalSpeed, latestMetrics.rise,
+                    latestMetrics.verticalVelocity,
                     finalOutput.tiltDegrees, finalOutput.azimuthDegrees,
                     verticalKind, verticalReason))
                 nextPrintAt = now + 5000
@@ -643,6 +699,12 @@ local lines = {
     "frames_sent=" .. tostring(framesSent),
     "samples=" .. tostring(samples),
     "max_horizontal_speed=" .. string.format("%.6f", maxHorizontalSpeed),
+    "max_rise=" .. string.format("%.6f", maxRise),
+    "min_rise=" .. string.format("%.6f", minRise),
+    "max_vertical_speed=" .. string.format("%.6f", maxVerticalSpeed),
+    "mean_climb_blocks_per_second=" .. string.format("%.6f",
+        endedAt > startedAt and maxRise / ((endedAt - startedAt) / 1000) or 0),
+    "slew_degrees_per_second=" .. string.format("%.3f", activeSlew),
     "max_position_error=" .. string.format("%.6f", maxPositionError),
     "max_tilt_command=" .. string.format("%.6f", maxTiltCommand),
     "final_sequence=" .. tostring(finalSequence),
