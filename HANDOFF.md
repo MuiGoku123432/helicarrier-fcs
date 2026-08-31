@@ -229,7 +229,9 @@ Known rollback copies:
 - `/pod/main.lua.pre-shadow-mailbox-20260829-v1`
 - `/fcs/wiredframe_response_map_test.lua.pre-zero-tilt-readback-20260829-v1`
 - `/pod/control_apply.lua.pre-write-elision-20260830-v1` on pods 2-5 (SHA-256 `2b8c074a...`)
-- `/fcs/wired_stationkeep_protocol.lua.pre-highpower-20260831` on FCS-DEV (SHA-256 `3243666f...`, the run-3 baseline `HIGH_POWER=0.20`)
+- `/fcs/wired_stationkeep_protocol.lua.pre-highpower-20260831` on FCS-DEV (SHA-256 `3243666f...`, the run-3 baseline `HIGH_POWER=0.20`, `LOW_POWER=0.14`)
+- `/fcs/wired_stationkeep_protocol.lua.pre-lowfloor-20260831` on FCS-DEV (SHA-256 `67f7bf3e...`, intermediate: high raised, floor not yet raised; never flown)
+- `/fcs/stationkeep_control.lua.pre-lowfloor-20260831` on FCS-DEV (SHA-256 `836e7d31...`, **the run-3 baseline controller** -- restore this to return to proven stationkeeping)
 
 Known deployment hashes recorded at the time:
 
@@ -241,11 +243,32 @@ Known deployment hashes recorded at the time:
 | FCS `wiredframe_actuator_test.lua` | `5bde2f6e` |
 | FCS `wiredframe_response_map_test.lua` | `198129a1` (local/live verified 2026-08-30) |
 | FCS `sensor_rate_test.lua` | `76f26c31` |
-| FCS `stationkeep_control.lua` | `836e7d315286877be5a408a7c1d0a18d19b85a74417f1f640208d5d3231efed2` (run-3 baseline) |
+| FCS `stationkeep_control.lua` | `755e073d3a5c37709f0efee6a5098932eb6d516b5af4be97677351757af76878` (deployed 2026-08-31; `highInhibitRise` 8.0 -> 4.0 for the raised-floor height test). Run-3 baseline was `836e7d31...` and is preserved in the rollback backup below and in git history; the run-3 lateral gains are untouched. |
 | FCS `wiredframe_stationkeep.lua` | `2106005d9a246ca29a147bd7e0c9de1b31f08a7b475f9104c25536222ed83abd` (signed-trace runner) |
-| FCS `wired_stationkeep_protocol.lua` | `67f7bf3e4049ec974886873a7be09a0555f84b4817ff3bc5b02f1545a04a4955` (deployed 2026-08-31; `HIGH_POWER` raised 0.20 -> 0.27, ion level 3/15 -> 4/15, for flight-height testing) |
+| FCS `wired_stationkeep_protocol.lua` | `cbd129c1004a2ac1a0066e6b69baaf733bb057b71e016e8ddf44f8efa3e5857e` (deployed 2026-08-31; height test: `HIGH_POWER` 0.20 -> 0.27 = level 4/15, `LOW_POWER` 0.14 -> 0.20 = level 3/15) |
 
 Verify live files before relying on these values after any manual server-side change.
+
+### Raised-floor height test (2026-08-31, not yet flown)
+
+The low ion pulse was 2/15, which with props at 64 RPM is only 96.7% of craft
+weight: every low slot actively sank the craft, and with the hold target
+captured barely off the deck it repeatedly contacted the ground and polluted
+the data. Ion output quantises to fifteenths, so the only available floor above
+a sinking command is 3/15 -- the proven neutral-hover level.
+
+Consequence, and the reason this is a test configuration rather than a new
+baseline: with the floor at neutral the vertical loop has **no descent
+authority**. `above_target`, `upward_speed`, and `high_cooldown` now hold
+altitude instead of recovering it, so every high pulse is a permanent gain and
+the craft ratchets upward until `highInhibitRise` pins it to low. That inhibit
+was lowered 8.0 -> 4.0 so the park altitude is chosen rather than incidental;
+`MAX_RISE` (10) is unchanged and still aborts above it.
+
+Expect a one-way climb to roughly +4 blocks followed by a park, NOT a return to
+the captured altitude. If the craft must hold a commanded altitude again,
+restore `stationkeep_control.lua.pre-lowfloor-20260831` and the matching
+protocol backup.
 
 Both current FCS harnesses support `--self-test`, which runs offline with no CC APIs, no modem, and no actuation. Run it after deploying to confirm the file that loaded is the file you sent.
 
