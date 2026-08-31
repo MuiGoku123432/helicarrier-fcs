@@ -88,7 +88,7 @@ Sampling all three together measured 149.8 ms per cycle, or 6.67 Hz, and a fixed
 
 Adding a second computer to read sensors does not raise these rates and must not be used to try; see the communications architecture for the measurement that rejected it.
 
-These are sensor-read ceilings, not achievable closed-loop output rates. Run 8 measured a full pod write at about 200 ms (`ion` ~55 ms, `rpm` ~45 ms, two-bearing `tilt` ~100 ms); with the apply-loop sleep, the current changing-state path is roughly 250 ms, or 4-5 Hz. Design and tune against the slower active layer. Local write-elision can make unchanged fields cheap, but it does not raise the worst-case rate when all fields change, and its live improvement must be measured against run 8 before flight.
+These are sensor-read ceilings, not achievable closed-loop output rates. Run 8 measured a full pod write at about 200 ms (`ion` ~55 ms, `rpm` ~45 ms, two-bearing `tilt` ~100 ms); with the apply-loop sleep, the current changing-state path is roughly 250 ms, or 4-5 Hz. Design and tune against the slower active layer. Write-elision is installed on pods 2-5 but pending reboot; it can make unchanged fields cheap, does not raise the worst-case rate when all fields change, and its live improvement must be measured against run 8 before flight.
 
 ## Coordinate and sign contract
 

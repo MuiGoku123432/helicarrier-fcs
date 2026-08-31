@@ -178,7 +178,7 @@ Slow-changing quantities -- mass, centre of mass, inertia tensor -- must stay of
 
 Pod-side actuator peripherals have their own measured ceiling. In run 8, bearing readback cost only about 0.2 ms for twelve calls, while the three write stages averaged roughly 55 ms for ion, 45 ms for RPM, and 100 ms for the two-bearing tilt write. The write itself therefore averaged about 200 ms; with the apply-loop sleep, a full changing-state path is roughly 250 ms, or about **4 applies/s**. Treat 4-5 Hz as the current end-to-end actuator ceiling even though individual sensor layers can sample faster. `max_apply_ms` is not a tuning metric; compare `apply_mean_ms` and the per-stage timing line.
 
-Local write-elision now skips a peripheral stage when its requested value equals the last successfully written value. The cache is invalidated after every stale fallback and every session change, so the next live command reasserts all fields. This is locally tested but not deployed or measured live yet; run 8 remains the comparison baseline.
+Write-elision now skips a peripheral stage when its requested value equals the last successfully written value. The cache is invalidated after every stale fallback and every session change, so the next live command reasserts all fields. The verified module has been written to pod computers 2-5, but the pods have not rebooted yet, so it is installed but not active or live-measured; run 8 remains the comparison baseline.
 
 ## Open questions requiring a moving ship
 
@@ -213,6 +213,7 @@ Known rollback copies:
 - `/pod/main.lua.pre-ground-apply-20260829-v1`
 - `/pod/main.lua.pre-shadow-mailbox-20260829-v1`
 - `/fcs/wiredframe_response_map_test.lua.pre-zero-tilt-readback-20260829-v1`
+- `/pod/control_apply.lua.pre-write-elision-20260830-v1` on pods 2-5 (SHA-256 `2b8c074a...`)
 
 Known deployment hashes recorded at the time:
 
@@ -220,7 +221,7 @@ Known deployment hashes recorded at the time:
 |---|---|
 | pod `main.lua` | `8e90c52a` |
 | pod `control_mailbox.lua` | `9f67aaa8` |
-| pod `control_apply.lua` | `59429c22` |
+| pod `control_apply.lua` | `26a6ac0b` on pods 2-5; reboot pending |
 | FCS `wiredframe_actuator_test.lua` | `5bde2f6e` |
 | FCS `wiredframe_response_map_test.lua` | `198129a1` (local/live verified 2026-08-30) |
 | FCS `sensor_rate_test.lua` | `76f26c31` |
@@ -237,8 +238,8 @@ The ground gate passed (`wiredframe_response_map_ground_run5.txt`), the control-
 
 Immediate sequence:
 
-1. Finish local verification of write-elision in `pod-template/pod/control_apply.lua`. It skips only values whose peripheral call succeeded, never replays cached bearing readback as fresh, and invalidates the whole cache after a session change or either stale-fallback stage.
-2. After operator approval, back up and deploy the pod apply module, verify hashes, and reboot all four grounded pods with `/fcs/reboot.lua all`.
+1. Local verification and file deployment of write-elision are complete. Pods 2-5 contain SHA-256 `26a6ac0b...`, with verified rollback copies at `2b8c074a...`; the running pod processes still have the old module loaded.
+2. While the craft is grounded and carrying no ion thrust, run `/fcs/reboot.lua all` on FCS-DEV and type `REBOOT` when its live-thrust guard asks for confirmation. Do not use `--force` unless the displayed state has been independently verified safe.
 3. Re-run `/fcs/wiredframe_response_map_test.lua --ground-check`. Require `overall=PASS`, zero transport/application faults, physical readback on every sample, clean shutdown, and one fallback per pod. Compare `apply_mean_ms` and each ion/RPM/tilt stage against `flight-logs/wiredframe_response_map_ground_run8.txt`; do not use `max_apply_ms` as the tuning signal.
 4. Choose and document safe `fallbackIonPower` and `fallbackStopAfterMs` values. Both are FCS policy; the pod deliberately holds no opinion.
 5. Run the first grounded nonzero-ion test, then prove neutral hover before introducing tilt. No existing report authorizes a flight pulse yet.
