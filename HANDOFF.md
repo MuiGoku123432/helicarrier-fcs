@@ -11,7 +11,7 @@ The communications problem is no longer the blocker it was at the start of the i
 
 The direct-wired stationkeeping system is now the operational baseline for this carrier. Live run 3 (`flight-logs/wiredframe_stationkeep_run3.txt`, session `1-stationkeep-1788203667879`) passed after 126.082 seconds and an operator stop. FCS-DEV sent 521 complete four-corner frames; FL, FR, RL, and RR each applied all 521 with zero missing, duplicate, out-of-order, invalid, expired, apply-error, fallback, or fallback-stop events. Shutdown completed cleanly with `run_error=nil`, `abort_reason=nil`, and `shutdown_error=nil`.
 
-The controller held maximum horizontal speed to 0.750938 blocks/s, limited peak position error to 18.832382 blocks while arresting the inherited drift, and used at most 1.327737 degrees of tilt. The signed trace shows the craft stopped its persistent rightward motion, held near-zero X/Z velocity, and began returning to the captured position. This is the frozen proven configuration for ordinary stationkeeping: `positionGain=0.0225`, `velocityGain=0.80`, `integralGain=0.010`, a 0.15 degree/s command-vector slew limit, and a 6 degree absolute tilt cap.
+The controller held maximum horizontal speed to 0.750938 blocks/s, limited peak position error to 18.832382 blocks while arresting the inherited drift, and used at most 1.327737 degrees of tilt. The signed trace shows the craft stopped its persistent rightward motion, held near-zero X/Z velocity, and began returning to the captured position. That was the frozen configuration for ordinary stationkeeping: `positionGain=0.0225`, `velocityGain=0.80`, `integralGain=0.010`, a 0.15 degree/s command-vector slew limit, and a 6 degree absolute tilt cap. **The slew limit has since been raised to 0.45 deg/s** on the evidence of drift-test runs 5 and 6 recorded below; the other three values are unchanged.
 
 The production controller is `fcs/stationkeep_control.lua`; the live runner and report writer are `fcs/wiredframe_stationkeep.lua`; and `fcs/wired_stationkeep_protocol.lua` preserves the direct batched-frame contract. The deployed controller SHA-256 is `836e7d315286877be5a408a7c1d0a18d19b85a74417f1f640208d5d3231efed2`. Run 3 is archived with SHA-256 `489f22a80d936127595eda3bb8c105951c9ae26ce6e773b4acbfb9373cc09567`.
 
@@ -233,6 +233,7 @@ Known rollback copies:
 - `/fcs/stationkeep_control.lua.pre-lowfloor-20260831` on FCS-DEV (SHA-256 `836e7d31...`, the run-3 baseline controller)
 - `/fcs/wiredframe_stationkeep.lua.pre-drifttest-20260831` on FCS-DEV (SHA-256 `2106005d...`, runner without the `--drift-test` mode)
 - `/fcs/wiredframe_stationkeep.lua.pre-slewbump-20260831` on FCS-DEV (SHA-256 `08de9cbd...`, drift-test mode at the baseline 0.15 slew and without altitude in the trace)
+- `/fcs/stationkeep_control.lua.pre-slew045-20260831` on FCS-DEV (SHA-256 `836e7d31...`, the run-3 controller at the original 0.15 slew)
 
 Known deployment hashes recorded at the time:
 
@@ -244,8 +245,8 @@ Known deployment hashes recorded at the time:
 | FCS `wiredframe_actuator_test.lua` | `5bde2f6e` |
 | FCS `wiredframe_response_map_test.lua` | `198129a1` (local/live verified 2026-08-30) |
 | FCS `sensor_rate_test.lua` | `76f26c31` |
-| FCS `stationkeep_control.lua` | `836e7d315286877be5a408a7c1d0a18d19b85a74417f1f640208d5d3231efed2` (run-3 baseline; briefly changed on 2026-08-31 and reverted, see below) |
-| FCS `wiredframe_stationkeep.lua` | `a07d7b287c9117c00ef3affbd78fe66516bbb8c5d168d1023b46f9c5cd044ace` (signed-trace runner, `--drift-test` mode, raised drift-test slew, altitude in the trace; deployed 2026-08-31). Pre-drift-test runner was `2106005d...`. |
+| FCS `stationkeep_control.lua` | `71246e7c30a9c5f8c4742f69da473e76e87b33a55df646f16f48ce31b56f03b8` (deployed 2026-08-31; `slewDegreesPerSecond` promoted 0.15 -> 0.45 on the run-5/run-6 comparison. Run-3 baseline was `836e7d31...`.) |
+| FCS `wiredframe_stationkeep.lua` | `c83c7814a351f80fe04e6d8de2a5bee8aaddeceba58b177b54d126068614134c` (signed-trace runner, `--drift-test` mode, altitude in the trace; deployed 2026-08-31). Pre-drift-test runner was `2106005d...`. |
 | FCS `wired_stationkeep_protocol.lua` | `3243666f92ce9cd997713f0d2451ea99d6f69336dfd5e8c54c8a8f77b2a38861` (run-3 baseline; briefly changed on 2026-08-31 and reverted, see below) |
 
 Verify live files before relying on these values after any manual server-side change.
@@ -360,8 +361,77 @@ in each trace entry, and the result adds `max_rise`, `min_rise`,
 `max_vertical_speed`, `mean_climb_blocks_per_second`, and
 `slew_degrees_per_second`.
 
-Still open: the integrator (`integralGain=0.010`) has not been isolated as a
-contributor. Change slew alone and re-run before touching it.
+### Drift-test runs 6 and 7 (2026-08-31): the slew fix works, and the craft has a ceiling
+
+`flight-logs/wiredframe_stationkeep_run6_slew045.txt` and
+`wiredframe_stationkeep_run7.txt`. Both clean operator stops, `overall=PASS`,
+953/953 and 758/758 frames applied with zero faults.
+
+Run 6 is the single-variable comparison against run 5: only the slew changed.
+
+| | Run 5 (0.15) | Run 6 (0.45) |
+|---|---|---|
+| peak `\|ex\|` | 16.53 blocks | 3.03 blocks |
+| mean `\|ex\|` | 6.25 | 0.84 |
+| peak `\|vx\|` | 2.64 blocks/s | 0.44 blocks/s |
+| peak `\|ex\|` after t=100 | 16.53 | 2.02 |
+| median slew usage | 95% of limit | 13% of limit |
+| samples above 90% of limit | 56% | 0% |
+| Z recapture | 0.100 blocks/s | 0.135 blocks/s |
+
+The limit cycle is gone and slew is no longer the binding constraint, so 0.45
+was promoted to the controller default. Tilt peaked at 1.92 degrees, still only
+32% of the cap, in both runs.
+
+**The craft has a thrust ceiling, and it is predictable.** Run 6 climbed to
+123.25 blocks at up to 6.74 blocks/s, fell back, and settled at 115.58-115.77
+blocks, holding that 0.19 block band for the final 115 seconds with
+`|vy| <= 0.010`. Run 7 reproduced it: 123.24 peak, 6.73 blocks/s, same settle.
+
+The mechanism is `fcs/atmosphere.lua`. Air pressure falls with a 250 block scale
+height below y=280, so props lose thrust as the craft climbs while the ions do
+not. Ions at 3/15 supply 0.668w at any altitude, so props must fall from 0.521w
+to 0.332w, a ratio of 0.637, which needs `250 * ln(1/0.637)` = **112.7 blocks**
+of climb. Observed 115.7, a 2.6% match. The settling altitude is therefore a
+function of ion level, not a coincidence, and 3/15 has a hard ceiling near +116
+blocks above the start.
+
+Two consequences for how drift runs are read:
+
+- Peak climb is 6.7 blocks/s against `MAX_VERTICAL_SPEED = 4`. Only the
+  drift-test stand-down makes this reachable; plain `--stationkeep` aborts
+  during climb-out.
+- **The first ~100 seconds of a drift run are climb transient, not drift.** Both
+  runs accumulated most of their position error while climbing (run 7 reached
+  `ez=+24.6` by t=35). Discard that window when measuring drift.
+
+### What run 7 shows about the residual: the position loop is weak
+
+Run 7 is the behaviour described as "stable, then it drifts a little and we hold
+it but only slightly", and the trace supports exactly that reading. After the
+climb settled, `ez` sat frozen at +31.50 for 56 seconds, then reduced in discrete
+steps to +16.17 by t=176 -- a recapture of 0.204 blocks/s. `ex` fell from +10.35
+to +3.90 over 106 seconds, only 0.061 blocks/s.
+
+The loop is arresting motion but barely returning to target, and the arithmetic
+says why. With `positionGain=0.0225`, a 10 block error asks for just 0.225
+degrees of tilt. At the measured plant response of ~0.82 blocks/s per degree
+(`fcs/trim.lua`) that is a 0.18 blocks/s closing speed, so recapture takes ~54
+seconds regardless of error size. The loop is a velocity-hold with a weak
+position trim, which is what the flight looks like.
+
+`positionGain` is therefore the next lever, not slew and not the integrator. The
+slew headroom that now exists (13% of limit used) is what makes raising it
+plausible without returning to the run-5 limit cycle.
+
+**Unverified observation worth checking:** Z velocity telemetry appears far
+coarser than X. Across runs 5-7 the smallest nonzero `|vx|` is 0.04 blocks/s
+while the smallest nonzero `|vz|` is 0.35 -- roughly 9x. If real, the
+`velocityGain * velocityZ` term reads zero for any Z drift under ~0.175 blocks/s,
+which would leave only the weak position term acting on Z and would explain why
+`ez` plateaus and then steps down rather than closing smoothly. This has not been
+confirmed against the sensor and may be an artifact of the 5 second trace
+sampling rather than the control loop's own 250 ms samples.
 
 ## Next work
 

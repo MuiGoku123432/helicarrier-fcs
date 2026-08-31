@@ -50,20 +50,8 @@ local BRAKE_COMPLETE_SPEED = 0.12
 local DRIFT_TEST_CEILING = 200
 local DRIFT_TEST_PEG_KIND = "high"
 
--- Drift-test run 5 showed the lateral loop in a sustained limit cycle: X held
--- a +/-16 block, ~37 second oscillation that never decayed. The cause was the
--- command-vector slew limit, not the gains. The command sat at 87% of the
--- 0.15 deg/s limit on average and above 90% of it in 78% of samples, while
--- using only 38% of the 6 degree tilt cap: reversing a 2 degree command needs
--- 4 degrees of vector travel, which is 26.7 seconds at 0.15 deg/s against an
--- observed half-period of 15-20 seconds. The command could never turn around
--- inside a half-cycle, so it was permanently phase-lagged.
---
--- 0.45 deg/s reverses that command in ~9 seconds, about a quarter period.
---
--- This override applies to the drift test ONLY. Plain --stationkeep keeps the
--- frozen run-3 value of 0.15 until a comparison run justifies promoting this.
-local DRIFT_TEST_SLEW_DEGREES_PER_SECOND = 0.45
+-- The raised command slew that this mode was built to test is now the baseline
+-- in fcs/stationkeep_control.lua, so the drift test no longer overrides it.
 
 -- Broad creative-world runtime envelope. These are genuine loss-of-control
 -- stops, not proof-test pass/fail thresholds.
@@ -289,10 +277,7 @@ if args[1] == "--self-test" then
         hullTilt = MAX_HULL_TILT + 1, angularSpeed = 0,
     }, true), "drift test must keep hull tilt stop armed")
 
-    -- The raised slew must actually reach the controller, and must not leak
-    -- into the frozen baseline configuration.
-    assert(DRIFT_TEST_SLEW_DEGREES_PER_SECOND
-        > stationkeep.DEFAULTS.slewDegreesPerSecond)
+    -- The raised slew is the baseline now; both modes must actually get it.
     local function firstStepTilt(options)
         local instance = stationkeep.new(options)
         return instance.update({
@@ -301,15 +286,13 @@ if args[1] == "--self-test" then
             quaternion = { w = 1, x = 0, y = 0, z = 0 },
         }, 1.0).tiltDegrees
     end
-    local baselineStep = firstStepTilt(nil)
-    local driftStep = firstStepTilt({
-        slewDegreesPerSecond = DRIFT_TEST_SLEW_DEGREES_PER_SECOND,
-    })
-    assert(math.abs(baselineStep - stationkeep.DEFAULTS.slewDegreesPerSecond) < 1e-6,
-        "baseline slew must remain the frozen run-3 value")
-    assert(math.abs(driftStep - DRIFT_TEST_SLEW_DEGREES_PER_SECOND) < 1e-6,
-        "drift test slew override must reach the controller")
-    assert(stationkeep.DEFAULTS.slewDegreesPerSecond == 0.15,
+    assert(stationkeep.DEFAULTS.slewDegreesPerSecond == 0.45,
+        "baseline slew must be the promoted 0.45 deg/s")
+    assert(math.abs(firstStepTilt(nil) - 0.45) < 1e-6,
+        "baseline slew must reach the controller")
+    assert(math.abs(firstStepTilt({ slewDegreesPerSecond = 0.15 }) - 0.15) < 1e-6,
+        "an explicit override must still be honoured")
+    assert(stationkeep.DEFAULTS.slewDegreesPerSecond == 0.45,
         "constructing with an override must not mutate the shared defaults")
 
     print("wired stationkeep self-test: PASS")
@@ -335,9 +318,6 @@ if driftTest then
     print("The craft CLIMBS for the whole run; it does not hold altitude.")
     print(string.format("Altitude limits stood down; ceiling backstop %d blocks.",
         DRIFT_TEST_CEILING))
-    print(string.format("Command slew raised to %.2f deg/s (baseline is %.2f).",
-        DRIFT_TEST_SLEW_DEGREES_PER_SECOND,
-        stationkeep.DEFAULTS.slewDegreesPerSecond))
     print("Horizontal, tilt, and angular stops remain armed.")
 else
     print("Holds current X/Z and altitude until stopped.")
@@ -358,10 +338,8 @@ closeChannels()
 modem.open(protocol.STATUS_CHANNEL)
 
 local session = tostring(os.getComputerID()) .. "-stationkeep-" .. tostring(os.epoch("utc"))
-local activeSlew = driftTest and DRIFT_TEST_SLEW_DEGREES_PER_SECOND or nil
-local controller = stationkeep.new(driftTest
-    and { slewDegreesPerSecond = activeSlew } or nil)
-activeSlew = activeSlew or stationkeep.DEFAULTS.slewDegreesPerSecond
+local activeSlew = stationkeep.DEFAULTS.slewDegreesPerSecond
+local controller = stationkeep.new()
 local active = true
 local stopRequested = false
 local abortReason

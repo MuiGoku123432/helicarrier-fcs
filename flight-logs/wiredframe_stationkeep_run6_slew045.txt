@@ -1,0 +1,30 @@
+WIRED STATIONKEEP RESULT
+session=1-stationkeep-1788208876533
+mode=drift_test
+vertical=pegged/high
+altitude_limits=stood_down/ceiling_200
+termination=operator
+trace_count=45
+trace=t=0.0,ex=+0.00,ez=+0.00,vx=+0.00,vz=+0.00,tilt=0.00,az=0,rise=+0.00,vy=-0.00;t=5.0,ex=-0.00,ez=+0.00,vx=+0.00,vz=+0.00,tilt=0.00,az=0,rise=+9.21,vy=+4.42;t=10.0,ex=+0.48,ez=+1.25,vx=+0.18,vz=+0.70,tilt=0.62,az=62,rise=+38.79,vy=+6.72;t=15.3,ex=+1.40,ez=+4.90,vx=+0.18,vz=+0.70,tilt=0.75,az=62,rise=+72.42,vy=+5.87;t=20.3,ex=+2.34,ez=+10.16,vx=+0.18,vz=+1.41,tilt=1.49,az=68,rise=+97.16,vy=+4.06;t=25.5,ex=+3.03,ez=+17.47,vx=+0.09,vz=+1.41,tilt=1.74,az=71,rise=+113.34,vy=+2.21;t=30.5,ex=+2.92,ez=+23.59,vx=-0.09,vz=+0.70,tilt=1.40,az=75,rise=+120.92,vy=+0.90;t=35.5,ex=+2.16,ez=+27.11,vx=-0.18,vz=+0.70,tilt=1.55,az=79,rise=+123.21,vy=+0.09;t=40.8,ex=+1.21,ez=+30.90,vx=-0.18,vz=+0.70,tilt=1.71,az=80,rise=+122.28,vy=-0.39;t=46.0,ex=+0.77,ez=+33.01,vx=+0.00,vz=+0.00,tilt=1.27,az=75,rise=+119.73,vy=-0.56;t=51.0,ex=+0.92,ez=+33.01,vx=+0.09,vz=+0.00,tilt=1.32,az=72,rise=+117.01,vy=-0.50;t=56.3,ex=+1.37,ez=+33.01,vx=+0.00,vz=+0.00,tilt=1.36,az=74,rise=+114.86,vy=-0.31;t=61.3,ex=+1.30,ez=+33.01,vx=-0.09,vz=+0.00,tilt=1.41,az=77,rise=+113.81,vy=-0.11;t=66.3,ex=+0.72,ez=+33.01,vx=-0.18,vz=+0.00,tilt=1.46,az=80,rise=+113.71,vy=+0.06;t=71.5,ex=+0.03,ez=+33.01,vx=-0.09,vz=+0.00,tilt=1.50,az=78,rise=+114.27,vy=+0.14;t=76.5,ex=-0.16,ez=+33.01,vx=+0.00,vz=+0.00,tilt=1.55,az=76,rise=+115.02,vy=+0.15;t=81.5,ex=+0.10,ez=+33.01,vx=+0.09,vz=+0.00,tilt=1.60,az=73,rise=+115.68,vy=+0.11;t=86.5,ex=+0.27,ez=+33.01,vx=+0.00,vz=+0.00,tilt=1.64,az=76,rise=+116.12,vy=+0.06;t=91.5,ex=+0.03,ez=+33.01,vx=-0.09,vz=+0.00,tilt=1.69,az=78,rise=+116.28,vy=+0.01;t=96.8,ex=-0.51,ez=+33.01,vx=-0.09,vz=+0.00,tilt=1.74,az=79,rise=+116.22,vy=-0.03;t=102.0,ex=-0.97,ez=+31.45,vx=-0.04,vz=+0.00,tilt=1.39,az=80,rise=+116.03,vy=-0.04;t=107.0,ex=-0.81,ez=+29.94,vx=+0.09,vz=+0.00,tilt=1.73,az=75,rise=+115.83,vy=-0.04;t=112.0,ex=-0.07,ez=+28.81,vx=+0.18,vz=+0.00,tilt=1.74,az=71,rise=+115.68,vy=-0.02;t=117.3,ex=+0.54,ez=+27.05,vx=+0.00,vz=+0.00,tilt=1.40,az=73,rise=+115.59,vy=-0.01;t=122.3,ex=+0.20,ez=+26.24,vx=-0.18,vz=+0.00,tilt=1.73,az=80,rise=+115.58,vy=+0.00;t=127.5,ex=-0.71,ez=+25.58,vx=-0.18,vz=+0.00,tilt=1.75,az=81,rise=+115.62,vy=+0.01;t=132.5,ex=-1.41,ez=+25.29,vx=-0.04,vz=+0.00,tilt=1.77,az=79,rise=+115.67,vy=+0.01;t=137.5,ex=-1.08,ez=+24.19,vx=+0.18,vz=-0.70,tilt=1.34,az=72,rise=+115.72,vy=+0.01;t=142.5,ex=-0.20,ez=+22.52,vx=+0.18,vz=+0.00,tilt=1.64,az=71,rise=+115.75,vy=+0.01;t=147.5,ex=+0.45,ez=+20.36,vx=+0.00,vz=-0.70,tilt=1.49,az=74,rise=+115.77,vy=+0.00;t=152.5,ex=+0.04,ez=+18.23,vx=-0.18,vz=+0.00,tilt=1.25,az=82,rise=+115.77,vy=-0.00;t=157.5,ex=-0.84,ez=+18.23,vx=-0.18,vz=+0.00,tilt=1.70,az=82,rise=+115.77,vy=-0.00;t=162.8,ex=-1.32,ez=+18.23,vx=+0.00,vz=+0.00,tilt=1.72,az=78,rise=+115.75,vy=-0.00;t=168.0,ex=-0.73,ez=+18.23,vx=+0.18,vz=+0.00,tilt=1.75,az=72,rise=+115.73,vy=-0.00;t=173.0,ex=+0.15,ez=+18.23,vx=+0.09,vz=+0.00,tilt=1.78,az=74,rise=+115.72,vy=-0.00;t=178.0,ex=+0.25,ez=+15.21,vx=-0.09,vz=-0.70,tilt=1.14,az=79,rise=+115.71,vy=+0.00;t=183.3,ex=-0.62,ez=+12.43,vx=-0.18,vz=+0.00,tilt=1.21,az=83,rise=+115.72,vy=+0.00;t=188.3,ex=-1.33,ez=+12.43,vx=-0.04,vz=+0.00,tilt=1.65,az=79,rise=+115.73,vy=+0.00;t=193.3,ex=-0.91,ez=+12.43,vx=+0.18,vz=+0.00,tilt=1.67,az=72,rise=+115.74,vy=+0.00;t=198.3,ex=+0.31,ez=+12.43,vx=+0.26,vz=+0.00,tilt=1.70,az=69,rise=+115.74,vy=-0.00;t=203.5,ex=+0.92,ez=+12.43,vx=+0.00,vz=+0.00,tilt=1.70,az=75,rise=+115.74,vy=-0.00;t=208.5,ex=+0.04,ez=+11.07,vx=-0.26,vz=-0.70,tilt=1.13,az=87,rise=+115.73,vy=-0.00;t=213.5,ex=-1.59,ez=+9.04,vx=-0.26,vz=+0.00,tilt=1.45,az=87,rise=+115.72,vy=+0.00;t=218.5,ex=-2.02,ez=+9.04,vx=+0.09,vz=+0.00,tilt=1.64,az=76,rise=+115.73,vy=+0.00;t=223.5,ex=-0.54,ez=+9.04,vx=+0.44,vz=+0.00,tilt=1.69,az=65,rise=+115.72,vy=-0.00
+overall=PASS
+run_error=nil
+abort_reason=nil
+shutdown_error=nil
+duration_seconds=234.562
+frames_sent=953
+samples=1154
+max_horizontal_speed=1.417194
+max_rise=123.247585
+min_rise=0.000000
+max_vertical_speed=6.741257
+mean_climb_blocks_per_second=0.525437
+slew_degrees_per_second=0.450
+max_position_error=33.039988
+max_tilt_command=1.915650
+final_sequence=953
+modem=bottom
+sublevel=global
+FL applied=953 missing=0 duplicate=0 order=0 invalid=0 expired=0 errors=0 fallback=0 stops=0
+FR applied=953 missing=0 duplicate=0 order=0 invalid=0 expired=0 errors=0 fallback=0 stops=0
+RL applied=953 missing=0 duplicate=0 order=0 invalid=0 expired=0 errors=0 fallback=0 stops=0
+RR applied=953 missing=0 duplicate=0 order=0 invalid=0 expired=0 errors=0 fallback=0 stops=0

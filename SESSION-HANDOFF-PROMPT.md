@@ -33,7 +33,7 @@ The trace proves the controller arrests the prior persistent rightward drift, ho
 - `integralGain=0.010`;
 - `deadbandSpeed=0.08`;
 - `positionDeadband=0.50`;
-- `slewDegreesPerSecond=0.15`;
+- `slewDegreesPerSecond=0.45` (raised from 0.15 by drift-test runs 5 and 6);
 - `maxTiltDegrees=6.0`;
 - verified inverted synthetic-vector convention at the direct wired plant boundary; and
 - deployed SHA-256 `836e7d315286877be5a408a7c1d0a18d19b85a74417f1f640208d5d3231efed2`.

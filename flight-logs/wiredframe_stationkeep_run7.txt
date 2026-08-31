@@ -1,0 +1,30 @@
+WIRED STATIONKEEP RESULT
+session=1-stationkeep-1788209405080
+mode=drift_test
+vertical=pegged/high
+altitude_limits=stood_down/ceiling_200
+termination=operator
+trace_count=36
+trace=t=0.0,ex=+0.00,ez=+0.00,vx=+0.00,vz=+0.00,tilt=0.00,az=0,rise=+0.00,vy=+0.00;t=5.3,ex=+0.17,ez=+0.00,vx=+0.09,vz=+0.00,tilt=0.08,az=3,rise=+9.29,vy=+4.41;t=10.3,ex=+1.13,ez=+1.20,vx=+0.26,vz=+0.70,tilt=0.65,az=70,rise=+38.80,vy=+6.71;t=15.3,ex=+3.01,ez=+4.71,vx=+0.44,vz=+0.70,tilt=0.85,az=60,rise=+71.21,vy=+5.93;t=20.3,ex=+5.21,ez=+8.46,vx=+0.44,vz=+1.41,tilt=1.18,az=66,rise=+96.51,vy=+4.11;t=25.3,ex=+7.30,ez=+15.42,vx=+0.35,vz=+1.41,tilt=1.74,az=75,rise=+112.40,vy=+2.34;t=30.3,ex=+8.81,ez=+20.97,vx=+0.26,vz=+0.70,tilt=1.41,az=71,rise=+120.53,vy=+0.98;t=35.3,ex=+9.56,ez=+24.59,vx=+0.09,vz=+0.70,tilt=1.51,az=76,rise=+123.17,vy=+0.12;t=40.3,ex=+9.77,ez=+28.07,vx=+0.00,vz=+0.70,tilt=1.65,az=80,rise=+122.53,vy=-0.34;t=45.3,ex=+9.77,ez=+31.50,vx=+0.00,vz=+0.00,tilt=1.67,az=79,rise=+120.21,vy=-0.55;t=50.5,ex=+9.97,ez=+31.50,vx=+0.09,vz=+0.00,tilt=1.33,az=72,rise=+117.30,vy=-0.51;t=55.5,ex=+10.35,ez=+31.50,vx=+0.00,vz=+0.00,tilt=1.36,az=74,rise=+115.13,vy=-0.35;t=60.8,ex=+10.31,ez=+31.50,vx=-0.09,vz=+0.00,tilt=1.38,az=77,rise=+113.89,vy=-0.13;t=65.8,ex=+9.87,ez=+31.50,vx=-0.09,vz=+0.00,tilt=1.43,az=77,rise=+113.67,vy=+0.04;t=71.0,ex=+9.22,ez=+31.50,vx=-0.09,vz=+0.00,tilt=1.47,az=78,rise=+114.18,vy=+0.14;t=76.0,ex=+8.99,ez=+31.50,vx=+0.00,vz=+0.00,tilt=1.53,az=76,rise=+114.93,vy=+0.15;t=81.0,ex=+9.02,ez=+31.50,vx=+0.09,vz=+0.00,tilt=1.60,az=73,rise=+115.61,vy=+0.12;t=86.0,ex=+9.07,ez=+31.50,vx=+0.00,vz=+0.00,tilt=1.62,az=76,rise=+116.08,vy=+0.07;t=91.0,ex=+8.91,ez=+31.50,vx=-0.09,vz=+0.00,tilt=1.65,az=78,rise=+116.28,vy=+0.01;t=96.0,ex=+8.40,ez=+31.50,vx=-0.18,vz=+0.00,tilt=1.68,az=81,rise=+116.25,vy=-0.02;t=101.0,ex=+7.80,ez=+31.50,vx=-0.09,vz=+0.00,tilt=1.73,az=79,rise=+116.08,vy=-0.04;t=106.0,ex=+7.50,ez=+29.00,vx=+0.00,vz=-0.70,tilt=1.18,az=69,rise=+115.87,vy=-0.04;t=111.3,ex=+7.50,ez=+26.74,vx=+0.00,vz=+0.00,tilt=1.47,az=74,rise=+115.70,vy=-0.03;t=116.3,ex=+7.50,ez=+26.26,vx=+0.00,vz=+0.00,tilt=1.71,az=76,rise=+115.61,vy=-0.01;t=121.3,ex=+7.02,ez=+26.26,vx=-0.18,vz=+0.00,tilt=1.71,az=81,rise=+115.58,vy=+0.00;t=126.3,ex=+6.14,ez=+26.26,vx=-0.18,vz=+0.00,tilt=1.74,az=82,rise=+115.61,vy=+0.01;t=131.3,ex=+5.61,ez=+25.35,vx=+0.00,vz=+0.00,tilt=1.78,az=78,rise=+115.66,vy=+0.01;t=136.3,ex=+5.74,ez=+23.31,vx=+0.09,vz=-0.70,tilt=1.36,az=69,rise=+115.71,vy=+0.01;t=141.3,ex=+6.14,ez=+21.62,vx=+0.00,vz=+0.00,tilt=1.54,az=73,rise=+115.75,vy=+0.01;t=146.3,ex=+5.95,ez=+21.13,vx=-0.09,vz=+0.00,tilt=1.73,az=79,rise=+115.78,vy=+0.00;t=151.3,ex=+4.99,ez=+20.64,vx=-0.26,vz=+0.00,tilt=1.71,az=84,rise=+115.77,vy=-0.00;t=156.3,ex=+3.90,ez=+19.07,vx=-0.18,vz=-0.70,tilt=1.16,az=78,rise=+115.76,vy=-0.00;t=161.3,ex=+3.72,ez=+18.07,vx=+0.09,vz=+0.00,tilt=1.74,az=76,rise=+115.75,vy=-0.00;t=166.3,ex=+4.43,ez=+17.23,vx=+0.18,vz=+0.00,tilt=1.77,az=72,rise=+115.73,vy=-0.00;t=171.3,ex=+5.09,ez=+16.72,vx=+0.00,vz=+0.00,tilt=1.74,az=76,rise=+115.72,vy=-0.00;t=176.3,ex=+4.63,ez=+16.17,vx=-0.26,vz=+0.00,tilt=1.69,az=83,rise=+115.72,vy=-0.00
+overall=PASS
+run_error=nil
+abort_reason=nil
+shutdown_error=nil
+duration_seconds=185.915
+frames_sent=758
+samples=913
+max_horizontal_speed=1.473315
+max_rise=123.241468
+min_rise=0.000000
+max_vertical_speed=6.730728
+mean_climb_blocks_per_second=0.662891
+slew_degrees_per_second=0.450
+max_position_error=33.157922
+max_tilt_command=1.869033
+final_sequence=758
+modem=bottom
+sublevel=global
+FL applied=758 missing=0 duplicate=0 order=0 invalid=0 expired=0 errors=0 fallback=0 stops=0
+FR applied=758 missing=0 duplicate=0 order=0 invalid=0 expired=0 errors=0 fallback=0 stops=0
+RL applied=758 missing=0 duplicate=0 order=0 invalid=0 expired=0 errors=0 fallback=0 stops=0
+RR applied=758 missing=0 duplicate=0 order=0 invalid=0 expired=0 errors=0 fallback=0 stops=0

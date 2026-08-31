@@ -13,7 +13,17 @@ stationkeep.DEFAULTS = {
     deadbandSpeed = 0.08,
     positionDeadband = 0.50,
     maxTiltDegrees = 6.0,
-    slewDegreesPerSecond = 0.15,
+    -- Promoted from 0.15 after drift-test runs 5 and 6. At 0.15 the command sat
+    -- at 95% of its own slew limit with 56% of samples pinned above 90% of it,
+    -- while using only 38% of the 6 degree tilt cap: reversing a 2 degree
+    -- command needs 4 degrees of vector travel, 26.7 seconds at 0.15 deg/s,
+    -- against a 15-20 second half-period. The command could never turn around
+    -- inside a half-cycle, and X held a +/-16 block limit cycle that never
+    -- decayed. At 0.45 the same comparison run cut peak |ex| from 16.53 to
+    -- 3.03 blocks and mean |ex| from 6.25 to 0.84, with slew usage down to 13%
+    -- of the limit and no sample above 90%. Tilt authority was never the
+    -- constraint in either run.
+    slewDegreesPerSecond = 0.45,
     maxDtSeconds = 1.0,
     highCooldownSlots = 3,
     feedbackVerticalSpeed = 0.20,

@@ -69,7 +69,7 @@ The operational direct-wired `stationkeep` mode has additional bounds in `fcs/wi
 | `deadbandSpeed` | `0.08` blocks/s |
 | `positionDeadband` | `0.50` blocks |
 | `maxTiltDegrees` | `6.0` |
-| `slewDegreesPerSecond` | `0.15` |
+| `slewDegreesPerSecond` | `0.45` |
 | `maxDtSeconds` | `1.0` |
 | `highCooldownSlots` | `3` |
 

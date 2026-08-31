@@ -39,7 +39,7 @@ Run 3 (`flight-logs/wiredframe_stationkeep_run3.txt`, session `1-stationkeep-178
 
 The trace shows the controller arresting the prior persistent drift, holding near-zero X/Z velocity, and returning toward the captured X/Z position. Relative to run 2, the final position-gain tune reduced peak position error from 23.036153 to 18.832382 blocks without increasing peak speed and with only 0.034 degrees additional peak tilt.
 
-The baseline controller settings are `velocityGain=0.80`, `positionGain=0.0225`, `integralGain=0.010`, `deadbandSpeed=0.08`, `positionDeadband=0.50`, `slewDegreesPerSecond=0.15`, and `maxTiltDegrees=6.0`. The direct wired plant uses the verified inverted synthetic-vector convention at the controller/actuator boundary. The controller SHA-256 is `836e7d315286877be5a408a7c1d0a18d19b85a74417f1f640208d5d3231efed2`; the archived report SHA-256 is `489f22a80d936127595eda3bb8c105951c9ae26ce6e773b4acbfb9373cc09567`.
+The baseline controller settings are `velocityGain=0.80`, `positionGain=0.0225`, `integralGain=0.010`, `deadbandSpeed=0.08`, `positionDeadband=0.50`, `slewDegreesPerSecond=0.45`, and `maxTiltDegrees=6.0`. The direct wired plant uses the verified inverted synthetic-vector convention at the controller/actuator boundary. The controller SHA-256 is `836e7d315286877be5a408a7c1d0a18d19b85a74417f1f640208d5d3231efed2`; the archived report SHA-256 is `489f22a80d936127595eda3bb8c105951c9ae26ce6e773b4acbfb9373cc09567`.
 
 Any change to gains, sign, coordinates, safety caps, protocol fields, pod validation, or fallback semantics needs a comparison run and rollback. Preserve `stationkeep_control.lua.pre-recapture-tune-20260831-v1` as the exact pre-tune run-2 controller.
 
