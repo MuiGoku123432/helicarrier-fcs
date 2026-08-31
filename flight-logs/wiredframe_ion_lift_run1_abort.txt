@@ -1,0 +1,33 @@
+WIRED ION LIFT PROFILE RESULT
+session=1-ionlift-1788212041921
+overall=FAIL
+termination=abort
+run_error=nil
+abort_reason=horizontal speed limit exceeded
+shutdown_error=nil
+duration_seconds=87.424
+dwell_seconds=30
+step_measure_seconds=3
+prop_rpm=64
+start_level=1
+max_level=15
+ceiling_blocks=220
+ceiling_reached=false
+gravity_blocks_per_second2=4.400
+hover_level=not_bracketed
+levels_recorded=3
+frames_sent=363
+samples=419
+final_sequence=363
+modem=bottom
+sublevel=global
+
+# direction level ion_command held_s rise_start rise_end vy_start vy_end peak_vy accel thrust_to_weight
+level up 1 0.0717 30.00 0.0002 0.0019 -0.0003 0.0124 0.0550 0.020226 1.004597
+level up 2 0.1383 30.00 0.0019 0.0174 0.0124 -0.0112 0.1347 0.005995 1.001362
+level up 3 0.2050 18.25 0.0174 90.0158 -0.0112 3.4212 6.5919 1.240536 1.281940
+
+FL applied=363 ion=0 rpm=0 missing=0 duplicate=0 order=0 invalid=0 expired=0 errors=0 fallback=0 stops=0
+FR applied=363 ion=0 rpm=0 missing=0 duplicate=0 order=0 invalid=0 expired=0 errors=0 fallback=0 stops=0
+RL applied=363 ion=0 rpm=0 missing=0 duplicate=0 order=0 invalid=0 expired=0 errors=0 fallback=0 stops=0
+RR applied=363 ion=0 rpm=0 missing=0 duplicate=0 order=0 invalid=0 expired=0 errors=0 fallback=0 stops=0

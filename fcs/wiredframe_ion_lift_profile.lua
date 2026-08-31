@@ -76,6 +76,22 @@ local CEILING_BLOCKS = 220
 -- the ground.
 local FLOOR_BLOCKS = 8
 
+-- Rise above which the craft is genuinely flying rather than unloading its
+-- contact with the ground. ionsweep.lua records a 0.077 block rise at 96.7% of
+-- weight WITHOUT flying, so this sits well clear of that.
+--
+-- This distinction is the whole reason run 1 produced no usable curve. On the
+-- ground the floor supports the craft, so acceleration reads ~0 whatever the
+-- ion level: run 1's levels 1 and 2 moved 0.0017 and 0.0155 blocks in 30
+-- seconds and reported accelerations of +0.020 and +0.006, which measure the
+-- ground, not thrust. Sub-hover levels can therefore only be measured while
+-- ALREADY AIRBORNE, which is what the descent leg is for.
+local AIRBORNE_BLOCKS = 0.5
+
+-- On the way up, a level that cannot lift the craft has nothing to say. Probe
+-- briefly and move on instead of burning a full dwell sitting on the floor.
+local GROUND_PROBE_SECONDS = 8
+
 -- Only for the indicative T/W column. Estimated from drift-test run 6, where
 -- level 3/15 (about 1.19 of weight) produced roughly 0.83 blocks/s^2 early in
 -- the climb. The hover-level result does not depend on this value.
@@ -101,7 +117,15 @@ local POD_MAX_AGE_MS = 1750
 -- because at zero commanded tilt any of either means something is wrong.
 local MAX_HULL_TILT = 12
 local MAX_ANGULAR_SPEED = 1.5
-local MAX_HORIZONTAL_SPEED = 8
+-- Run 1 aborted here at 8 blocks/s. That was the harness being wrong, not the
+-- craft: this test commands ZERO tilt, so there is no lateral control at all and
+-- any inherited drift or off-centre load accelerates the craft sideways
+-- unopposed for the whole run. Even the full stationkeeping loop saw 7.4
+-- blocks/s fighting an off-centre load (run 8). Lateral drift is an expected
+-- condition of an open-loop lift test, not a fault, so this is now a runaway
+-- stop rather than a drift stop. Hull tilt and angular speed remain the real
+-- loss-of-control guards.
+local MAX_HORIZONTAL_SPEED = 25
 local MAX_FALL_BELOW_START = 5
 
 -- ---------------------------------------------------------------------------
@@ -214,6 +238,51 @@ end
 -- Self-test: no CC APIs, no modem, no actuation
 -- ---------------------------------------------------------------------------
 
+-- Interpolates the level at which vertical acceleration crosses zero, i.e.
+-- where thrust equals weight. Unlike the T/W column this does not depend on the
+-- configured gravity, which is why it is the result this test exists for.
+--
+-- ONLY airborne records may feed it. A grounded craft reads ~0 acceleration at
+-- every level because the floor is carrying it, so grounded samples both
+-- fabricate a crossing near the bottom of the ladder and hide the real one. Run
+-- 1 failed to bracket for exactly this reason: nothing ever read negative,
+-- because the ground never let it.
+--
+-- Both legs contribute. The descent supplies the sub-hover levels, since by then
+-- the craft is high enough to actually fall.
+local function hoverLevelFrom(records)
+    local byLevel = {}
+    for _, record in ipairs(records) do
+        if record.state == "airborne" and record.acceleration then
+            -- Prefer the descent reading: it is measured in settled flight,
+            -- while an ascent reading can still carry the previous step.
+            local existing = byLevel[record.level]
+            if not existing or record.direction == "down" then
+                byLevel[record.level] = record
+            end
+        end
+    end
+
+    local levels = {}
+    for level in pairs(byLevel) do levels[#levels + 1] = level end
+    table.sort(levels)
+
+    for index = 2, #levels do
+        local below, above = byLevel[levels[index - 1]], byLevel[levels[index]]
+        if below.acceleration < 0 and above.acceleration >= 0 then
+            local span = above.acceleration - below.acceleration
+            if span > 0 then
+                return below.level
+                    + (0 - below.acceleration) / span * (above.level - below.level),
+                    string.format("%d/15(%.3f)..%d/15(%.3f)",
+                        below.level, below.acceleration, above.level, above.acceleration)
+            end
+            return nil, nil
+        end
+    end
+    return nil, nil
+end
+
 if args[1] == "--self-test" then
     for level = 1, 15 do
         assert(quantisedLevel(powerForLevel(level)) == level,
@@ -246,6 +315,38 @@ if args[1] == "--self-test" then
     assert(countersClean({ missing = 0, duplicates = 0, outOfOrder = 0,
         invalid = 0, expiredBeforeApply = 0, applyErrors = 0 }))
     assert(not countersClean({ missing = 1 }))
+
+    -- The ground-contact trap that cost run 1: a grounded craft reads ~0
+    -- acceleration at every level, so grounded rows must never reach the fit.
+    local grounded = {
+        { level = 1, direction = "up", state = "grounded", acceleration = 0.020 },
+        { level = 2, direction = "up", state = "grounded", acceleration = 0.006 },
+        { level = 3, direction = "up", state = "transition", acceleration = 1.240 },
+    }
+    assert(hoverLevelFrom(grounded) == nil,
+        "grounded and transition rows must not produce a hover level")
+
+    local flying = {
+        { level = 1, direction = "down", state = "airborne", acceleration = -2.0 },
+        { level = 2, direction = "down", state = "airborne", acceleration = -0.5 },
+        { level = 3, direction = "down", state = "airborne", acceleration = 1.5 },
+    }
+    local level, bracket = hoverLevelFrom(flying)
+    assert(level and math.abs(level - 2.25) < 1e-9,
+        "airborne rows must bracket hover by interpolation")
+    assert(bracket and bracket:find("2/15") and bracket:find("3/15"))
+
+    -- Mixed: the grounded ascent rows must not shift the answer.
+    local mixed = {}
+    for _, r in ipairs(grounded) do mixed[#mixed + 1] = r end
+    for _, r in ipairs(flying) do mixed[#mixed + 1] = r end
+    local mixedLevel = hoverLevelFrom(mixed)
+    assert(mixedLevel and math.abs(mixedLevel - 2.25) < 1e-9,
+        "grounded rows must not perturb the airborne fit")
+
+    assert(AIRBORNE_BLOCKS > 0.077,
+        "airborne threshold must clear the measured contact-unloading rise")
+    assert(GROUND_PROBE_SECONDS < DWELL_SECONDS)
 
     assert(PROP_RPM == 64,
         "the pod mailbox validator only accepts propRpm == 64; see the note "
@@ -544,6 +645,10 @@ local function holdLevel(level, seconds, direction)
             ceilingReached = true
             break
         end
+        if direction == "up" and rise() < AIRBORNE_BLOCKS
+            and now - beganAt >= GROUND_PROBE_SECONDS * 1000 then
+            break
+        end
         if not rawSleep(SEND_INTERVAL_SECONDS, DONE_EVENT, requestStop) then break end
     end
 
@@ -554,13 +659,27 @@ local function holdLevel(level, seconds, direction)
             / ((measuredTo - measuredFrom) / 1000)
     end
 
+    -- A reading is only a thrust measurement if the craft was already flying
+    -- for the whole dwell. Grounded levels measure the floor; the level that
+    -- lifts off measures a transition and is dirty at both ends.
+    local riseEnd = rise()
+    local state
+    if riseEnd <= AIRBORNE_BLOCKS then
+        state = "grounded"
+    elseif riseAtStart <= AIRBORNE_BLOCKS then
+        state = "transition"
+    else
+        state = "airborne"
+    end
+
     local record = {
         level = level,
         direction = direction,
+        state = state,
         commandedPower = level == 0 and 0 or powerForLevel(level),
         heldSeconds = (os.epoch("utc") - beganAt) / 1000,
         riseStart = riseAtStart,
-        riseEnd = rise(),
+        riseEnd = riseEnd,
         velocityStart = velocityAtStart,
         velocityEnd = verticalVelocity(),
         peakVelocity = peakVelocity,
@@ -571,9 +690,9 @@ local function holdLevel(level, seconds, direction)
     records[#records + 1] = record
 
     print(string.format(
-        "%s level %2d/15 (ion %.3f)  rise %+8.2f -> %+8.2f  vy %+6.2f -> %+6.2f  a=%s  T/W=%s",
+        "%s level %2d/15 (ion %.3f) %-10s rise %+8.2f -> %+8.2f  vy %+6.2f -> %+6.2f  a=%s  T/W=%s",
         direction == "up" and "UP  " or "DOWN", level, record.commandedPower,
-        record.riseStart, record.riseEnd, record.velocityStart, record.velocityEnd,
+        state, record.riseStart, record.riseEnd, record.velocityStart, record.velocityEnd,
         acceleration and string.format("%+.3f", acceleration) or "n/a",
         record.thrustToWeight and string.format("%.3f", record.thrustToWeight) or "n/a"))
     return record
@@ -675,27 +794,7 @@ end
 
 local endedAt = os.epoch("utc")
 
--- The hover level is where acceleration crosses zero. It is interpolated from
--- the two ascent levels that bracket the crossing, and unlike the T/W column it
--- does not depend on the configured gravity.
-local hoverLevel
-do
-    local previous
-    for _, record in ipairs(records) do
-        if record.direction == "up" and record.acceleration then
-            if previous and previous.acceleration < 0 and record.acceleration >= 0 then
-                local span = record.acceleration - previous.acceleration
-                if span > 0 then
-                    hoverLevel = previous.level
-                        + (0 - previous.acceleration) / span
-                            * (record.level - previous.level)
-                end
-                break
-            end
-            previous = record
-        end
-    end
-end
+local hoverLevel, hoverBracket = hoverLevelFrom(records)
 
 local overall = not runError and not abortReason and not shutdownError
 local lines = {
@@ -717,6 +816,8 @@ local lines = {
     "ceiling_reached=" .. tostring(ceilingReached),
     "gravity_blocks_per_second2=" .. string.format("%.3f", GRAVITY_BLOCKS_PER_SECOND2),
     "hover_level=" .. (hoverLevel and string.format("%.3f", hoverLevel) or "not_bracketed"),
+    "hover_bracket=" .. tostring(hoverBracket),
+    "airborne_blocks=" .. tostring(AIRBORNE_BLOCKS),
     "levels_recorded=" .. tostring(#records),
     "frames_sent=" .. tostring(framesSent),
     "samples=" .. tostring(samples),
@@ -724,13 +825,15 @@ local lines = {
     "modem=" .. tostring(modemName),
     "sublevel=" .. tostring(sublevelSource),
     "",
-    "# direction level ion_command held_s rise_start rise_end vy_start vy_end peak_vy accel thrust_to_weight",
+    "# direction level state ion_command held_s rise_start rise_end vy_start vy_end peak_vy accel thrust_to_weight",
+    "# only rows marked airborne are thrust measurements; grounded rows measure the floor",
 }
 
 for _, record in ipairs(records) do
     lines[#lines + 1] = string.format(
-        "level %s %d %.4f %.2f %.4f %.4f %.4f %.4f %.4f %s %s",
-        record.direction, record.level, record.commandedPower, record.heldSeconds,
+        "level %s %d %s %.4f %.2f %.4f %.4f %.4f %.4f %.4f %s %s",
+        record.direction, record.level, record.state,
+        record.commandedPower, record.heldSeconds,
         record.riseStart, record.riseEnd, record.velocityStart, record.velocityEnd,
         record.peakVelocity,
         record.acceleration and string.format("%.6f", record.acceleration) or "nil",

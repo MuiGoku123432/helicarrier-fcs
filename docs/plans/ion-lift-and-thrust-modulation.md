@@ -50,6 +50,36 @@ weight and level 3/15 about 1.189, so `hover_level` should land near 2.1-2.2.
 If it does not, the assumed prop contribution is wrong and everything derived
 from it in HANDOFF.md needs revisiting.
 
+**Run 1 (2026-08-31) aborted, and taught the harness two things.**
+`flight-logs/wiredframe_ion_lift_run1_abort.txt`. It stopped at
+`abort_reason=horizontal speed limit exceeded` 18 s into level 3, with clean
+transport throughout (363/363 frames, zero faults) and a clean shutdown.
+
+- The 8 blocks/s horizontal stop was wrong for this test. It commands zero tilt,
+  so there is no lateral control at all and drift accumulates unopposed; even
+  the full stationkeeping loop saw 7.4 blocks/s fighting an off-centre load.
+  Raised to 25 as a runaway stop rather than a drift stop.
+- **Levels below hover cannot be measured from the ground.** Levels 1 and 2 held
+  a full 30 s each and moved 0.0017 and 0.0155 blocks: the craft never flew, so
+  their reported accelerations of +0.020 and +0.006 measure the floor carrying
+  the craft, not thrust against weight. `hover_level` came back
+  `not_bracketed` as a direct consequence -- nothing ever read negative, because
+  the ground never let it.
+
+The fix is that only **airborne** rows feed the hover fit, and the descent leg
+is what supplies the sub-hover levels, since by then the craft is high enough to
+actually fall. Each row is now classified `grounded`, `transition`, or
+`airborne`, the classification is in the result file, and the self-test asserts
+that grounded rows can neither produce a hover level on their own nor perturb a
+correct airborne fit. Grounded levels on the way up are also abandoned after a
+short probe instead of burning a full dwell on the floor.
+
+One number worth carrying forward: level 3 measured 1.24 blocks/s^2. If 3/15 is
+truly 1.189 of weight then gravity is about 6.6 blocks/s^2, not the 4.4 the
+harness assumes for its indicative T/W column. That reading spans the
+ground-to-flight transition so it is not clean, but the next run should settle
+it and the constant should be updated from airborne data.
+
 Caveats built into the harness:
 
 - The sweep is **altitude-bounded, not level-bounded**. Upper levels accelerate
