@@ -18,11 +18,7 @@ stationkeep.DEFAULTS = {
     highCooldownSlots = 3,
     feedbackVerticalSpeed = 0.20,
     feedbackAltitude = 0.20,
-    -- With the low pulse raised to neutral hover (3/15) the loop has no descent
-    -- authority: every high pulse is a permanent altitude gain, so the craft
-    -- ratchets up until this inhibit pins it to low. That makes this the test
-    -- hold altitude rather than a runaway guard. Kept well under MAX_RISE (10).
-    highInhibitRise = 4.0,
+    highInhibitRise = 8.0,
 }
 
 local function finite(value)

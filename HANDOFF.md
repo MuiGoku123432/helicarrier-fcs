@@ -229,9 +229,9 @@ Known rollback copies:
 - `/pod/main.lua.pre-shadow-mailbox-20260829-v1`
 - `/fcs/wiredframe_response_map_test.lua.pre-zero-tilt-readback-20260829-v1`
 - `/pod/control_apply.lua.pre-write-elision-20260830-v1` on pods 2-5 (SHA-256 `2b8c074a...`)
-- `/fcs/wired_stationkeep_protocol.lua.pre-highpower-20260831` on FCS-DEV (SHA-256 `3243666f...`, the run-3 baseline `HIGH_POWER=0.20`, `LOW_POWER=0.14`)
-- `/fcs/wired_stationkeep_protocol.lua.pre-lowfloor-20260831` on FCS-DEV (SHA-256 `67f7bf3e...`, intermediate: high raised, floor not yet raised; never flown)
-- `/fcs/stationkeep_control.lua.pre-lowfloor-20260831` on FCS-DEV (SHA-256 `836e7d31...`, **the run-3 baseline controller** -- restore this to return to proven stationkeeping)
+- `/fcs/wired_stationkeep_protocol.lua.pre-highpower-20260831` and `.pre-lowfloor-20260831` on FCS-DEV (SHA-256 `3243666f...` and `67f7bf3e...`, from the reverted 2026-08-31 height experiment)
+- `/fcs/stationkeep_control.lua.pre-lowfloor-20260831` on FCS-DEV (SHA-256 `836e7d31...`, the run-3 baseline controller)
+- `/fcs/wiredframe_stationkeep.lua.pre-drifttest-20260831` on FCS-DEV (SHA-256 `2106005d...`, runner without the `--drift-test` mode)
 
 Known deployment hashes recorded at the time:
 
@@ -243,34 +243,82 @@ Known deployment hashes recorded at the time:
 | FCS `wiredframe_actuator_test.lua` | `5bde2f6e` |
 | FCS `wiredframe_response_map_test.lua` | `198129a1` (local/live verified 2026-08-30) |
 | FCS `sensor_rate_test.lua` | `76f26c31` |
-| FCS `stationkeep_control.lua` | `755e073d3a5c37709f0efee6a5098932eb6d516b5af4be97677351757af76878` (deployed 2026-08-31; `highInhibitRise` 8.0 -> 4.0 for the raised-floor height test). Run-3 baseline was `836e7d31...` and is preserved in the rollback backup below and in git history; the run-3 lateral gains are untouched. |
-| FCS `wiredframe_stationkeep.lua` | `2106005d9a246ca29a147bd7e0c9de1b31f08a7b475f9104c25536222ed83abd` (signed-trace runner) |
-| FCS `wired_stationkeep_protocol.lua` | `cbd129c1004a2ac1a0066e6b69baaf733bb057b71e016e8ddf44f8efa3e5857e` (deployed 2026-08-31; height test: `HIGH_POWER` 0.20 -> 0.27 = level 4/15, `LOW_POWER` 0.14 -> 0.20 = level 3/15) |
+| FCS `stationkeep_control.lua` | `836e7d315286877be5a408a7c1d0a18d19b85a74417f1f640208d5d3231efed2` (run-3 baseline; briefly changed on 2026-08-31 and reverted, see below) |
+| FCS `wiredframe_stationkeep.lua` | `08de9cbd23741e4bcb88b806e4a71a32648a017c32c458b77e76c545a6180415` (signed-trace runner plus the `--drift-test` mode; deployed 2026-08-31). Pre-drift-test runner was `2106005d...`. |
+| FCS `wired_stationkeep_protocol.lua` | `3243666f92ce9cd997713f0d2451ea99d6f69336dfd5e8c54c8a8f77b2a38861` (run-3 baseline; briefly changed on 2026-08-31 and reverted, see below) |
 
 Verify live files before relying on these values after any manual server-side change.
 
-### Raised-floor height test (2026-08-31, not yet flown)
+### Ion thrust levels: the numbers that actually govern vertical behaviour
 
-The low ion pulse was 2/15, which with props at 64 RPM is only 96.7% of craft
-weight: every low slot actively sank the craft, and with the hold target
-captured barely off the deck it repeatedly contacted the ground and polluted
-the data. Ion output quantises to fifteenths, so the only available floor above
-a sinking command is 3/15 -- the proven neutral-hover level.
+Recorded here because a 2026-08-31 session got these wrong, deployed on the bad
+reading, and cost a flight.
 
-Consequence, and the reason this is a test configuration rather than a new
-baseline: with the floor at neutral the vertical loop has **no descent
-authority**. `above_target`, `upward_speed`, and `high_cooldown` now hold
-altitude instead of recovering it, so every high pulse is a permanent gain and
-the craft ratchets upward until `highInhibitRise` pins it to low. That inhibit
-was lowered 8.0 -> 4.0 so the park altitude is chosen rather than incidental;
-`MAX_RISE` (10) is unchanged and still aborts above it.
+Props carry **52.1% of craft weight at 64 RPM** and each ion level adds
+**0.223w** (`fcs/ionsweep.lua`). The commanded power is quantised by the pod
+driver as `applied = floor(commanded * 15) / 15`, so only these levels exist:
 
-Expect a one-way climb to roughly +4 blocks followed by a park, NOT a return to
-the captured altitude. If the craft must hold a commanded altitude again,
-restore `stationkeep_control.lua.pre-lowfloor-20260831` and the matching
-protocol backup.
+| Level | Command | Total vs weight | Net | Behaviour |
+|---|---|---|---|---|
+| 1/15 | 0.07 (fallback) | 74.4% | -25.6% | falls |
+| 2/15 | 0.14 (`LOW_POWER`) | 96.7% | **-3.3%** | the near-hover level |
+| 3/15 | 0.20 (`HIGH_POWER`) | 118.9% | +18.9% | climbs |
+| 4/15 | 0.27 | 141.2% | +41.2% | climbs hard |
 
-Both current FCS harnesses support `--self-test`, which runs offline with no CC APIs, no modem, and no actuation. Run it after deploying to confirm the file that loaded is the file you sent.
+**2/15 is the only near-hover level, and it is the floor for a reason.** Live
+evidence: `wiredframe_neutral_hover_run1` (0.195, level 2/15) rose 0.038 blocks
+in five seconds. `wiredframe_neutral_hover_run2` (0.200, level 3/15) reached
+1.51 blocks/s and recorded `overall=FAIL`. "Neutral hover" in that harness name
+means neutral ATTITUDE, not neutral thrust; do not read it as 3/15 balancing
+weight.
+
+The run-3 band of 2/15 against 3/15 therefore brackets hover deliberately: low
+sinks slightly, high climbs, and the duty cycle regulates between them.
+
+### Failed run 4 (2026-08-31): raising the floor breaks the brake
+
+`flight-logs/wiredframe_stationkeep_run4_brake_fail.txt`. `LOW_POWER` had been
+raised 0.14 -> 0.20 and `HIGH_POWER` 0.20 -> 0.27 on the false premise that 3/15
+was neutral hover and that the 2/15 floor was grounding the craft.
+
+With the floor at 3/15 both levels climb, and the lift-brake phase commands
+`low`: the brake became a +18.9% climb command, vertical velocity never fell to
+`BRAKE_COMPLETE_SPEED`, and the run ended `run_error=vertical brake did not
+settle` after 9.4 seconds. Transport was clean throughout -- 52/52 frames
+applied at all four pods, zero missing, duplicate, out-of-order, invalid,
+expired, or apply-error events -- so this was purely a control-band fault.
+
+Both files were reverted to the run-3 baseline hashes above and redeployed.
+
+**Rule this establishes: the low pulse must stay below craft weight.** The brake
+phase commands `low`, so a floor at or above 100% removes braking authority
+entirely and no lift sequence can ever complete.
+
+### Drift-test mode (`--stationkeep --drift-test`)
+
+Added instead, to get the lateral-drift measurement the height change was
+chasing. It pegs vertical authority at the high pulse (3/15) rather than
+duty-cycling it, and stands the altitude limits down.
+
+The craft therefore **climbs for the whole run and never holds altitude**: a
+steady +18.9% settles to a constant climb rate against drag. That is the point
+-- a constant vertical speed does not corrupt an X/Z drift measurement, and
+climbing guarantees the craft never touches the ground, which was the original
+complaint about drift data quality.
+
+- Lift and brake phases are skipped; there is no trigger to wait for and nothing
+  to settle.
+- `MAX_RISE`, `MAX_FALL`, and `MAX_VERTICAL_SPEED` stand down. A
+  `DRIFT_TEST_CEILING` of 200 blocks remains as a runaway backstop.
+- **Horizontal speed, hull tilt, and angular speed stops stay armed.** Those are
+  the real loss-of-control guards and a drift run is when they matter most.
+- The result file records `mode=`, `vertical=`, and `altitude_limits=`.
+- `--self-test` covers the stand-down: it asserts the altitude envelope is
+  bypassed, the ceiling still backstops, and the horizontal and tilt stops still
+  fire.
+
+Plain `--stationkeep` is unchanged and still runs the proven run-3
+configuration.
 
 ## Next work
 

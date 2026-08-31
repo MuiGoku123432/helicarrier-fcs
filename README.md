@@ -218,6 +218,8 @@ The baseline controller uses `velocityGain=0.80`, `positionGain=0.0225`, `integr
 
 On FCS-DEV, run the deployed stationkeeping script with its `--stationkeep` flag. Press Ctrl+T for an operator stop; the runner records `termination=operator`, sends the exact-zero shutdown burst, and writes `/fcs/wiredframe_stationkeep_result.txt`.
 
+Adding `--drift-test` to that flag runs a lateral-drift measurement instead: vertical authority is pegged at the high ion pulse (3/15) rather than duty-cycled, the lift and brake phases are skipped, and the altitude limits stand down behind a 200-block ceiling backstop. The craft climbs for the whole run and does not hold altitude, which is what keeps it off the ground and the X/Z data clean. The horizontal, hull tilt, and angular speed stops stay armed. Do not use this mode to judge altitude hold; plain `--stationkeep` is the proven run-3 configuration.
+
 ## Development and verification
 
 Run the complete host-side Lua suite with LuaJIT:

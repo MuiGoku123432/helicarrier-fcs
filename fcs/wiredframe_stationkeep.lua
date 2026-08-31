@@ -29,6 +29,27 @@ local LIFT_TRIGGER_RISE = 0.15
 local LIFT_TRIGGER_SPEED = 0.35
 local BRAKE_COMPLETE_SPEED = 0.12
 
+-- Drift-test mode (--stationkeep --drift-test).
+--
+-- Lateral drift is the thing under test, but the altitude envelope kept ending
+-- runs before enough drift data existed: the duty-cycled band trends downward
+-- near the deck, and ground contact corrupts the horizontal numbers outright.
+-- This mode pegs vertical authority at the high pulse instead of duty-cycling
+-- it, and stands the altitude limits down.
+--
+-- The high pulse is ion level 3/15: props carry 52.1% of weight at 64 RPM and
+-- each ion level adds 0.223w, so this commands ~118.9% -- a steady net +18.9%.
+-- The craft therefore CLIMBS for the whole run at whatever rate drag settles
+-- it to. It does not hover. That is deliberate: a constant vertical speed does
+-- not corrupt an X/Z drift measurement, and climbing guarantees the craft never
+-- touches the ground.
+--
+-- Only the ALTITUDE limits stand down. Horizontal speed, hull tilt, and angular
+-- speed stay armed -- those are the real loss-of-control stops, and a drift test
+-- is exactly the run where they matter most.
+local DRIFT_TEST_CEILING = 200
+local DRIFT_TEST_PEG_KIND = "high"
+
 -- Broad creative-world runtime envelope. These are genuine loss-of-control
 -- stops, not proof-test pass/fail thresholds.
 local MAX_RISE = 10
@@ -158,11 +179,17 @@ local function metrics(sample, origin, target)
     }
 end
 
-local function violation(m)
-    if m.rise > MAX_RISE then return "rise limit exceeded" end
-    if m.rise < -MAX_FALL then return "fall limit exceeded" end
-    if math.abs(m.verticalVelocity) > MAX_VERTICAL_SPEED then
-        return "vertical speed limit exceeded"
+local function violation(m, driftTest)
+    if driftTest then
+        -- Altitude limits stand down; a generous backstop remains so a runaway
+        -- climb still ends rather than riding to the world ceiling.
+        if m.rise > DRIFT_TEST_CEILING then return "drift-test ceiling exceeded" end
+    else
+        if m.rise > MAX_RISE then return "rise limit exceeded" end
+        if m.rise < -MAX_FALL then return "fall limit exceeded" end
+        if math.abs(m.verticalVelocity) > MAX_VERTICAL_SPEED then
+            return "vertical speed limit exceeded"
+        end
     end
     if m.horizontalSpeed > MAX_HORIZONTAL_SPEED then
         return "horizontal speed limit exceeded"
@@ -225,6 +252,28 @@ if args[1] == "--self-test" then
         quaternion = { w = 1, x = 0, y = 0, z = 0 },
     }, 0.25)
     assert(output.valid and output.tiltDegrees > 0)
+
+    -- Drift test stands down the altitude limits and nothing else.
+    local climbing = {
+        rise = MAX_RISE + 5, verticalVelocity = MAX_VERTICAL_SPEED + 1,
+        horizontalSpeed = 0, totalSpeed = 0, hullTilt = 0, angularSpeed = 0,
+    }
+    assert(violation(climbing, false), "armed mode must stop a runaway climb")
+    assert(violation(climbing, true) == nil,
+        "drift test must tolerate climb past the altitude envelope")
+    climbing.rise = DRIFT_TEST_CEILING + 1
+    assert(violation(climbing, true), "drift test ceiling must still backstop")
+
+    local sideways = {
+        rise = 0, verticalVelocity = 0, horizontalSpeed = MAX_HORIZONTAL_SPEED + 1,
+        totalSpeed = 0, hullTilt = 0, angularSpeed = 0,
+    }
+    assert(violation(sideways, true), "drift test must keep horizontal stop armed")
+    assert(violation({
+        rise = 0, verticalVelocity = 0, horizontalSpeed = 0, totalSpeed = 0,
+        hullTilt = MAX_HULL_TILT + 1, angularSpeed = 0,
+    }, true), "drift test must keep hull tilt stop armed")
+
     print("wired stationkeep self-test: PASS")
     return
 end
@@ -233,8 +282,25 @@ if args[1] ~= "--stationkeep" then
     error("use --stationkeep; this is the continuous direct-wired flight controller", 0)
 end
 
+local driftTest = false
+for index = 2, #args do
+    if args[index] == "--drift-test" then
+        driftTest = true
+    else
+        error("unknown option " .. tostring(args[index]), 0)
+    end
+end
+
 print("DIRECT-WIRED STATIONKEEP")
-print("Holds current X/Z and altitude until stopped.")
+if driftTest then
+    print("DRIFT TEST: vertical pegged to the high pulse (ion 3/15).")
+    print("The craft CLIMBS for the whole run; it does not hold altitude.")
+    print(string.format("Altitude limits stood down; ceiling backstop %d blocks.",
+        DRIFT_TEST_CEILING))
+    print("Horizontal, tilt, and angular stops remain armed.")
+else
+    print("Holds current X/Z and altitude until stopped.")
+end
 print("Bearing vector limit: 6 degrees; broad hull stop: 12 degrees.")
 print("Stop the normal FCS first, then type STATIONKEEP to arm.")
 write("> ")
@@ -371,7 +437,8 @@ local function telemetryLoop()
                 local positionError = math.sqrt(latestMetrics.positionErrorX ^ 2
                     + latestMetrics.positionErrorZ ^ 2)
                 maxPositionError = math.max(maxPositionError, positionError)
-                local problem = phase ~= "idle" and violation(latestMetrics) or nil
+                local problem = phase ~= "idle"
+                    and violation(latestMetrics, driftTest) or nil
                 if problem then abort(problem) end
             end
 
@@ -435,7 +502,10 @@ local function senderLoop()
         if not ready then runError = "precheck not acknowledged by " .. tostring(corner) end
     end
 
-    if not runError and not stopRequested and not abortReason then
+    -- Drift test pegs the high pulse from the outset, so there is no lift
+    -- trigger to wait for and nothing for the brake to settle: the craft is
+    -- meant to be climbing when the measurement starts.
+    if not runError and not stopRequested and not abortReason and not driftTest then
         print("Lifting into stationkeeping authority.")
         local lifted = runTimed(LIFT_TIMEOUT_SECONDS, "high",
             { tiltDegrees = 0, azimuthDegrees = 0 }, function()
@@ -445,7 +515,7 @@ local function senderLoop()
         if not lifted then runError = abortReason or "lift trigger not observed" end
     end
 
-    if not runError and not stopRequested and not abortReason then
+    if not runError and not stopRequested and not abortReason and not driftTest then
         print("Braking vertical motion.")
         local brakeStartedAt = os.epoch("utc")
         local braked = runTimed(BRAKE_TIMEOUT_SECONDS, "low",
@@ -471,6 +541,9 @@ local function senderLoop()
         local nextPrintAt = phaseStartedAt
         print(string.format("STATIONKEEP ACTIVE at x=%.2f y=%.2f z=%.2f",
             target.x, target.y, target.z))
+        if driftTest then
+            print("Drift test: holding X/Z only; altitude is unmanaged and rising.")
+        end
         print("Press Ctrl+T to stop and command exact-zero shutdown.")
 
         while not stopRequested and not abortReason do
@@ -496,11 +569,16 @@ local function senderLoop()
                 break
             end
             maxTiltCommand = math.max(maxTiltCommand, finalOutput.tiltDegrees)
-            local verticalKind, verticalReason = controller.vertical({
-                rise = latestMetrics.rise,
-                verticalVelocity = latestMetrics.verticalVelocity,
-                altitudeError = latestSample.position.y - target.y,
-            }, slot)
+            local verticalKind, verticalReason
+            if driftTest then
+                verticalKind, verticalReason = DRIFT_TEST_PEG_KIND, "drift_test_peg"
+            else
+                verticalKind, verticalReason = controller.vertical({
+                    rise = latestMetrics.rise,
+                    verticalVelocity = latestMetrics.verticalVelocity,
+                    altitudeError = latestSample.position.y - target.y,
+                }, slot)
+            end
             transmit(verticalKind, finalOutput)
 
             if now >= nextPrintAt then
@@ -549,6 +627,11 @@ local overall = not runError and not abortReason and not shutdownError
 local lines = {
     "WIRED STATIONKEEP RESULT",
     "session=" .. session,
+    "mode=" .. (driftTest and "drift_test" or "stationkeep"),
+    "vertical=" .. (driftTest
+        and ("pegged/" .. DRIFT_TEST_PEG_KIND) or "closed_loop"),
+    "altitude_limits=" .. (driftTest
+        and ("stood_down/ceiling_" .. tostring(DRIFT_TEST_CEILING)) or "armed"),
     "termination=" .. (stopRequested and "operator" or (abortReason and "abort" or "complete")),
     "trace_count=" .. tostring(#flightTrace),
     "trace=" .. table.concat(flightTrace, ";"),

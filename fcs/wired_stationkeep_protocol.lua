@@ -6,14 +6,8 @@ protocol.CONTROL_CHANNEL = 42042
 protocol.STATUS_CHANNEL = 42043
 protocol.CORNERS = { "FL", "FR", "RL", "RR" }
 protocol.PROP_RPM = 64
--- Ion output is quantised to fifteenths (applied = floor(commanded * 15) / 15),
--- so the smallest real increase to the high pulse is one level: 3/15 -> 4/15.
--- Raised for flight-height testing; low and fallback levels are unchanged.
-protocol.HIGH_POWER = 0.27
--- 2/15 with props at 64 RPM is only 96.7% of craft weight (see fcs/ionsweep.lua),
--- so the old low pulse actively sank and grounded the craft between high pulses.
--- 3/15 is the proven neutral-hover level: low now holds instead of descending.
-protocol.LOW_POWER = 0.20
+protocol.HIGH_POWER = 0.20
+protocol.LOW_POWER = 0.14
 protocol.FALLBACK_POWER = 0.07
 protocol.FALLBACK_STOP_AFTER_MS = 5000
 protocol.VALID_FOR_MS = 750

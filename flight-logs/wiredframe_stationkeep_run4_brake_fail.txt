@@ -1,0 +1,22 @@
+WIRED STATIONKEEP RESULT
+session=1-stationkeep-1788205580690
+termination=complete
+trace_count=0
+trace=
+overall=FAIL
+run_error=vertical brake did not settle
+abort_reason=nil
+shutdown_error=nil
+duration_seconds=9.404
+frames_sent=52
+samples=28
+max_horizontal_speed=0.000000
+max_position_error=0.000000
+max_tilt_command=0.000000
+final_sequence=52
+modem=bottom
+sublevel=global
+FL applied=52 missing=0 duplicate=0 order=0 invalid=0 expired=0 errors=0 fallback=0 stops=0
+FR applied=52 missing=0 duplicate=0 order=0 invalid=0 expired=0 errors=0 fallback=0 stops=0
+RL applied=52 missing=0 duplicate=0 order=0 invalid=0 expired=0 errors=0 fallback=0 stops=0
+RR applied=52 missing=0 duplicate=0 order=0 invalid=0 expired=0 errors=0 fallback=0 stops=0
