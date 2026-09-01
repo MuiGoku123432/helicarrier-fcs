@@ -18,6 +18,8 @@ communications path.
 - `inventory` reads peripherals and creates an unapproved layout template.
 - `validate` reads and validates the edited layout.
 - `timing` writes exact zero only and requires `ZERO-WRITE-TIMING`.
+- `identify` pulses exactly one named ion at minimum level `1/15`, verifies all
+  32 at zero before prompting, and requires `RESTRAINED-ION-IDENTIFY`.
 - `restrained` is powered, requires an approved balanced layout, requires
   `RESTRAINED-ION-SURVEY`, and must only run with the craft physically
   restrained and the normal FCS and pod controller stopped.
@@ -89,7 +91,35 @@ Type `ZERO-WRITE-TIMING` when prompted. This stage sends only zero and compares
 sequential, all-32 parallel, and batches-of-eight setter timing. It reads every
 thruster afterward and requires exact-zero confirmation.
 
-### 5. Run the restrained pattern survey
+The first four-pod timing run passed on every pod: all-32 parallel writes took
+`50–52 ms`, batches of eight took `198–199 ms`, and sequential writes took
+`1553–1572 ms`. The pod-local allocator should therefore use parallel writes.
+
+### 5. Identify physical positions
+
+The ion API does not expose block coordinates. With the normal FCS and pod
+controller stopped and the craft physically restrained, run one pod at a time:
+
+```text
+/pod/ion_cluster_survey.lua identify
+```
+
+Type `RESTRAINED-ION-IDENTIFY` when prompted. Thrusters are visited in numeric
+peripheral-ID order. Exactly one thruster pulses at minimum level `1/15` for a
+short interval. The script then writes and verifies all 32 at exact zero before
+asking for an operator response:
+
+- enter a free-form position label such as `x=-3 z=2 outer`;
+- enter `R` to repeat the same ion;
+- enter `S` to leave it unlabeled and continue;
+- enter `Q` to stop with a partial report.
+
+Every pulse records its peripheral name and numeric ID, requested level, write
+latency, applied power/thrust reading, actual powered duration, operator label,
+and exact-zero verification. Quitting or an error still runs final exact-zero
+shutdown and writes the report.
+
+### 6. Run the restrained pattern survey
 
 With the normal FCS and pod controller stopped and the craft physically
 restrained, run one pod at a time:
@@ -111,8 +141,8 @@ Reports are serialized Lua tables at:
 /pod/ion-cluster-survey-<computer-id>-<stage>-<utc-epoch>.txt
 ```
 
-Pull the inventory, layout-validation, timing, and restrained reports from
-each pod. Also preserve the final approved `/pod/ion-layout.lua` for each
+Pull the inventory, layout-validation, timing, identify, and restrained
+reports from each pod. Also preserve the final approved `/pod/ion-layout.lua` for each
 corner. Together they provide:
 
 - the address-to-position map;

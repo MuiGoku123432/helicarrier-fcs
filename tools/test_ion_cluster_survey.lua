@@ -44,6 +44,50 @@ local configOk = pcall(survey.configuredManifestPath, function()
 end)
 assertTrue(not configOk, "missing configured manifest path rejected")
 
+local orderedIds = survey.sortedThrusterNames({
+    "ion_thruster_98", "ion_thruster_5", "ion_thruster_70",
+    "ion_thruster_1",
+})
+assertEqual(table.concat(orderedIds, ","),
+    "ion_thruster_1,ion_thruster_5,ion_thruster_70,ion_thruster_98",
+    "thruster names sort by numeric peripheral id")
+assertEqual(survey.numericPeripheralId("ion_thruster_127"), 127,
+    "numeric peripheral id extracted")
+
+local repeatResponse = survey.classifyIdentifyResponse(" R ")
+assertEqual(repeatResponse.action, "repeat", "identify repeat response")
+local skipResponse = survey.classifyIdentifyResponse("skip")
+assertEqual(skipResponse.action, "skip", "identify skip response")
+local quitResponse = survey.classifyIdentifyResponse("Q")
+assertEqual(quitResponse.action, "quit", "identify quit response")
+local labelResponse = survey.classifyIdentifyResponse(" x=-3 z=2 outer ")
+assertEqual(labelResponse.action, "label", "identify label response")
+assertEqual(labelResponse.label, "x=-3 z=2 outer",
+    "identify label whitespace trimmed")
+local emptyResponse, emptyError = survey.classifyIdentifyResponse("   ")
+assertEqual(emptyResponse, nil, "blank identify response rejected")
+assertTrue(type(emptyError) == "string", "blank response explains rejection")
+
+local identifyNames = {
+    "ion_thruster_1", "ion_thruster_5", "ion_thruster_70",
+    "ion_thruster_98",
+}
+local identifyLevels = survey.identifyLevels(
+    identifyNames, "ion_thruster_70")
+local poweredCount = 0
+for _, name in ipairs(identifyNames) do
+    if identifyLevels[name] > 0 then
+        poweredCount = poweredCount + 1
+        assertEqual(name, "ion_thruster_70", "only target ion is powered")
+        assertEqual(identifyLevels[name], 1 / 15,
+            "identify pulse uses minimum analog level")
+    end
+end
+assertEqual(poweredCount, 1, "identify plan powers exactly one ion")
+local missingTargetOk = pcall(survey.identifyLevels,
+    identifyNames, "ion_thruster_999")
+assertTrue(not missingTargetOk, "missing identify target rejected")
+
 local names = { "ion_d", "ion_b", "ion_a", "ion_c" }
 local methods = {
     "setPowerNormalized",

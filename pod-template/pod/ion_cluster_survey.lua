@@ -8,6 +8,9 @@ local ZERO_EPSILON = 1e-6
 local BALANCE_EPSILON = 1e-6
 local TIMING_CONFIRMATION = "ZERO-WRITE-TIMING"
 local RESTRAINED_CONFIRMATION = "RESTRAINED-ION-SURVEY"
+local IDENTIFY_CONFIRMATION = "RESTRAINED-ION-IDENTIFY"
+local IDENTIFY_LEVEL = 1
+local IDENTIFY_PULSE_SECONDS = 0.25
 
 local function finite(value)
     return type(value) == "number"
@@ -22,6 +25,48 @@ local function copyArray(values)
         result[index] = value
     end
     return result
+end
+
+function survey.numericPeripheralId(name)
+    if type(name) ~= "string" then
+        return nil
+    end
+    return tonumber(string.match(name, "_(%d+)$"))
+end
+
+function survey.sortedThrusterNames(names)
+    local ordered = copyArray(names)
+    table.sort(ordered, function(left, right)
+        local leftId = survey.numericPeripheralId(left)
+        local rightId = survey.numericPeripheralId(right)
+        if leftId and rightId and leftId ~= rightId then
+            return leftId < rightId
+        end
+        if leftId and not rightId then
+            return true
+        end
+        if rightId and not leftId then
+            return false
+        end
+        return tostring(left) < tostring(right)
+    end)
+    return ordered
+end
+
+function survey.classifyIdentifyResponse(response)
+    local text = tostring(response or "")
+    text = string.match(text, "^%s*(.-)%s*$")
+    local lowered = string.lower(text)
+    if text == "" then
+        return nil, "enter a position label, R, S, or Q"
+    elseif lowered == "r" or lowered == "repeat" then
+        return { action = "repeat" }
+    elseif lowered == "s" or lowered == "skip" then
+        return { action = "skip" }
+    elseif lowered == "q" or lowered == "quit" then
+        return { action = "quit" }
+    end
+    return { action = "label", label = text }
 end
 
 local function sortedKeys(values)
@@ -331,6 +376,24 @@ function survey.patternLevels(names, members, baseLevel, highLevel)
     }
 end
 
+function survey.identifyLevels(names, targetName)
+    local levels = {}
+    local matches = 0
+    for _, name in ipairs(names or {}) do
+        if name == targetName then
+            levels[name] = IDENTIFY_LEVEL / 15
+            matches = matches + 1
+        else
+            levels[name] = 0
+        end
+    end
+    if matches ~= 1 then
+        error("identify target must appear exactly once: "
+            .. tostring(targetName), 0)
+    end
+    return levels
+end
+
 local function readGetter(device, methodName)
     if type(device[methodName]) ~= "function" then
         return nil, "unsupported"
@@ -424,6 +487,23 @@ local function readAll(names, devices, batchSize)
     for index, name in ipairs(names) do
         jobs[index] = function()
             results[index] = readDevice(name, devices[name])
+        end
+    end
+    runBatched(jobs, batchSize)
+    return results
+end
+
+local function readPowerAll(names, devices, batchSize)
+    local results = {}
+    local jobs = {}
+    for index, name in ipairs(names) do
+        jobs[index] = function()
+            local power, powerError = readGetter(devices[name], "getPower")
+            results[index] = {
+                name = name,
+                power = power,
+                powerError = powerError,
+            }
         end
     end
     runBatched(jobs, batchSize)
@@ -770,6 +850,171 @@ local function restrained(manifestPath, layoutPath)
     end
 end
 
+local function promptIdentifyResult()
+    while true do
+        print("Enter position label, R=repeat, S=skip, or Q=quit:")
+        local classified, classifyError = survey.classifyIdentifyResponse(read())
+        if classified then
+            return classified
+        end
+        print("Invalid response: " .. tostring(classifyError))
+    end
+end
+
+local function applyIdentifyPulse(names, devices, name, levels)
+    local poweredStarted = os.epoch("utc")
+    local writes, writeTotalMs = applyLevels(names, devices, levels, 32)
+    sleep(IDENTIFY_PULSE_SECONDS)
+    local reading = readDevice(name, devices[name])
+    return writes, writeTotalMs, reading,
+        os.epoch("utc") - poweredStarted
+end
+
+local function resetIdentifyPulse(names, devices, name)
+    local zeroOk, zeroResult, zeroElapsed = zeroAll(names, devices)
+    if not zeroOk then
+        error("exact-zero write failed after identifying " .. name, 0)
+    end
+    local readings = readPowerAll(names, devices, 32)
+    local verified, verifyError = zeroVerified(readings)
+    if not verified then
+        error("zero verification failed after identifying " .. name
+            .. ": " .. tostring(verifyError), 0)
+    end
+    return zeroResult, zeroElapsed, readings
+end
+
+local function runIdentifyPulse(names, devices, name)
+    local entry = {
+        name = name,
+        numericId = survey.numericPeripheralId(name),
+        requestedLevel = IDENTIFY_LEVEL,
+        requestedPower = IDENTIFY_LEVEL / 15,
+        pulseSeconds = IDENTIFY_PULSE_SECONDS,
+    }
+    local levels = survey.identifyLevels(names, name)
+    entry.writes, entry.writeTotalMs, entry.pulseReading,
+        entry.poweredDurationMs = applyIdentifyPulse(
+            names, devices, name, levels)
+    entry.zeroWriteResult, entry.zeroWriteElapsedMs,
+        entry.zeroReadings = resetIdentifyPulse(names, devices, name)
+    entry.zeroWriteOk = true
+    entry.zeroVerified = true
+    return entry
+end
+
+local function identifyOne(names, devices, report, index, ordered, name)
+    while true do
+        print(string.format("[%d/%d] Pulsing %s (ID %s) at 1/15",
+            index, #ordered, name,
+            tostring(survey.numericPeripheralId(name) or "unknown")))
+        local entry = runIdentifyPulse(names, devices, name)
+        print("Pulse complete; all 32 ions verified at exact zero.")
+        local response = promptIdentifyResult()
+        entry.operatorAction = response.action
+        entry.operatorLabel = response.label
+        report.pulses[#report.pulses + 1] = entry
+
+        if response.action == "repeat" then
+            print("Repeating " .. name)
+        else
+            report.processedCount = index
+            if response.action == "label" then
+                report.labels[name] = response.label
+            elseif response.action == "skip" then
+                report.skipped[#report.skipped + 1] = name
+            end
+            return response.action
+        end
+    end
+end
+
+local function runIdentifySequence(names, devices, report)
+    report.initialReadings = precheckZero(names, devices)
+    local ordered = survey.sortedThrusterNames(names)
+    report.order = copyArray(ordered)
+    for index, name in ipairs(ordered) do
+        local action = identifyOne(
+            names, devices, report, index, ordered, name)
+        if action == "quit" then
+            report.operatorQuit = true
+            return
+        end
+    end
+    report.complete = true
+end
+
+local function finalizeIdentify(names, devices, report, ok, runError)
+    local shutdownOk, shutdownResult, shutdownElapsed = zeroAll(names, devices)
+    report.shutdownWriteOk = shutdownOk
+    report.shutdownWriteResult = shutdownResult
+    report.shutdownWriteElapsedMs = shutdownElapsed
+    report.finalReadings = readPowerAll(names, devices, 32)
+    report.shutdownVerified, report.shutdownError = zeroVerified(
+        report.finalReadings)
+    report.runError = ok and nil or runError
+    report.overall = ok and shutdownOk and report.shutdownVerified
+        and "PASS" or "FAIL"
+end
+
+local function explainIdentify()
+    print("RESTRAINED SINGLE-ION IDENTIFICATION")
+    print("Stop the normal FCS and pod controller first.")
+    print("The craft must be physically restrained.")
+    print("Exactly one named ion pulses at minimum level 1/15.")
+    print("All 32 ions are verified at zero before every prompt.")
+end
+
+local function newIdentifyReport(manifestPath)
+    return {
+        schema = "ion_cluster_survey",
+        version = 1,
+        stage = "identify",
+        computerId = os.getComputerID(),
+        collectedAt = os.epoch("utc"),
+        manifestPath = manifestPath,
+        confirmation = IDENTIFY_CONFIRMATION,
+        pulseLevel = IDENTIFY_LEVEL,
+        pulseSeconds = IDENTIFY_PULSE_SECONDS,
+        processedCount = 0,
+        complete = false,
+        operatorQuit = false,
+        pulses = {},
+        labels = {},
+        skipped = {},
+    }
+end
+
+local function saveIdentifyReport(report)
+    local path = saveReport("identify", report)
+    print("Identification report: " .. path)
+    print("overall=" .. report.overall
+        .. " complete=" .. tostring(report.complete))
+    if report.runError then
+        error(report.runError, 0)
+    end
+    if not report.shutdownVerified then
+        error("final exact-zero verification failed: "
+            .. tostring(report.shutdownError), 0)
+    end
+end
+
+local function identify(manifestPath)
+    local names = loadManifest(manifestPath)
+    local devices = wrapDevices(names)
+    explainIdentify()
+    requireTyped(IDENTIFY_CONFIRMATION)
+
+    local report = newIdentifyReport(manifestPath)
+    local ok, runError = xpcall(function()
+        runIdentifySequence(names, devices, report)
+    end, function(message)
+        return tostring(message)
+    end)
+    finalizeIdentify(names, devices, report, ok, runError)
+    saveIdentifyReport(report)
+end
+
 local function usage()
     print("Ion cluster survey (32 individually addressable thrusters)")
     print("No command actuates by default.")
@@ -777,6 +1022,7 @@ local function usage()
     print("  /pod/ion_cluster_survey.lua inventory")
     print("  /pod/ion_cluster_survey.lua validate")
     print("  /pod/ion_cluster_survey.lua timing")
+    print("  /pod/ion_cluster_survey.lua identify")
     print("  /pod/ion_cluster_survey.lua restrained")
     print("Optional paths:")
     print("  --manifest <path>  (defaults to pod.config.manifestPath)")
@@ -860,6 +1106,8 @@ function survey.main(arguments)
         validate(options.manifestPath, options.layoutPath)
     elseif options.command == "timing" then
         timing(options.manifestPath)
+    elseif options.command == "identify" then
+        identify(options.manifestPath)
     elseif options.command == "restrained" then
         restrained(options.manifestPath, options.layoutPath)
     else
