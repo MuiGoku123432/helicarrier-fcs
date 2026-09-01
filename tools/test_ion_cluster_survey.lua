@@ -18,6 +18,14 @@ local function assertEqual(actual, expected, message)
     end
 end
 
+assertEqual(survey.configuredManifestPath(function()
+    return { manifestPath = "/pod/thruster_manifest.lua" }
+end), "/pod/thruster_manifest.lua", "survey uses pod config manifest path")
+local configOk = pcall(survey.configuredManifestPath, function()
+    return { manifestPath = "" }
+end)
+assertTrue(not configOk, "missing configured manifest path rejected")
+
 local names = { "ion_d", "ion_b", "ion_a", "ion_c" }
 local methods = {
     "setPowerNormalized",

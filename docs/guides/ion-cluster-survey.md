@@ -30,8 +30,8 @@ communications path.
 
 Copy the repository file
 `pod-template/pod/ion_cluster_survey.lua` to
-`/pod/ion_cluster_survey.lua` on the pod being characterized. The script uses
-the pod's already-approved `/pod/thrusters-manifest.lua`; it never replaces
+`/pod/ion_cluster_survey.lua` on the pod being characterized. The script loads `pod.config` and uses that pod's configured `manifestPath`
+(`/pod/thruster_manifest.lua` in the current configuration); it never replaces
 that manifest.
 
 No operational pod file is modified by running `inventory` or `validate`.

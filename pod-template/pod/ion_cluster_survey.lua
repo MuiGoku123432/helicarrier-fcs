@@ -1,7 +1,7 @@
 local survey = {}
 
 local EXPECTED_THRUSTERS = 32
-local DEFAULT_MANIFEST = "/pod/thrusters-manifest.lua"
+local CONFIG_MODULE = "pod.config"
 local DEFAULT_LAYOUT = "/pod/ion-layout.lua"
 local REPORT_PREFIX = "/pod/ion-cluster-survey"
 local ZERO_EPSILON = 1e-6
@@ -779,14 +779,29 @@ local function usage()
     print("  /pod/ion_cluster_survey.lua timing")
     print("  /pod/ion_cluster_survey.lua restrained")
     print("Optional paths:")
-    print("  --manifest /pod/thrusters-manifest.lua")
+    print("  --manifest <path>  (defaults to pod.config.manifestPath)")
     print("  --layout /pod/ion-layout.lua")
+end
+
+function survey.configuredManifestPath(loader)
+    local configLoader = loader or function()
+        return require(CONFIG_MODULE)
+    end
+    local ok, config = pcall(configLoader)
+    if not ok then
+        error("cannot load " .. CONFIG_MODULE .. ": " .. tostring(config), 0)
+    end
+    if type(config) ~= "table" or type(config.manifestPath) ~= "string"
+            or config.manifestPath == "" then
+        error(CONFIG_MODULE .. ".manifestPath is missing or invalid", 0)
+    end
+    return config.manifestPath
 end
 
 local function parse(arguments)
     local result = {
         command = arguments[1],
-        manifestPath = DEFAULT_MANIFEST,
+        manifestPath = survey.configuredManifestPath(),
         layoutPath = DEFAULT_LAYOUT,
     }
     local index = 2
