@@ -1,0 +1,45 @@
+WIRED ION LIFT PROFILE RESULT
+session=1-ionlift-1788231514637
+overall=FAIL
+termination=abort
+run_error=nil
+abort_reason=pod RL reported transport/apply faults
+shutdown_error=shutdown not confirmed for FL
+duration_seconds=91.307
+dwell_seconds=30
+step_measure_seconds=3
+prop_rpm=8
+start_level=1
+max_level=15
+ceiling_blocks=220
+ceiling_reached=true
+descent_speed_reached=true
+lift_level=5
+descent_arrested=true
+prop_rpm_note=props_at_8rpm_near_zero_lift
+gravity_blocks_per_second2=4.400
+hover_level=not_bracketed
+hover_note=fewer than two drag-free airborne levels
+hover_compare_max_altitude_gap=25
+drag_free_speed=1
+airborne_blocks=0.5
+levels_recorded=6
+frames_sent=388
+samples=436
+final_sequence=388
+modem=bottom
+sublevel=global
+
+# direction level state ion_command held_s measure_rise measure_speed rise_start rise_end vy_start vy_end peak_vy accel thrust_to_weight
+# only rows marked airborne are thrust measurements; grounded rows measure the floor
+level up 1 grounded 0.0717 8.00 -0.0000 0.0000 0.0000 -0.0000 0.0000 0.0000 0.0001 0.000000 1.000000
+level up 2 grounded 0.1383 8.00 0.0002 0.0002 -0.0000 0.0002 0.0000 -0.0001 0.0036 0.000069 1.000016
+level up 3 grounded 0.2050 8.26 0.0006 0.0010 0.0002 0.0034 -0.0001 -0.0362 0.0579 0.000407 1.000092
+level up 4 grounded 0.2717 8.24 0.0114 0.0600 0.0034 0.0511 -0.0362 -0.0644 0.1077 0.020100 1.004568
+level up 5 airborne_dragged 0.3383 25.50 0.8229 4.9912 0.0511 222.1584 -0.0644 12.2455 12.2455 1.198032 1.272280
+level down 4 airborne_dragged 0.2717 20.75 237.6581 10.0394 222.1584 202.5773 12.2455 -8.0264 12.2720 -1.828501 0.584432
+
+FL applied=388 ion=0 rpm=0 missing=0 duplicate=0 order=0 invalid=0 expired=1 errors=0 fallback=1 stops=0
+FR applied=388 ion=0 rpm=0 missing=0 duplicate=0 order=0 invalid=0 expired=1 errors=0 fallback=1 stops=0
+RL applied=388 ion=0 rpm=0 missing=0 duplicate=0 order=0 invalid=0 expired=1 errors=0 fallback=1 stops=0
+RR applied=388 ion=0 rpm=0 missing=0 duplicate=0 order=0 invalid=0 expired=1 errors=0 fallback=1 stops=0

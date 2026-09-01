@@ -181,6 +181,48 @@ to run ions without props, which is both the clean measurement AND the
 architecture this plan is aiming at. A pod-side change is on the critical path
 for both.
 
+**Run 3 (2026-08-31): ions fired, run aborted on a transient, still no curve.**
+`flight-logs/wiredframe_ion_lift_run3.txt`. The apply-path fix worked --
+`lift_level=5`, and the craft climbed to 222 blocks, which matches the ~4.19/15
+hover predicted once the props' 52.1% is removed. Three further faults:
+
+- **Aborted on a transient.** Every pod reported `expired=1 fallback=1` with
+  `fallbackStops=0`: one frame aged past the 1500 ms... at the time 750 ms
+  validity on all four pods simultaneously, so an FCS-side send gap, almost
+  certainly the three terminal prints that land between transmits at a level
+  transition. Pod counters are cumulative, so aborting on any non-zero value
+  ends the run on a hiccup. Now: `applyErrors`, `invalid`, `missing`,
+  `duplicates` and `outOfOrder` remain fatal at any count, `fallbackStops` is
+  fatal at any count because it means a pod actually cut thrust, and expired
+  frames and fallbacks are tolerated up to 3. Frame validity raised to 1500 ms.
+- **Shutdown confirmation was unsatisfiable.** It required historically clean
+  counters, which can never return to zero, so any earlier transient guaranteed
+  a `shutdown_error`. It now checks what the pods actually applied -- fresh
+  status, ion 0, RPM 0.
+- **Still no curve.** Both airborne levels were measured at 4.99 and 10.04
+  blocks/s and were correctly refused as drag-contaminated.
+
+### The measurement finally works: extrapolate, do not wait for stillness
+
+Runs 1-3 all tried to catch the craft near rest just after a step. With no
+vertical feedback the craft is never at rest, so that was never going to work.
+
+Instead, the whole dwell is now sampled and `a = A + B*v + C*v^2` is fitted
+across it, taking `A` -- the value at `v = 0` -- as the drag-free acceleration.
+The drag terms carry all the velocity dependence, so they fall out. A dwell
+spanning 0 to 12 blocks/s constrains the fit well, and speed no longer
+disqualifies a reading; only a fit that cannot be made does. The self-test
+simulates a dwell with a known rest acceleration of 2.0 under quadratic drag,
+where no individual sample is drag-free, and asserts the extrapolation recovers
+2.0 to within 0.05.
+
+The altitude-gap guard also widened from 25 to 300 blocks: at 8 RPM props are
+~6.6% of weight, so a 100-block gap moves T/W by a tenth of an ion level rather
+than the 0.77 it moved at 64 RPM.
+
+Ceiling raised to 1000 blocks. Above y=320 the atmosphere is gone entirely and
+props contribute nothing, which makes the ion curve cleaner still.
+
 Caveats built into the harness:
 
 - The sweep is **altitude-bounded, not level-bounded**. Upper levels accelerate

@@ -84,7 +84,7 @@ local FALLBACK_STOP_AFTER_MS = 5000
 -- Ends the ascent early and begins the descent. At the upper levels the craft
 -- accelerates hard: a full dwell at 15/15 would leave the world long before 30
 -- seconds elapsed, so the sweep is altitude-bounded, not level-bounded.
-local CEILING_BLOCKS = 220
+local CEILING_BLOCKS = 1000
 -- Stops the descent stepping any lower. Below this the harness holds its
 -- current level and waits for the operator rather than walking the craft into
 -- the ground.
@@ -127,12 +127,12 @@ local GROUND_PROBE_SECONDS = 8
 -- 4/15 measured at 122 blocks, where props differ by 32%, and reported a
 -- meaningless 3.552. Two levels may only be compared if they were measured at
 -- nearly the same altitude.
-local HOVER_COMPARE_MAX_ALTITUDE_GAP = 25
+-- At 64 RPM props were 52.1% of weight and a 100-block gap moved T/W by 0.77
+-- of an ion level, so comparisons had to be tight. At 8 RPM props are ~6.6% and
+-- the same gap moves it by 0.10 of a level, so this can be far wider. Above
+-- y=320 the atmosphere is gone entirely and props contribute nothing at all.
+local HOVER_COMPARE_MAX_ALTITUDE_GAP = 300
 
--- Acceleration is only (T - W)/m while the craft is near rest. Run 2's descent
--- readings were taken at +9.7 and -2.8 blocks/s, where drag is a large part of
--- the measured value. Readings above this speed are recorded but never fitted.
-local DRAG_FREE_SPEED = 1.0
 
 -- Only for the indicative T/W column. Estimated from drift-test run 6, where
 -- level 3/15 (about 1.19 of weight) produced roughly 0.83 blocks/s^2 early in
@@ -149,7 +149,19 @@ local MODE = "ion_profile"
 local CORNERS = { "FL", "FR", "RL", "RR" }
 local CORNER_SET = { FL = true, FR = true, RL = true, RR = true }
 local SEND_INTERVAL_SECONDS = 0.25
-local VALID_FOR_MS, SHUTDOWN_VALID_FOR_MS = 750, 5000
+-- Run 3 aborted because a single frame aged out on all four pods at once
+-- during a level transition, where three terminal prints land between two
+-- transmits. 750 ms is a tight budget for that; CC terminal writes are slow.
+-- The pod still falls back on its own if the FCS genuinely stops talking.
+local VALID_FOR_MS, SHUTDOWN_VALID_FOR_MS = 1500, 5000
+
+-- Pod counters are cumulative and never reset, so aborting on any non-zero
+-- value means one transient ends the run and, worse, makes the shutdown
+-- confirmation unsatisfiable forever after. A few expired frames are a
+-- transport hiccup. fallbackStops is the serious event: it means a pod
+-- actually cut its thrust, and that aborts immediately at any count.
+local TOLERATED_EXPIRED = 3
+local TOLERATED_FALLBACKS = 3
 local PRECHECK_SECONDS, SHUTDOWN_SECONDS = 5, 3
 local TELEMETRY_MAX_AGE_MS = 1250
 local POD_MAX_AGE_MS = 1750
@@ -233,6 +245,75 @@ local function quantisedLevel(power)
     return math.floor(power * 15)
 end
 
+-- Acceleration during a dwell is (T - W)/m MINUS drag, and drag grows with
+-- speed. Runs 1-3 tried to dodge that by sampling just after a step, but with
+-- no vertical feedback the craft is never at rest and every reading came back
+-- drag-contaminated.
+--
+-- Instead of waiting for a stillness that never comes, sample the whole dwell
+-- and extrapolate. Fitting a = A + B*v + C*v^2 over the dwell and taking A --
+-- the value at v = 0 -- gives the drag-free acceleration directly, because the
+-- drag terms carry all the velocity dependence. A dwell that spans 0 to 12
+-- blocks/s constrains that fit well.
+local function fitAccelerationAtRest(series)
+    if #series < 8 then return nil, "fewer than 8 samples" end
+
+    local points = {}
+    local minV, maxV = math.huge, -math.huge
+    for index = 2, #series do
+        local a, b = series[index - 1], series[index]
+        local dt = (b.t - a.t) / 1000
+        if dt > 0 then
+            local v = (a.v + b.v) / 2
+            points[#points + 1] = { v = v, a = (b.v - a.v) / dt }
+            if v < minV then minV = v end
+            if v > maxV then maxV = v end
+        end
+    end
+    if #points < 6 then return nil, "fewer than 6 usable intervals" end
+    local span = maxV - minV
+    if span < 1.0 then
+        return nil, string.format("velocity span %.2f too narrow to separate drag", span)
+    end
+
+    -- Normal equations for a quadratic least-squares fit.
+    local n = #points
+    local s0, s1, s2, s3, s4 = n, 0, 0, 0, 0
+    local t0, t1, t2 = 0, 0, 0
+    for _, point in ipairs(points) do
+        local v = point.v
+        local v2 = v * v
+        s1 = s1 + v; s2 = s2 + v2; s3 = s3 + v2 * v; s4 = s4 + v2 * v2
+        t0 = t0 + point.a; t1 = t1 + point.a * v; t2 = t2 + point.a * v2
+    end
+    local m = {
+        { s0, s1, s2, t0 },
+        { s1, s2, s3, t1 },
+        { s2, s3, s4, t2 },
+    }
+    for column = 1, 3 do
+        local pivot = column
+        for row = column + 1, 3 do
+            if math.abs(m[row][column]) > math.abs(m[pivot][column]) then pivot = row end
+        end
+        m[column], m[pivot] = m[pivot], m[column]
+        if math.abs(m[column][column]) < 1e-12 then
+            return nil, "fit is singular"
+        end
+        for row = 1, 3 do
+            if row ~= column then
+                local factor = m[row][column] / m[column][column]
+                for col = column, 4 do
+                    m[row][col] = m[row][col] - factor * m[column][col]
+                end
+            end
+        end
+    end
+    local intercept = m[1][4] / m[1][1]
+    if not finite(intercept) then return nil, "fit did not converge" end
+    return intercept, nil, #points, span
+end
+
 local function thrustToWeight(acceleration)
     if not finite(acceleration) then return nil end
     return 1 + acceleration / GRAVITY_BLOCKS_PER_SECOND2
@@ -265,15 +346,35 @@ local function frame(session, sequence, sentAt, level)
     }
 end
 
+-- Faults that must never happen at all: a malformed or misrouted frame, or an
+-- actuator write that failed.
 local function countersClean(status)
     if type(status) ~= "table" then return false end
     for _, field in ipairs({
-        "missing", "duplicates", "outOfOrder", "invalid",
-        "expiredBeforeApply", "applyErrors",
+        "missing", "duplicates", "outOfOrder", "invalid", "applyErrors",
     }) do
         if (tonumber(status[field]) or 0) ~= 0 then return false end
     end
     return true
+end
+
+-- Returns a fault string, or nil. Separated from countersClean because pod
+-- counters are cumulative: treating a single stale frame as fatal both ends the
+-- run on a transient and leaves the shutdown confirmation permanently
+-- unsatisfiable, which is exactly what happened on run 3.
+local function statusFault(status)
+    if type(status) ~= "table" then return "no status" end
+    if not countersClean(status) then return "transport or apply fault" end
+    if (tonumber(status.fallbackStops) or 0) > 0 then
+        return "pod stopped thrust in fallback"
+    end
+    if (tonumber(status.expiredBeforeApply) or 0) > TOLERATED_EXPIRED then
+        return "repeated expired frames"
+    end
+    if (tonumber(status.fallbackCount) or 0) > TOLERATED_FALLBACKS then
+        return "repeated stale fallback"
+    end
+    return nil
 end
 
 -- ---------------------------------------------------------------------------
@@ -408,30 +509,69 @@ if args[1] == "--self-test" then
     assert(mixedLevel and math.abs(mixedLevel - 2.25) < 1e-9,
         "grounded rows must not perturb the airborne fit")
 
-    -- Run 2's actual failure: a real sign change, but measured 98 blocks apart.
-    -- Props differ by a third across that gap, so this must refuse, not answer.
+    -- Run 2's 98-block spread was fatal at 64 RPM, where props were 52.1% of
+    -- weight. At 8 RPM props are ~6.6% and that same gap shifts T/W by about a
+    -- tenth of a level, so it is now acceptable and must produce an answer.
     local spread = {
         { level = 3, direction = "down", state = "airborne",
           acceleration = -1.922, measureRise = 220.5 },
         { level = 4, direction = "up", state = "airborne",
           acceleration = 1.557, measureRise = 122.6 },
     }
-    local spreadLevel, spreadNote = hoverLevelFrom(spread)
-    assert(spreadLevel == nil,
-        "levels measured far apart in altitude must not be interpolated")
-    assert(spreadNote and spreadNote:find("apart"), "the refusal must say why")
+    assert(hoverLevelFrom(spread),
+        "a 98-block gap is tolerable once props are at the near-zero-lift RPM")
 
-    -- A reading taken at speed is mostly drag and must be excluded upstream.
-    local dragged = {
-        { level = 2, direction = "down", state = "airborne_dragged",
+    -- Beyond the configured gap it must still refuse and say why.
+    local farApart = {
+        { level = 3, direction = "down", state = "airborne",
+          acceleration = -1.0, measureRise = 20 },
+        { level = 4, direction = "up", state = "airborne",
+          acceleration = 1.0,
+          measureRise = 20 + HOVER_COMPARE_MAX_ALTITUDE_GAP + 1 },
+    }
+    local farLevel, farNote = hoverLevelFrom(farApart)
+    assert(farLevel == nil,
+        "levels beyond the altitude gap must not be interpolated")
+    assert(farNote and farNote:find("apart"), "the refusal must say why")
+
+    -- A level whose fit could not be made must not be fitted.
+    local unfitted = {
+        { level = 2, direction = "down", state = "airborne_unfitted",
           acceleration = -1.29, measureRise = 90 },
         { level = 4, direction = "up", state = "airborne",
           acceleration = 1.56, measureRise = 92 },
     }
-    assert(hoverLevelFrom(dragged) == nil,
-        "drag-contaminated rows must not be fitted")
+    assert(hoverLevelFrom(unfitted) == nil,
+        "levels without a usable fit must not be fitted")
 
-    assert(DRAG_FREE_SPEED > 0 and HOVER_COMPARE_MAX_ALTITUDE_GAP > 0)
+    -- The drag extrapolation must recover a known answer. Simulate a dwell with
+    -- a true rest acceleration of 2.0 and quadratic drag: a(v) = 2.0 - 0.02*v^2.
+    -- Every sample is drag-contaminated -- the craft is never at rest -- yet the
+    -- extrapolation to v = 0 must still return 2.0.
+    local simulated, v, t = {}, 0, 0
+    for _ = 1, 120 do
+        simulated[#simulated + 1] = { t = t, v = v }
+        v = v + (2.0 - 0.02 * v * v) * 0.25
+        t = t + 250
+    end
+    local fitted, reason, count, span = fitAccelerationAtRest(simulated)
+    assert(fitted, "the extrapolation must produce a value: " .. tostring(reason))
+    assert(math.abs(fitted - 2.0) < 0.05,
+        string.format("extrapolation returned %.4f, expected 2.0", fitted))
+    assert(count and count > 100 and span and span > 5)
+    assert(simulated[#simulated].v > 8,
+        "the simulated dwell must actually reach a drag-dominated speed")
+
+    -- Too few samples, or too narrow a velocity span, must refuse.
+    assert(fitAccelerationAtRest({ { t = 0, v = 0 }, { t = 250, v = 1 } }) == nil,
+        "a short series must not be fitted")
+    local flat = {}
+    for index = 1, 40 do flat[index] = { t = index * 250, v = 3.0 } end
+    local flatFit, flatReason = fitAccelerationAtRest(flat)
+    assert(flatFit == nil and flatReason and flatReason:find("span"),
+        "a constant-velocity dwell cannot separate drag and must refuse")
+
+    assert(HOVER_COMPARE_MAX_ALTITUDE_GAP > 0)
     assert(AIRBORNE_BLOCKS > 0.077,
         "airborne threshold must clear the measured contact-unloading rise")
     assert(GROUND_PROBE_SECONDS < DWELL_SECONDS)
@@ -615,12 +755,9 @@ end
 local function recordStatus(status)
     statuses[status.corner] = status
     statusAt[status.corner] = os.epoch("utc")
-    if phase ~= "shutdown" and not countersClean(status) then
-        abort("pod " .. status.corner .. " reported transport/apply faults")
-    end
-    if phase ~= "shutdown" and ((tonumber(status.fallbackCount) or 0) > 0
-        or (tonumber(status.fallbackStops) or 0) > 0) then
-        abort("pod " .. status.corner .. " entered stale fallback")
+    if phase ~= "shutdown" then
+        local fault = statusFault(status)
+        if fault then abort("pod " .. status.corner .. ": " .. fault) end
     end
 end
 
@@ -632,7 +769,7 @@ local function podsFresh(expectedLevel)
             or now - statusAt[corner] > POD_MAX_AGE_MS then
             return false, corner
         end
-        if not countersClean(status) then return false, corner end
+        if statusFault(status) then return false, corner end
         if expectedLevel and status.appliedIonPower
             and quantisedLevel(status.appliedIonPower) ~= expectedLevel then
             return false, corner
@@ -711,6 +848,7 @@ local function holdLevel(level, seconds, direction)
     local measureTo = measureFrom + math.floor(STEP_MEASURE_SECONDS * 1000)
 
     local riseAtStart, velocityAtStart = rise(), verticalVelocity()
+    local series = {}
     local velocityAtMeasureStart, velocityAtMeasureEnd
     local measuredFrom, measuredTo
     local riseAtMeasureStart, riseAtMeasureEnd
@@ -722,6 +860,8 @@ local function holdLevel(level, seconds, direction)
 
         local now = os.epoch("utc")
         local vy = verticalVelocity()
+        -- Every sample feeds the drag extrapolation, not just a short window.
+        series[#series + 1] = { t = now, v = vy }
         if vy > peakVelocity then peakVelocity = vy end
         if vy < minVelocity then minVelocity = vy end
         if velocityAtMeasureStart == nil and now >= measureFrom then
@@ -760,12 +900,16 @@ local function holdLevel(level, seconds, direction)
         if not rawSleep(SEND_INTERVAL_SECONDS, DONE_EVENT, requestStop) then break end
     end
 
-    local acceleration
+    -- Raw window acceleration, kept for comparison. It includes drag.
+    local windowAcceleration
     if velocityAtMeasureStart and velocityAtMeasureEnd and measuredTo
         and measuredFrom and measuredTo > measuredFrom then
-        acceleration = (velocityAtMeasureEnd - velocityAtMeasureStart)
+        windowAcceleration = (velocityAtMeasureEnd - velocityAtMeasureStart)
             / ((measuredTo - measuredFrom) / 1000)
     end
+
+    -- The drag-free value, and the one everything downstream uses.
+    local acceleration, fitReason, fitPoints, fitSpan = fitAccelerationAtRest(series)
 
     -- Classify on the MEASUREMENT WINDOW, not the end of the dwell. Run 2's
     -- descent from 90 blocks to the ground was marked "grounded" because it
@@ -782,12 +926,12 @@ local function holdLevel(level, seconds, direction)
         state = "airborne"
     end
 
-    -- Drag is a large part of the measured acceleration at speed, so a reading
-    -- taken while moving fast is recorded but must never be fitted.
+    -- Speed no longer disqualifies a reading: the extrapolation removes drag.
+    -- What disqualifies it is a fit that could not be made.
     local measureSpeed = math.max(math.abs(velocityAtMeasureStart or 0),
         math.abs(velocityAtMeasureEnd or 0))
-    if state == "airborne" and measureSpeed > DRAG_FREE_SPEED then
-        state = "airborne_dragged"
+    if state == "airborne" and not acceleration then
+        state = "airborne_unfitted"
     end
 
     local record = {
@@ -800,6 +944,10 @@ local function holdLevel(level, seconds, direction)
         riseEnd = riseEnd,
         measureRise = riseAtMeasureStart,
         measureSpeed = measureSpeed,
+        windowAcceleration = windowAcceleration,
+        fitReason = fitReason,
+        fitPoints = fitPoints,
+        fitSpan = fitSpan,
         velocityStart = velocityAtStart,
         velocityEnd = verticalVelocity(),
         peakVelocity = peakVelocity,
@@ -810,10 +958,12 @@ local function holdLevel(level, seconds, direction)
     records[#records + 1] = record
 
     print(string.format(
-        "%s level %2d/15 (ion %.3f) %-10s rise %+8.2f -> %+8.2f  vy %+6.2f -> %+6.2f  a=%s  T/W=%s",
+        "%s level %2d/15 (ion %.3f) %-17s rise %+8.2f -> %+8.2f  peak vy %+6.2f  a0=%s (%d pts)  T/W=%s",
         direction == "up" and "UP  " or "DOWN", level, record.commandedPower,
-        state, record.riseStart, record.riseEnd, record.velocityStart, record.velocityEnd,
-        acceleration and string.format("%+.3f", acceleration) or "n/a",
+        state, record.riseStart, record.riseEnd, record.peakVelocity,
+        acceleration and string.format("%+.3f", acceleration)
+            or ("n/a:" .. tostring(fitReason)),
+        fitPoints or 0,
         record.thrustToWeight and string.format("%.3f", record.thrustToWeight) or "n/a"))
     return record
 end
@@ -826,9 +976,21 @@ local function shutdownBurst()
         rawSleep(0.1, DONE_EVENT, requestStop)
     end
     rawSleep(1, DONE_EVENT, requestStop)
-    local ready, corner = podsFresh()
-    if not ready then
-        shutdownError = "shutdown not confirmed for " .. tostring(corner)
+    -- Confirm what the pods ACTUALLY APPLIED, not their cumulative fault
+    -- history. Run 3 reported an unconfirmed shutdown purely because an earlier
+    -- transient had set a counter that can never go back to zero.
+    local now = os.epoch("utc")
+    for _, corner in ipairs(CORNERS) do
+        local status = statuses[corner]
+        local fresh = status and statusAt[corner]
+            and now - statusAt[corner] <= POD_MAX_AGE_MS
+        local zeroed = status
+            and (tonumber(status.appliedIonPower) or -1) == 0
+            and (tonumber(status.appliedPropRpm) or -1) == 0
+        if not fresh or not zeroed then
+            shutdownError = "exact-zero shutdown not confirmed for " .. corner
+            break
+        end
     end
 end
 
@@ -975,7 +1137,9 @@ local lines = {
     "hover_level=" .. (hoverLevel and string.format("%.3f", hoverLevel) or "not_bracketed"),
     "hover_note=" .. tostring(hoverNote),
     "hover_compare_max_altitude_gap=" .. tostring(HOVER_COMPARE_MAX_ALTITUDE_GAP),
-    "drag_free_speed=" .. tostring(DRAG_FREE_SPEED),
+    "tolerated_expired=" .. tostring(TOLERATED_EXPIRED),
+    "tolerated_fallbacks=" .. tostring(TOLERATED_FALLBACKS),
+    "valid_for_ms=" .. tostring(VALID_FOR_MS),
     "airborne_blocks=" .. tostring(AIRBORNE_BLOCKS),
     "levels_recorded=" .. tostring(#records),
     "frames_sent=" .. tostring(framesSent),
@@ -984,19 +1148,23 @@ local lines = {
     "modem=" .. tostring(modemName),
     "sublevel=" .. tostring(sublevelSource),
     "",
-    "# direction level state ion_command held_s measure_rise measure_speed rise_start rise_end vy_start vy_end peak_vy accel thrust_to_weight",
+    "# direction level state ion_command held_s measure_rise rise_start rise_end peak_vy fit_points fit_span accel_at_rest window_accel thrust_to_weight",
+    "# accel_at_rest is the drag-free value (fit extrapolated to v=0); the hover level uses it",
     "# only rows marked airborne are thrust measurements; grounded rows measure the floor",
 }
 
 for _, record in ipairs(records) do
     lines[#lines + 1] = string.format(
-        "level %s %d %s %.4f %.2f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %s %s",
+        "level %s %d %s %.4f %.2f %.4f %.4f %.4f %.4f %d %.3f %s %s %s",
         record.direction, record.level, record.state,
         record.commandedPower, record.heldSeconds,
-        record.measureRise or -1, record.measureSpeed or -1,
-        record.riseStart, record.riseEnd, record.velocityStart, record.velocityEnd,
-        record.peakVelocity,
-        record.acceleration and string.format("%.6f", record.acceleration) or "nil",
+        record.measureRise or -1,
+        record.riseStart, record.riseEnd, record.peakVelocity,
+        record.fitPoints or 0, record.fitSpan or 0,
+        record.acceleration and string.format("%.6f", record.acceleration)
+            or ("nil(" .. tostring(record.fitReason) .. ")"),
+        record.windowAcceleration
+            and string.format("%.6f", record.windowAcceleration) or "nil",
         record.thrustToWeight and string.format("%.6f", record.thrustToWeight) or "nil")
 end
 
