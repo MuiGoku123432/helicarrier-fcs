@@ -30,9 +30,11 @@ communications path.
 
 Copy the repository file
 `pod-template/pod/ion_cluster_survey.lua` to
-`/pod/ion_cluster_survey.lua` on the pod being characterized. The script loads `pod.config` and uses that pod's configured `manifestPath`
-(`/pod/thruster_manifest.lua` in the current configuration); it never replaces
-that manifest.
+`/pod/ion_cluster_survey.lua` on the pod being characterized. The script loads its sibling `/pod/config.lua` directly and uses that pod's
+configured `manifestPath` (`/pod/thruster_manifest.lua` in the current
+configuration); it never replaces that manifest. Direct sibling loading avoids
+ComputerCraft resolving `pod.config` as `/pod/pod/config.lua` when the program
+itself is launched from `/pod`.
 
 No operational pod file is modified by running `inventory` or `validate`.
 The first inventory run creates `/pod/ion-layout.lua` only when that file does

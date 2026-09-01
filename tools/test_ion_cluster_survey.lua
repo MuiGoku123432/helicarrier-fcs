@@ -18,6 +18,24 @@ local function assertEqual(actual, expected, message)
     end
 end
 
+local fakePathApi = {
+    getDir = function(path)
+        return string.match(path, "^(.*)/[^/]+$") or ""
+    end,
+    combine = function(directory, name)
+        if directory == "" or directory == "/" then
+            return "/" .. name
+        end
+        return directory .. "/" .. name
+    end,
+}
+assertEqual(survey.siblingConfigPath(
+    "/pod/ion_cluster_survey.lua", fakePathApi),
+    "/pod/config.lua", "absolute /pod launch resolves sibling config")
+assertEqual(survey.siblingConfigPath(
+    "pod/ion_cluster_survey.lua", fakePathApi),
+    "/pod/config.lua", "relative /pod launch resolves sibling config")
+
 assertEqual(survey.configuredManifestPath(function()
     return { manifestPath = "/pod/thruster_manifest.lua" }
 end), "/pod/thruster_manifest.lua", "survey uses pod config manifest path")

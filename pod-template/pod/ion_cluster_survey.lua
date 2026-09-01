@@ -1,7 +1,7 @@
 local survey = {}
 
 local EXPECTED_THRUSTERS = 32
-local CONFIG_MODULE = "pod.config"
+local CONFIG_FILENAME = "config.lua"
 local DEFAULT_LAYOUT = "/pod/ion-layout.lua"
 local REPORT_PREFIX = "/pod/ion-cluster-survey"
 local ZERO_EPSILON = 1e-6
@@ -783,17 +783,45 @@ local function usage()
     print("  --layout /pod/ion-layout.lua")
 end
 
-function survey.configuredManifestPath(loader)
-    local configLoader = loader or function()
-        return require(CONFIG_MODULE)
+function survey.siblingConfigPath(runningProgram, pathApi)
+    local api = pathApi or fs
+    if type(runningProgram) ~= "string" or runningProgram == "" then
+        error("running program path is unavailable", 0)
     end
+    if type(api) ~= "table" or type(api.getDir) ~= "function"
+            or type(api.combine) ~= "function" then
+        error("filesystem path API is unavailable", 0)
+    end
+    local absoluteProgram = runningProgram
+    if string.sub(absoluteProgram, 1, 1) ~= "/" then
+        absoluteProgram = "/" .. absoluteProgram
+    end
+    return api.combine(api.getDir(absoluteProgram), CONFIG_FILENAME)
+end
+
+local function loadSiblingConfig()
+    if type(shell) ~= "table" or type(shell.getRunningProgram) ~= "function" then
+        error("shell.getRunningProgram is unavailable", 0)
+    end
+    local configPath = survey.siblingConfigPath(shell.getRunningProgram(), fs)
+    if not fs.exists(configPath) and fs.exists("/pod/config.lua") then
+        configPath = "/pod/config.lua"
+    end
+    if not fs.exists(configPath) then
+        error("sibling pod config is missing: " .. configPath, 0)
+    end
+    return dofile(configPath)
+end
+
+function survey.configuredManifestPath(loader)
+    local configLoader = loader or loadSiblingConfig
     local ok, config = pcall(configLoader)
     if not ok then
-        error("cannot load " .. CONFIG_MODULE .. ": " .. tostring(config), 0)
+        error("cannot load sibling pod config: " .. tostring(config), 0)
     end
     if type(config) ~= "table" or type(config.manifestPath) ~= "string"
             or config.manifestPath == "" then
-        error(CONFIG_MODULE .. ".manifestPath is missing or invalid", 0)
+        error("pod config manifestPath is missing or invalid", 0)
     end
     return config.manifestPath
 end
